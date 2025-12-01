@@ -1,6 +1,10 @@
 # modal_agent.py
 #
-# SAM3 microservice on Modal.
+# SAM3 Agent Microservice on Modal - LLM Provider Agnostic
+#
+# This microservice provides SAM3 agent functionality with complete LLM provider
+# flexibility. All LLM configuration is passed in API requests - no hardcoded
+# providers or required LLM secrets.
 #
 # HTTP API (after `modal deploy modal_agent.py`):
 #
@@ -9,8 +13,14 @@
 #   {
 #     "prompt": "segment all ships",
 #     "image_url": "https://example.com/image.jpg",   # or "image_b64": "..."
-#     "debug": true,
-#     "llm_profile": "openai-gpt4o"                  # optional, default
+#     "llm_config": {                                 # Required: complete LLM config
+#       "base_url": "https://api.openai.com/v1",      # Any OpenAI-compatible API
+#       "model": "gpt-4o",                            # Any model name
+#       "api_key": "sk-...",                          # API key (can be empty for some backends)
+#       "name": "openai-gpt4o",                       # Optional: for output files
+#       "max_tokens": 4096                            # Optional: default 4096
+#     },
+#     "debug": true                                   # Optional: get visualization
 #   }
 #
 #   Response (JSON):
@@ -20,8 +30,14 @@
 #     "regions": [...],
 #     "debug_image_b64": "...",      # only if debug=true
 #     "raw_sam3_json": {...},
-#     "llm_profile": "openai-gpt4o"
+#     "llm_config": {...}
 #   }
+#
+# Supports any OpenAI-compatible LLM provider:
+#   - OpenAI (GPT-4o, GPT-4, etc.)
+#   - Anthropic (Claude)
+#   - vLLM servers
+#   - Custom OpenAI-compatible APIs
 
 import os
 import sys
@@ -80,63 +96,43 @@ image = (
 )
 
 # ------------------------------------------------------------------------------
-# LLM profiles: define which LLM backends SAM3 can talk to.
-# You can add/remove profiles here as needed.
+# LLM configuration helpers
 # ------------------------------------------------------------------------------
 
-LLM_PROFILES: Dict[str, Dict[str, str]] = {
-    "openai-gpt4o": {
-        "provider": "openai-compatible",
-        "base_url": "https://api.openai.com/v1",
-        "model": "gpt-4o",
-        "api_key_env": "OPENAI_API_KEY",
-    },
-    # vLLM server profile - point to your vLLM server
-    # Example: vllm serve Qwen/Qwen3-VL-8B-Thinking --port 8001
-    "vllm-local": {
-        "provider": "openai-compatible",
-        "base_url": "http://localhost:8001/v1",  # Update with your vLLM server URL
-        "model": "Qwen/Qwen3-VL-8B-Thinking",  # Update with your model name
-        "api_key_env": None,  # vLLM typically doesn't require API key for local
-    },
-    # vLLM on Modal - if you deploy vLLM as a separate Modal app
-    "vllm-modal": {
-        "provider": "openai-compatible",
-        "base_url": "https://your-vllm-app.modal.run/v1",  # Your Modal vLLM endpoint
-        "model": "Qwen/Qwen3-VL-8B-Thinking",  # Your model name
-        "api_key_env": None,  # Or set if your Modal vLLM requires auth
-    },
-    # Example profile for your own OpenAI-compatible LLM (e.g. vLLM on Modal)
-    "modal-myllm-example": {
-        "provider": "openai-compatible",
-        "base_url": "https://your-modal-llm-url.modal.run/v1",
-        "model": "my-llm-13b",
-        "api_key_env": "MODAL_LLM_API_KEY",
-    },
-}
-
-
-def get_llm_config(profile_name: str) -> Dict[str, str]:
-    """Resolve an LLM profile name to a concrete config with base_url, model, api_key."""
-    if profile_name not in LLM_PROFILES:
-        raise ValueError(f"Unknown llm_profile={profile_name}")
-
-    conf = LLM_PROFILES[profile_name]
-    api_key_env = conf.get("api_key_env")
-    api_key = os.environ.get(api_key_env, "") if api_key_env else ""
-
-    if api_key_env and not api_key:
-        raise ValueError(
-            f"LLM profile '{profile_name}' requires env var {api_key_env}, but it's not set. "
-            f"Please create a Modal secret: modal secret create {conf.get('api_key_env', '').lower().replace('_', '-')} {api_key_env}=<your-key>"
-        )
-
-    return {
-        "provider": conf["provider"],
-        "base_url": conf["base_url"],
-        "model": conf["model"],
-        "api_key": api_key,
+def validate_llm_config(llm_config: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Validate and normalize LLM config from request.
+    
+    Required fields:
+    - base_url: API endpoint URL
+    - model: Model name/identifier
+    - api_key: API key (can be empty for some backends)
+    
+    Optional fields:
+    - name: Name for output files (defaults to model name)
+    - provider: Provider type (defaults to "openai-compatible")
+    - max_tokens: Maximum tokens (defaults to 4096)
+    """
+    if not isinstance(llm_config, dict):
+        raise ValueError("llm_config must be a dictionary")
+    
+    # Required fields
+    if "base_url" not in llm_config:
+        raise ValueError("llm_config must include 'base_url'")
+    if "model" not in llm_config:
+        raise ValueError("llm_config must include 'model'")
+    
+    # Set defaults
+    normalized = {
+        "base_url": str(llm_config["base_url"]),
+        "model": str(llm_config["model"]),
+        "api_key": str(llm_config.get("api_key", "")),
+        "name": llm_config.get("name", llm_config["model"]),  # Default to model name
+        "provider": llm_config.get("provider", "openai-compatible"),
+        "max_tokens": int(llm_config.get("max_tokens", 4096)),
     }
+    
+    return normalized
 
 
 # ------------------------------------------------------------------------------
@@ -147,13 +143,12 @@ def get_llm_config(profile_name: str) -> Dict[str, str]:
     gpu="A100",
     timeout=600,
     image=image,
-    # Required secrets:
-    #   - "huggingface-secret" containing key HF_TOKEN (required - SAM3 is a gated repo)
-    #   - "openai-api-key" containing key OPENAI_API_KEY (optional - required for openai-gpt4o profile)
-    # To add secrets: modal secret create <name> <KEY>=<value>
+    # Optional secrets - only needed if SAM3 model is gated on HuggingFace:
+    #   - "hf-token" containing key HF_TOKEN (optional - only if model requires authentication)
+    # To add secret: modal secret create hf-token HF_TOKEN=<your-token>
+    # Note: LLM configuration is passed in API requests, no LLM secrets needed
     secrets=[
-        modal.Secret.from_name("huggingface-secret"),  # Required - SAM3 is a gated repo
-        # modal.Secret.from_name("openai-api-key"),  # Optional - required for openai-gpt4o profile
+        # modal.Secret.from_name("hf-token"),  # Optional - uncomment only if SAM3 model is gated
     ],
 )
 class SAM3Model:
@@ -167,17 +162,18 @@ class SAM3Model:
         if "/root/sam3" not in sys.path:
             sys.path.append("/root/sam3")
 
-        # HF_TOKEN is required for gated repo access
+        # HF_TOKEN is optional - only needed if SAM3 model is gated
         hf_token = os.environ.get("HF_TOKEN")
-        if not hf_token:
-            raise ValueError(
-                "HF_TOKEN environment variable is required but not set. "
-                "Please ensure the 'huggingface-secret' Modal secret is configured with HF_TOKEN=<your-token>"
-            )
-        
-        # Login to HuggingFace with the token
-        login(token=hf_token)
-        print("✓ Authenticated with HuggingFace")
+        if hf_token:
+            try:
+                login(token=hf_token)
+                print("✓ Authenticated with HuggingFace")
+            except Exception as e:
+                print(f"⚠ Warning: Failed to login to HuggingFace: {e}")
+                print("   Continuing without authentication - model may fail to load if gated")
+        else:
+            print("⚠ No HF_TOKEN found - attempting model load without authentication")
+            print("   If model is gated, create secret: modal secret create hf-token HF_TOKEN=<your-token>")
 
         print("Loading SAM3 model...")
         bpe_path = "/root/sam3/assets/bpe_simple_vocab_16e6.txt.gz"
@@ -241,15 +237,28 @@ class SAM3Model:
         self,
         image_bytes: bytes,
         prompt: str,
-        llm_profile: str = "openai-gpt4o",
+        llm_config: Dict[str, Any],
         debug: bool = False,
     ) -> Dict[str, Any]:
         """
-        Core GPU inference method.
-        - image_bytes: raw bytes of the input image
-        - prompt: natural language query
-        - llm_profile: which backend LLM to use (see LLM_PROFILES)
-        - debug: whether to return a visualization image (base64)
+        Core GPU inference method - LLM provider agnostic.
+        
+        This method accepts any LLM configuration and uses it to call the LLM API.
+        No hardcoded provider assumptions - works with any OpenAI-compatible API.
+        
+        Args:
+            image_bytes: raw bytes of the input image
+            prompt: natural language query for segmentation
+            llm_config: Complete LLM configuration dict (provider-agnostic):
+                - base_url: API endpoint URL (required) - any OpenAI-compatible endpoint
+                - model: Model name/identifier (required) - any model name
+                - api_key: API key (required, can be empty string for backends without auth)
+                - name: Name for output files (optional, defaults to model name)
+                - max_tokens: Maximum tokens (optional, defaults to 4096)
+            debug: whether to return a visualization image (base64)
+        
+        Returns:
+            Dict with status, regions, summary, and optional debug visualization
         """
         try:
             from sam3.agent.inference import run_single_image_inference
@@ -265,17 +274,18 @@ class SAM3Model:
                 "message": f"Failed to import SAM3 agent modules: {e}",
             }
 
-        # Resolve which LLM backend to use
+        # Validate and normalize LLM config
         try:
-            llm_config = get_llm_config(llm_profile)
+            llm_config = validate_llm_config(llm_config)
         except Exception as e:
-            return {"status": "error", "message": str(e)}
+            return {"status": "error", "message": f"Invalid llm_config: {str(e)}"}
 
         send_generate_request = partial(
             send_generate_request_orig,
             server_url=llm_config["base_url"],
             model=llm_config["model"],
             api_key=llm_config["api_key"],
+            max_tokens=llm_config.get("max_tokens", 4096),
         )
 
         call_sam_service = partial(
@@ -339,7 +349,11 @@ class SAM3Model:
                     "regions": regions,
                     "debug_image_b64": debug_image_b64,
                     "raw_sam3_json": raw_json,
-                    "llm_profile": llm_profile,
+                    "llm_config": {
+                        "name": llm_config["name"],
+                        "model": llm_config["model"],
+                        "base_url": llm_config["base_url"],
+                    },
                 }
 
             except Exception as e:
@@ -349,7 +363,10 @@ class SAM3Model:
                     "status": "error",
                     "message": str(e),
                     "traceback": traceback.format_exc(),
-                    "llm_profile": llm_profile,
+                    "llm_config": {
+                        "name": llm_config.get("name", "unknown"),
+                        "model": llm_config.get("model", "unknown"),
+                    },
                 }
 
 
@@ -451,24 +468,70 @@ def sam3_infer(body: Dict[str, Any]) -> Dict[str, Any]:
 @fastapi_endpoint(method="POST")
 def sam3_segment(body: Dict[str, Any]) -> Dict[str, Any]:
     """
-    HTTP endpoint:
+    HTTP endpoint for SAM3 Agent - LLM Provider Agnostic
+    
+    This endpoint accepts any LLM configuration via the request body.
+    No hardcoded providers - works with any OpenAI-compatible API.
 
     POST /sam3/segment
     JSON body:
     {
-      "prompt": "...",
-      "image_url": "https://...",   # or "image_b64": "..."
-      "debug": true,
-      "llm_profile": "openai-gpt4o"
+      "prompt": "...",                    # Required: text prompt for segmentation
+      "image_url": "https://...",         # OR "image_b64": "..." (one required)
+      "llm_config": {                     # Required: complete LLM configuration (provider-agnostic)
+        "base_url": "https://api.openai.com/v1",  # Any OpenAI-compatible endpoint
+        "model": "gpt-4o",                 # Any model name
+        "api_key": "sk-...",              # API key (can be empty for some backends)
+        "name": "openai-gpt4o",           # Optional: for output files
+        "max_tokens": 4096                 # Optional: default 4096
+      },
+      "debug": true                       # Optional: get visualization
+    }
+    
+    Example with OpenAI:
+    {
+      "prompt": "segment all objects",
+      "image_b64": "...",
+      "llm_config": {
+        "base_url": "https://api.openai.com/v1",
+        "model": "gpt-4o",
+        "api_key": "sk-your-key-here"
+      }
+    }
+    
+    Example with vLLM:
+    {
+      "prompt": "segment all objects",
+      "image_b64": "...",
+      "llm_config": {
+        "base_url": "http://localhost:8001/v1",
+        "model": "Qwen/Qwen3-VL-8B-Thinking",
+        "api_key": "",
+        "name": "vllm-local"
+      }
+    }
+    
+    Example with Anthropic (if OpenAI-compatible):
+    {
+      "prompt": "segment all objects",
+      "image_b64": "...",
+      "llm_config": {
+        "base_url": "https://api.anthropic.com/v1",
+        "model": "claude-3-opus",
+        "api_key": "sk-ant-..."
+      }
     }
     """
     # Basic validation
     if "prompt" not in body:
         return {"status": "error", "message": "Missing 'prompt' in request body."}
 
+    if "llm_config" not in body:
+        return {"status": "error", "message": "Missing 'llm_config' in request body. Provide complete LLM configuration with 'base_url', 'model', and 'api_key'."}
+
     prompt = body["prompt"]
     debug = bool(body.get("debug", False))
-    llm_profile = body.get("llm_profile", "openai-gpt4o")
+    llm_config = body["llm_config"]
 
     # Get image bytes from either image_b64 or image_url
     if "image_b64" in body:
@@ -499,7 +562,7 @@ def sam3_segment(body: Dict[str, Any]) -> Dict[str, Any]:
     result = model.infer.remote(
         image_bytes=image_bytes,
         prompt=prompt,
-        llm_profile=llm_profile,
+        llm_config=llm_config,
         debug=debug,
     )
     return result
@@ -526,11 +589,17 @@ def local_test():
     image_bytes = buf.getvalue()
 
     prompt = "find the red region"
+    llm_config = {
+        "base_url": "https://api.openai.com/v1",
+        "model": "gpt-4o",
+        "api_key": os.environ.get("OPENAI_API_KEY", ""),
+        "name": "openai-gpt4o",
+    }
     model = SAM3Model()
     result = model.infer.remote(
         image_bytes=image_bytes,
         prompt=prompt,
-        llm_profile="openai-gpt4o",
+        llm_config=llm_config,
         debug=True,
     )
 
