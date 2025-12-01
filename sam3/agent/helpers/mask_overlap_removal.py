@@ -49,13 +49,21 @@ def _decode_single_mask(mask_repr, h: int, w: int) -> np.ndarray:
             "pycocotools is required to decode RLE mask strings. pip install pycocotools"
         )
 
-    if not isinstance(mask_repr, (str, bytes)):
-        raise ValueError("Unsupported mask representation type for RLE decode.")
-
-    rle = {
-        "counts": mask_repr if isinstance(mask_repr, (str, bytes)) else str(mask_repr),
-        "size": [h, w],
-    }
+    # Handle new format: dict with counts and size
+    if isinstance(mask_repr, dict) and "counts" in mask_repr and "size" in mask_repr:
+        rle = {
+            "counts": mask_repr["counts"],
+            "size": mask_repr["size"],
+        }
+    # Handle old format: string counts (use provided h, w)
+    elif isinstance(mask_repr, (str, bytes)):
+        rle = {
+            "counts": mask_repr if isinstance(mask_repr, (str, bytes)) else str(mask_repr),
+            "size": [h, w],
+        }
+    else:
+        raise ValueError(f"Unsupported mask representation type: {type(mask_repr)}")
+    
     decoded = mask_utils.decode(rle)
     if decoded.ndim == 3:
         decoded = decoded[:, :, 0]
@@ -85,8 +93,14 @@ def remove_overlapping_masks(sample: Dict, iom_thresh: float = 0.3) -> Dict:
         return sample
 
     # From here on we have at least 2 masks
+    # Get image dimensions - prefer from first mask if new format, else from orig_img_h/w
     h = int(sample["orig_img_h"])
     w = int(sample["orig_img_w"])
+    # If using new format, get size from first mask (all masks should have same size)
+    if pred_masks and isinstance(pred_masks[0], dict) and "size" in pred_masks[0]:
+        mask_size = pred_masks[0]["size"]
+        h, w = int(mask_size[0]), int(mask_size[1])
+    
     pred_scores = sample.get("pred_scores", [1.0] * N)  # fallback if scores missing
     pred_boxes = sample.get("pred_boxes", None)
 

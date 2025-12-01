@@ -36,7 +36,12 @@ def sam3_inference(processor, image_path, text_prompt):
     )  # normalized in range [0, 1]
     pred_boxes_xywh = box_xyxy_to_xywh(pred_boxes_xyxy).tolist()
     pred_masks = rle_encode(inference_state["masks"].squeeze(1))
-    pred_masks = [m["counts"] for m in pred_masks]
+    # Preserve full RLE structure (counts + size) instead of extracting only counts
+    # This ensures the JSON is self-contained and the mask structure is preserved
+    pred_masks = [
+        {"counts": m["counts"], "size": m["size"]} 
+        for m in pred_masks
+    ]
     outputs = {
         "orig_img_h": orig_img_h,
         "orig_img_w": orig_img_w,
@@ -114,7 +119,9 @@ def call_sam_service(
         valid_boxes = []
         valid_scores = []
         for i, rle in enumerate(serialized_response["pred_masks"]):
-            if len(rle) > 4:
+            # Handle both old format (string) and new format (dict with counts/size)
+            rle_counts = rle if isinstance(rle, str) else rle.get("counts", "")
+            if len(rle_counts) > 4:
                 valid_masks.append(rle)
                 valid_boxes.append(serialized_response["pred_boxes"][i])
                 valid_scores.append(serialized_response["pred_scores"][i])

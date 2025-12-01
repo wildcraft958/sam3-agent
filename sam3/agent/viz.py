@@ -39,10 +39,15 @@ def visualize(
     # ---------- Mode A: Full-scene render ----------
     if zoom_in_index is None:
         boxes = np.array(input_json["pred_boxes"])
-        rle_masks = [
-            {"size": (orig_h, orig_w), "counts": rle}
-            for rle in input_json["pred_masks"]
-        ]
+        # Handle both old format (string) and new format (dict with counts/size)
+        rle_masks = []
+        for rle in input_json["pred_masks"]:
+            if isinstance(rle, dict) and "counts" in rle and "size" in rle:
+                # New format: full RLE dict already has counts and size
+                rle_masks.append({"size": tuple(rle["size"]), "counts": rle["counts"]})
+            else:
+                # Old format: string counts, reconstruct size from orig_img_h/w
+                rle_masks.append({"size": (orig_h, orig_w), "counts": rle})
         binary_masks = [mask_utils.decode(rle) for rle in rle_masks]
 
         img_bgr = cv2.imread(img_path)
@@ -74,12 +79,23 @@ def visualize(
             raise ValueError(f"zoom_in_index {idx} is out of range (0..{num_masks-1}).")
 
         # (1) Replicate zoom_in_and_visualize
+        # Handle both old format (string) and new format (dict with counts/size)
+        mask_data = input_json["pred_masks"][idx]
+        if isinstance(mask_data, dict) and "counts" in mask_data and "size" in mask_data:
+            # New format: full RLE dict
+            segmentation = {
+                "counts": mask_data["counts"],
+                "size": mask_data["size"],
+            }
+        else:
+            # Old format: string counts, reconstruct size
+            segmentation = {
+                "counts": mask_data,
+                "size": [orig_h, orig_w],
+            }
         object_data = {
             "labels": [{"noun_phrase": f"mask_{idx}"}],
-            "segmentation": {
-                "counts": input_json["pred_masks"][idx],
-                "size": [orig_h, orig_w],
-            },
+            "segmentation": segmentation,
         }
         pil_img = Image.open(img_path)
         pil_mask_i_zoomed, color_hex = render_zoom_in(
@@ -88,7 +104,14 @@ def visualize(
 
         # (2) Single-instance render with the same color
         boxes_i = np.array([input_json["pred_boxes"][idx]])
-        rle_i = {"size": (orig_h, orig_w), "counts": input_json["pred_masks"][idx]}
+        # Handle both old format (string) and new format (dict with counts/size)
+        mask_data = input_json["pred_masks"][idx]
+        if isinstance(mask_data, dict) and "counts" in mask_data and "size" in mask_data:
+            # New format: full RLE dict
+            rle_i = {"size": tuple(mask_data["size"]), "counts": mask_data["counts"]}
+        else:
+            # Old format: string counts, reconstruct size
+            rle_i = {"size": (orig_h, orig_w), "counts": mask_data}
         bin_i = mask_utils.decode(rle_i)
 
         img_bgr_i = cv2.imread(img_path)

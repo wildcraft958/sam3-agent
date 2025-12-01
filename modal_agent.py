@@ -219,7 +219,12 @@ class SAM3Model:
         )  # normalized in range [0, 1]
         pred_boxes_xywh = box_xyxy_to_xywh(pred_boxes_xyxy).tolist()
         pred_masks = rle_encode(inference_state["masks"].squeeze(1))
-        pred_masks = [m["counts"] for m in pred_masks]
+        # Preserve full RLE structure (counts + size) instead of extracting only counts
+        # This ensures the JSON is self-contained and the mask structure is preserved
+        pred_masks = [
+            {"counts": m["counts"], "size": m["size"]} 
+            for m in pred_masks
+        ]
         
         outputs = {
             "status": "success",
