@@ -68,17 +68,27 @@ def call_sam_service(
         text_prompt.replace("/", "_") if "/" in text_prompt else text_prompt
     )
 
+    # Use a simpler path construction that works with temp directories
+    # Extract just the filename without path for directory name
+    image_basename = os.path.basename(image_path)
+    image_basename_no_ext = os.path.splitext(image_basename)[0]
+    
+    # Create a safe directory name
+    safe_dir_name = image_basename_no_ext.replace("/", "_").replace("\\", "_")
+    if not safe_dir_name or safe_dir_name.startswith("-"):
+        safe_dir_name = "image_" + safe_dir_name if safe_dir_name else "image"
+    
     os.makedirs(
-        os.path.join(output_folder_path, image_path.replace("/", "-")), exist_ok=True
+        os.path.join(output_folder_path, safe_dir_name), exist_ok=True
     )
     output_json_path = os.path.join(
         output_folder_path,
-        image_path.replace("/", "-"),
+        safe_dir_name,
         rf"{text_prompt_for_save_path}.json",
     )
     output_image_path = os.path.join(
         output_folder_path,
-        image_path.replace("/", "-"),
+        safe_dir_name,
         rf"{text_prompt_for_save_path}.png",
     )
 

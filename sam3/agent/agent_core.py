@@ -255,9 +255,15 @@ def agent_inference(
                     text_prompt=current_text_prompt,
                     output_folder_path=sam_output_dir,
                 )
+                # Check if file exists before reading
+                if not os.path.exists(PATH_TO_LATEST_OUTPUT_JSON):
+                    raise FileNotFoundError(
+                        f"SAM3 output file not found: {PATH_TO_LATEST_OUTPUT_JSON}. "
+                        f"This may be due to a path construction issue with temporary directories."
+                    )
                 sam3_outputs = json.load(open(PATH_TO_LATEST_OUTPUT_JSON, "r"))
-                sam3_output_image_path = sam3_outputs["output_image_path"]
-                num_masks = len(sam3_outputs["pred_boxes"])
+                sam3_output_image_path = sam3_outputs.get("output_image_path", "")
+                num_masks = len(sam3_outputs.get("pred_boxes", []))
 
                 messages.append(
                     {
@@ -310,8 +316,12 @@ def agent_inference(
             }
             messages.append(simplified_message)
 
+            if not os.path.exists(PATH_TO_LATEST_OUTPUT_JSON):
+                raise FileNotFoundError(
+                    f"SAM3 output file not found: {PATH_TO_LATEST_OUTPUT_JSON}"
+                )
             current_outputs = json.load(open(PATH_TO_LATEST_OUTPUT_JSON, "r"))
-            num_masks = len(current_outputs["pred_masks"])
+            num_masks = len(current_outputs.get("pred_masks", []))
             masks_to_keep = []
 
             # MLLM check the mask one by one
@@ -451,6 +461,10 @@ def agent_inference(
 
         elif tool_call["name"] == "select_masks_and_return":
             print("🔍 Calling select_masks_and_return tool...")
+            if not os.path.exists(PATH_TO_LATEST_OUTPUT_JSON):
+                raise FileNotFoundError(
+                    f"SAM3 output file not found: {PATH_TO_LATEST_OUTPUT_JSON}"
+                )
             current_outputs = json.load(open(PATH_TO_LATEST_OUTPUT_JSON, "r"))
 
             assert list(tool_call["parameters"].keys()) == ["final_answer_masks"]

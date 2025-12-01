@@ -184,8 +184,9 @@ class SAM3Model:
         print("Loading SAM3 model...")
         bpe_path = "/root/sam3/assets/bpe_simple_vocab_16e6.txt.gz"
         self.model = build_sam3_image_model(bpe_path=bpe_path)
-        self.processor = Sam3Processor(self.model, confidence_threshold=0.5)
-        print("SAM3 model loaded successfully.")
+        # Use lower confidence threshold (0.25) to get more results, can be adjusted per request
+        self.processor = Sam3Processor(self.model, confidence_threshold=0.25)
+        print(f"SAM3 model loaded successfully with confidence threshold: {self.processor.confidence_threshold}")
 
     @modal.method()
     def sam3_infer_only(
@@ -203,15 +204,53 @@ class SAM3Model:
         from sam3.model.box_ops import box_xyxy_to_xywh
         from sam3.train.masks_ops import rle_encode
         
-        # Load image from bytes
+        # Load image from bytes and convert to RGB if needed
         image = Image.open(io.BytesIO(image_bytes))
+        # Convert RGBA/LA/P to RGB (SAM3 expects RGB)
+        if image.mode in ('RGBA', 'LA', 'P'):
+            # Create white background for transparency
+            rgb_image = Image.new('RGB', image.size, (255, 255, 255))
+            if image.mode == 'P':
+                image = image.convert('RGBA')
+            rgb_image.paste(image, mask=image.split()[-1] if image.mode in ('RGBA', 'LA') else None)
+            image = rgb_image
+        elif image.mode != 'RGB':
+            image = image.convert('RGB')
+        
         orig_img_w, orig_img_h = image.size
+        print(f"✓ Image loaded: {orig_img_w}x{orig_img_h}, mode: {image.mode}")
         
         # Run SAM3 inference
         inference_state = self.processor.set_image(image)
         inference_state = self.processor.set_text_prompt(
             state=inference_state, prompt=text_prompt
         )
+        
+        # Check if we have any predictions
+        num_boxes = inference_state["boxes"].shape[0] if len(inference_state["boxes"].shape) > 0 else 0
+        num_masks = inference_state["masks"].shape[0] if len(inference_state["masks"].shape) > 0 else 0
+        num_scores = len(inference_state["scores"]) if inference_state["scores"] is not None else 0
+        
+        print(f"✓ Inference complete: {num_boxes} boxes, {num_masks} masks, {num_scores} scores")
+        print(f"  Confidence threshold: {self.processor.confidence_threshold}")
+        if num_scores > 0:
+            print(f"  Score range: {inference_state['scores'].min().item():.3f} - {inference_state['scores'].max().item():.3f}")
+        
+        # Handle empty results
+        if num_boxes == 0 or num_masks == 0:
+            print("⚠ Warning: No predictions found. This could be due to:")
+            print("  1. Confidence threshold too high (current: {})".format(self.processor.confidence_threshold))
+            print("  2. Text prompt not matching any objects in image")
+            print("  3. Image quality or format issues")
+            return {
+                "status": "success",
+                "orig_img_h": orig_img_h,
+                "orig_img_w": orig_img_w,
+                "pred_boxes": [],
+                "pred_masks": [],
+                "pred_scores": [],
+                "warning": "No objects detected. Try lowering confidence threshold or using a different prompt.",
+            }
         
         # Format and assemble outputs (same as sam3_inference function)
         pred_boxes_xyxy = torch.stack(
@@ -224,23 +263,68 @@ class SAM3Model:
             dim=-1,
         )  # normalized in range [0, 1]
         pred_boxes_xywh = box_xyxy_to_xywh(pred_boxes_xyxy).tolist()
-        pred_masks = rle_encode(inference_state["masks"].squeeze(1))
-        # Preserve full RLE structure (counts + size) instead of extracting only counts
-        # This ensures the JSON is self-contained and the mask structure is preserved
-        pred_masks = [
-            {"counts": m["counts"], "size": m["size"]} 
-            for m in pred_masks
-        ]
         
+        # Handle mask encoding - check if masks are empty
+        if inference_state["masks"].numel() == 0:
+            pred_masks = []
+        else:
+            pred_masks = rle_encode(inference_state["masks"].squeeze(1))
+            # Preserve full RLE structure (counts + size) instead of extracting only counts
+            # This ensures the JSON is self-contained and the mask structure is preserved
+            pred_masks = [
+                {"counts": m["counts"], "size": m["size"]} 
+                for m in pred_masks
+            ]
+        
+        # Create initial outputs (same format as sam3_inference)
         outputs = {
-            "status": "success",
             "orig_img_h": orig_img_h,
             "orig_img_w": orig_img_w,
             "pred_boxes": pred_boxes_xywh,
             "pred_masks": pred_masks,
-            "pred_scores": inference_state["scores"].tolist(),
+            "pred_scores": inference_state["scores"].tolist() if inference_state["scores"] is not None else [],
         }
         
+        # Apply post-processing: remove overlapping masks (same as working sam3_inference path)
+        try:
+            from sam3.agent.helpers.mask_overlap_removal import remove_overlapping_masks
+            outputs = remove_overlapping_masks(outputs)
+            print(f"✓ Applied mask overlap removal")
+        except Exception as e:
+            print(f"⚠ Warning: Could not apply mask overlap removal: {e}")
+        
+        # Reorder by scores (highest to lowest) - same as working path
+        if outputs["pred_scores"] and len(outputs["pred_scores"]) > 0:
+            score_indices = sorted(
+                range(len(outputs["pred_scores"])),
+                key=lambda i: outputs["pred_scores"][i],
+                reverse=True,
+            )
+            outputs["pred_scores"] = [outputs["pred_scores"][i] for i in score_indices]
+            outputs["pred_boxes"] = [outputs["pred_boxes"][i] for i in score_indices]
+            outputs["pred_masks"] = [outputs["pred_masks"][i] for i in score_indices]
+            print(f"✓ Reordered predictions by score")
+        
+        # Filter invalid masks (too short RLE) - same as working path
+        valid_masks = []
+        valid_boxes = []
+        valid_scores = []
+        for i, rle in enumerate(outputs["pred_masks"]):
+            # Handle both old format (string) and new format (dict with counts/size)
+            rle_counts = rle if isinstance(rle, str) else rle.get("counts", "")
+            if len(str(rle_counts)) > 4:  # Valid mask should have more than 4 characters
+                valid_masks.append(rle)
+                valid_boxes.append(outputs["pred_boxes"][i])
+                valid_scores.append(outputs["pred_scores"][i])
+        
+        outputs["pred_masks"] = valid_masks
+        outputs["pred_boxes"] = valid_boxes
+        outputs["pred_scores"] = valid_scores
+        
+        # Add status field
+        outputs["status"] = "success"
+        
+        print(f"✓ Returning {len(outputs['pred_boxes'])} valid predictions (after filtering)")
         return outputs
 
     @modal.method()
@@ -313,42 +397,63 @@ class SAM3Model:
             os.makedirs(output_dir, exist_ok=True)
 
             try:
-                output_image_path = run_single_image_inference(
+                # Call agent_inference directly to get data from return values
+                from sam3.agent.agent_core import agent_inference
+                
+                agent_history, final_output_dict, rendered_final_output = agent_inference(
                     image_path,
                     prompt,
-                    llm_config,
-                    send_generate_request,
-                    call_sam_service,
+                    send_generate_request=send_generate_request,
+                    call_sam_service=call_sam_service,
                     debug=debug,
                     output_dir=output_dir,
                 )
 
-                if not output_image_path or not os.path.exists(output_image_path):
+                if not final_output_dict:
                     return {
                         "status": "error",
-                        "message": "No output image generated by SAM3.",
+                        "message": "No output generated by SAM3.",
                     }
 
-                # Debug visualization image
+                # Debug visualization image - convert PIL Image to base64
                 debug_image_b64 = None
-                if debug:
-                    with open(output_image_path, "rb") as f:
-                        debug_image_b64 = base64.b64encode(f.read()).decode("ascii")
+                if debug and rendered_final_output:
+                    import io
+                    buffer = io.BytesIO()
+                    rendered_final_output.save(buffer, format="PNG")
+                    debug_image_b64 = base64.b64encode(buffer.getvalue()).decode("ascii")
 
-                # SAM3 JSON output (whatever the agent produced)
-                json_path = output_image_path.replace(".png", ".json")
-                raw_json: Dict[str, Any] = {}
-                if os.path.exists(json_path):
-                    with open(json_path, "r") as f:
-                        raw_json = json.load(f)
+                # Extract data from final_output_dict (which contains the SAM3 results)
+                # The final_output_dict should have pred_boxes, pred_masks, pred_scores, etc.
+                raw_json = final_output_dict.copy()
+                
+                # Remove file paths that aren't needed in response
+                raw_json.pop("original_image_path", None)
+                raw_json.pop("output_image_path", None)
+                raw_json.pop("text_prompt", None)
+                raw_json.pop("image_path", None)
 
-                # Try to normalize "regions" field if present, otherwise just pass raw
+                # Try to normalize "regions" field if present, otherwise construct from pred_boxes/pred_masks
                 regions = (
                     raw_json.get("regions")
                     or raw_json.get("objects")
                     or raw_json.get("instances")
                     or []
                 )
+                
+                # If no regions found, construct from pred_boxes and pred_masks
+                if not regions and "pred_boxes" in raw_json and "pred_masks" in raw_json:
+                    pred_boxes = raw_json.get("pred_boxes", [])
+                    pred_masks = raw_json.get("pred_masks", [])
+                    pred_scores = raw_json.get("pred_scores", [])
+                    regions = [
+                        {
+                            "bbox": box,
+                            "mask": mask,
+                            "score": pred_scores[i] if i < len(pred_scores) else None,
+                        }
+                        for i, (box, mask) in enumerate(zip(pred_boxes, pred_masks))
+                    ]
 
                 summary = (
                     f"SAM3 returned {len(regions)} regions for prompt: {prompt}"
@@ -360,6 +465,7 @@ class SAM3Model:
                     "regions": regions,
                     "debug_image_b64": debug_image_b64,
                     "raw_sam3_json": raw_json,
+                    "agent_history": agent_history,  # Include agent history for debugging
                     "llm_config": {
                         "name": llm_config["name"],
                         "model": llm_config["model"],
@@ -420,14 +526,17 @@ def sam3_infer(body: Dict[str, Any]) -> Dict[str, Any]:
     if "image_b64" in body:
         try:
             image_bytes = base64.b64decode(body["image_b64"])
-        except Exception:
-            return {"status": "error", "message": "Invalid base64 in 'image_b64'."}
+            print(f"✓ Decoded image from base64 ({len(image_bytes)} bytes)")
+        except Exception as e:
+            return {"status": "error", "message": f"Invalid base64 in 'image_b64': {e}."}
     elif "image_url" in body:
         import requests
         try:
-            resp = requests.get(body["image_url"])
+            print(f"📥 Downloading image from URL: {body['image_url']}")
+            resp = requests.get(body["image_url"], timeout=30)
             resp.raise_for_status()
             image_bytes = resp.content
+            print(f"✓ Downloaded image ({len(image_bytes)} bytes)")
         except Exception as e:
             return {
                 "status": "error",
@@ -442,31 +551,24 @@ def sam3_infer(body: Dict[str, Any]) -> Dict[str, Any]:
     # Call the GPU-backed model for SAM3 inference only
     model_instance = SAM3Model()
     try:
-        from PIL import Image
-        import io
-        import torch
-        from sam3.model.box_ops import box_xyxy_to_xywh
-        from sam3.train.masks_ops import rle_encode
-        
-        # Load image from bytes
-        image = Image.open(io.BytesIO(image_bytes))
-        orig_img_w, orig_img_h = image.size
-        
-        # Get processor from the model instance (access via remote method)
-        # We need to create a method to get the processor, or call a remote method
-        # For now, let's create a helper method on SAM3Model
+        print(f"📞 Calling sam3_infer_only with prompt: '{text_prompt}'")
         result = model_instance.sam3_infer_only.remote(
             image_bytes=image_bytes,
             text_prompt=text_prompt,
         )
+        print(f"✓ sam3_infer_only returned {len(result.get('pred_boxes', []))} predictions")
         return result
         
     except Exception as e:
         import traceback
+        error_msg = str(e)
+        traceback_str = traceback.format_exc()
+        print(f"❌ Error in sam3_infer: {error_msg}")
+        print(traceback_str)
         return {
             "status": "error",
-            "message": str(e),
-            "traceback": traceback.format_exc(),
+            "message": error_msg,
+            "traceback": traceback_str,
         }
 
 

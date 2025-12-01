@@ -73,18 +73,34 @@ export interface InferResponse {
 }
 
 export async function segmentImage(
-  request: SegmentRequest
+  request: SegmentRequest,
+  signal?: AbortSignal
 ): Promise<SegmentResponse> {
   try {
     const response = await axios.post<SegmentResponse>(API_ENDPOINT, request, {
       headers: {
         'Content-Type': 'application/json',
       },
-      timeout: 300000, // 5 minutes timeout
+      timeout: 600000, // 10 minutes timeout (matches Modal backend timeout)
+      signal, // Add abort signal support
     });
     return response.data;
   } catch (error) {
     if (axios.isAxiosError(error)) {
+      // Handle cancellation
+      if (error.code === 'ERR_CANCELED' || error.message === 'canceled') {
+        return {
+          status: 'error',
+          message: 'Request was cancelled by user',
+        };
+      }
+      // Handle timeout specifically
+      if (error.code === 'ECONNABORTED' || error.message.includes('timeout')) {
+        return {
+          status: 'error',
+          message: 'Request timed out. The backend is still processing. Please check Modal logs or try again.',
+        };
+      }
       return {
         status: 'error',
         message: error.response?.data?.message || error.message || 'Network error',
@@ -98,18 +114,34 @@ export async function segmentImage(
 }
 
 export async function inferImage(
-  request: InferRequest
+  request: InferRequest,
+  signal?: AbortSignal
 ): Promise<InferResponse> {
   try {
     const response = await axios.post<InferResponse>(INFER_ENDPOINT, request, {
       headers: {
         'Content-Type': 'application/json',
       },
-      timeout: 300000, // 5 minutes timeout
+      timeout: 600000, // 10 minutes timeout (matches Modal backend timeout)
+      signal, // Add abort signal support
     });
     return response.data;
   } catch (error) {
     if (axios.isAxiosError(error)) {
+      // Handle cancellation
+      if (error.code === 'ERR_CANCELED' || error.message === 'canceled') {
+        return {
+          status: 'error',
+          message: 'Request was cancelled by user',
+        };
+      }
+      // Handle timeout specifically
+      if (error.code === 'ECONNABORTED' || error.message.includes('timeout')) {
+        return {
+          status: 'error',
+          message: 'Request timed out. The backend is still processing. Please check Modal logs or try again.',
+        };
+      }
       return {
         status: 'error',
         message: error.response?.data?.message || error.message || 'Network error',

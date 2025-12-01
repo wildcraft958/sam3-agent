@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import ImageUpload from './components/ImageUpload';
 import LLMConfigForm from './components/LLMConfigForm';
 import ImageVisualization from './components/ImageVisualization';
@@ -21,6 +21,7 @@ function App() {
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [useInfer, setUseInfer] = useState<boolean>(false);
+  const abortControllerRef = useRef<AbortController | null>(null);
 
   const handleImageSelect = (base64: string, file: File) => {
     setImageBase64(base64);
@@ -35,6 +36,28 @@ function App() {
     setLlmConfig(config);
   };
 
+  const handleStop = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+      setLoading(false);
+      setError('Request cancelled by user');
+      setResponse({
+        status: 'error',
+        message: 'Request was cancelled by user',
+      });
+    }
+  };
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+      }
+    };
+  }, []);
+
   const handleSegment = async () => {
     if (!imageBase64) {
       setError('Please upload an image first');
@@ -46,6 +69,15 @@ function App() {
       return;
     }
 
+    // Cancel any existing request
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+
+    // Create new AbortController for this request
+    abortControllerRef.current = new AbortController();
+    const signal = abortControllerRef.current.signal;
+
     setLoading(true);
     setError(null);
     setResponse(null);
@@ -56,7 +88,12 @@ function App() {
         const inferResponse = await inferImage({
           text_prompt: prompt,
           image_b64: imageBase64,
-        });
+        }, signal);
+
+        // Check if request was cancelled
+        if (signal.aborted) {
+          return;
+        }
 
         // Convert infer response to segment response format for compatibility
         if (inferResponse.status === 'success' && inferResponse.orig_img_h && inferResponse.orig_img_w) {
@@ -90,10 +127,20 @@ function App() {
           image_b64: imageBase64,
           llm_config: llmConfig,
           debug: true,
-        });
+        }, signal);
+
+        // Check if request was cancelled
+        if (signal.aborted) {
+          return;
+        }
+
         setResponse(segmentResponse);
       }
     } catch (err) {
+      // Don't set error if request was cancelled
+      if (signal.aborted) {
+        return;
+      }
       const errorMessage = err instanceof Error ? err.message : 'Unknown error occurred';
       setError(errorMessage);
       setResponse({
@@ -101,7 +148,11 @@ function App() {
         message: errorMessage,
       });
     } finally {
-      setLoading(false);
+      // Only reset loading if not cancelled
+      if (!signal.aborted) {
+        setLoading(false);
+        abortControllerRef.current = null;
+      }
     }
   };
 
@@ -158,13 +209,23 @@ function App() {
           )}
 
           <div className="panel-section">
-            <button
-              className="segment-button"
-              onClick={handleSegment}
-              disabled={loading || !imageBase64}
-            >
-              {loading ? 'Processing...' : 'Run Segmentation'}
-            </button>
+            <div className="button-group">
+              <button
+                className="segment-button"
+                onClick={handleSegment}
+                disabled={loading || !imageBase64}
+              >
+                {loading ? 'Processing...' : 'Run Segmentation'}
+              </button>
+              {loading && (
+                <button
+                  className="stop-button"
+                  onClick={handleStop}
+                >
+                  Stop
+                </button>
+              )}
+            </div>
           </div>
 
           {error && (

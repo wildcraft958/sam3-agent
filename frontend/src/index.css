@@ -252,8 +252,14 @@ body {
   margin-left: 1.5rem;
 }
 
-.segment-button {
+.button-group {
+  display: flex;
+  gap: 0.75rem;
   width: 100%;
+}
+
+.segment-button {
+  flex: 1;
   padding: 0.75rem 1.5rem;
   background: var(--primary-color);
   color: white;
@@ -272,6 +278,27 @@ body {
 .segment-button:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+.stop-button {
+  padding: 0.75rem 1.5rem;
+  background: #dc2626;
+  color: white;
+  border: none;
+  border-radius: 0.375rem;
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.2s;
+  white-space: nowrap;
+}
+
+.stop-button:hover {
+  background: #b91c1c;
+}
+
+.stop-button:active {
+  background: #991b1b;
 }
 
 .error-message {
