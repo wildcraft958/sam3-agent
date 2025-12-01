@@ -94,15 +94,6 @@ def main():
     with open(image_path, "rb") as f:
         image_b64 = base64.b64encode(f.read()).decode("utf-8")
     
-    # Prepare request
-    print(f"\n🚀 Sending request to: {args.endpoint_url}")
-    print(f"📝 Prompt: {args.prompt}")
-    print(f"🤖 LLM Config:")
-    print(f"   - Base URL: {llm_config['base_url']}")
-    print(f"   - Model: {llm_config['model']}")
-    print(f"   - API Key: {'*' * 10 if llm_config['api_key'] else '(not set)'}")
-    print(f"🐛 Debug: {args.debug}\n")
-    
     # Build LLM config - allow full customization via arguments
     if args.llm_profile == "openai-gpt4o":
         llm_config = {
@@ -130,6 +121,15 @@ def main():
     # Validate required fields
     if not llm_config["api_key"] and args.llm_profile == "openai-gpt4o":
         print("⚠ Warning: No API key provided. Set OPENAI_API_KEY env var or use --api-key")
+    
+    # Prepare request
+    print(f"\n🚀 Sending request to: {args.endpoint_url}")
+    print(f"📝 Prompt: {args.prompt}")
+    print(f"🤖 LLM Config:")
+    print(f"   - Base URL: {llm_config['base_url']}")
+    print(f"   - Model: {llm_config['model']}")
+    print(f"   - API Key: {'*' * 10 if llm_config['api_key'] else '(not set)'}")
+    print(f"🐛 Debug: {args.debug}\n")
     
     payload = {
         "prompt": args.prompt,

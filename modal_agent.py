@@ -143,12 +143,12 @@ def validate_llm_config(llm_config: Dict[str, Any]) -> Dict[str, Any]:
     gpu="A100",
     timeout=600,
     image=image,
-    # Optional secrets - only needed if SAM3 model is gated on HuggingFace:
-    #   - "hf-token" containing key HF_TOKEN (optional - only if model requires authentication)
+    # Required secrets - SAM3 is a gated repository on HuggingFace:
+    #   - "hf-token" containing key HF_TOKEN (REQUIRED - SAM3 model is gated)
     # To add secret: modal secret create hf-token HF_TOKEN=<your-token>
     # Note: LLM configuration is passed in API requests, no LLM secrets needed
     secrets=[
-        # modal.Secret.from_name("hf-token"),  # Optional - uncomment only if SAM3 model is gated
+        modal.Secret.from_name("huggingface-secret"),  # REQUIRED - SAM3 is a gated repo
     ],
 )
 class SAM3Model:
@@ -162,18 +162,24 @@ class SAM3Model:
         if "/root/sam3" not in sys.path:
             sys.path.append("/root/sam3")
 
-        # HF_TOKEN is optional - only needed if SAM3 model is gated
+        # HF_TOKEN is REQUIRED - SAM3 is a gated repository
         hf_token = os.environ.get("HF_TOKEN")
-        if hf_token:
-            try:
-                login(token=hf_token)
-                print("✓ Authenticated with HuggingFace")
-            except Exception as e:
-                print(f"⚠ Warning: Failed to login to HuggingFace: {e}")
-                print("   Continuing without authentication - model may fail to load if gated")
-        else:
-            print("⚠ No HF_TOKEN found - attempting model load without authentication")
-            print("   If model is gated, create secret: modal secret create hf-token HF_TOKEN=<your-token>")
+        if not hf_token:
+            raise ValueError(
+                "HF_TOKEN environment variable is required but not set. "
+                "SAM3 is a gated repository on HuggingFace. "
+                "Please create the Modal secret: modal secret create hf-token HF_TOKEN=<your-token>"
+            )
+        
+        # Authenticate with HuggingFace before attempting to load model
+        try:
+            login(token=hf_token)
+            print("✓ Authenticated with HuggingFace")
+        except Exception as e:
+            raise ValueError(
+                f"Failed to authenticate with HuggingFace: {e}. "
+                "Please verify your HF_TOKEN is valid and has access to facebook/sam3 repository."
+            ) from e
 
         print("Loading SAM3 model...")
         bpe_path = "/root/sam3/assets/bpe_simple_vocab_16e6.txt.gz"
