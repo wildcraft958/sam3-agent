@@ -196,6 +196,12 @@ def agent_inference(
     print("\n\n")
     print("-" * 30 + f" Round {str(generation_count + 1)}" + "-" * 30)
     print("\n\n")
+    # Check before first call
+    if generation_count >= max_generations:
+        raise ValueError(
+            f"Exceeded maximum number of allowed generation requests ({max_generations})"
+        )
+    generation_count += 1
     generated_text = send_generate_request(messages)
     print(f"\n>>> MLLM Response [start]\n{generated_text}\n<<< MLLM Response [end]\n")
     while generated_text is not None:
@@ -362,6 +368,12 @@ def agent_inference(
                         ],
                     },
                 ]
+                # Count iterative checking as an LLM call
+                generation_count += 1
+                if generation_count > max_generations:
+                    raise ValueError(
+                        f"Exceeded maximum number of allowed generation requests ({max_generations})"
+                    )
                 checking_generated_text = send_generate_request(
                     iterative_checking_messages
                 )

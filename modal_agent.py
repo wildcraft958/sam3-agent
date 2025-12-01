@@ -407,6 +407,7 @@ class SAM3Model:
                     call_sam_service=call_sam_service,
                     debug=debug,
                     output_dir=output_dir,
+                    max_generations=4,  # Limit LLM API calls to 4
                 )
 
                 if not final_output_dict:
