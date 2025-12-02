@@ -105,24 +105,34 @@ def send_generate_request(
 
     try:
         print(f"🔍 Calling model {model}...")
+        print(f"   Server URL: {server_url}")
+        print(f"   Messages: {len(processed_messages)} messages")
+        
         response = client.chat.completions.create(
             model=model,
             messages=processed_messages,
-            max_completion_tokens=max_tokens,
+            max_tokens=max_tokens,
             n=1,
         )
         # print(f"Received response: {response.choices[0].message}")
 
         # Extract the response content
         if response.choices and len(response.choices) > 0:
-            return response.choices[0].message.content
+            content = response.choices[0].message.content
+            if content is None:
+                print(f"⚠️ Warning: Response content is None")
+                print(f"   Full response: {response}")
+            return content
         else:
-            print(f"Unexpected response format: {response}")
+            print(f"❌ Unexpected response format: {response}")
             return None
 
     except Exception as e:
-        print(f"Request failed: {e}")
-        return None
+        import traceback
+        print(f"❌ Request failed: {e}")
+        print(f"   Traceback: {traceback.format_exc()}")
+        # Re-raise to see the actual error in logs
+        raise
 
 
 def send_direct_request(
