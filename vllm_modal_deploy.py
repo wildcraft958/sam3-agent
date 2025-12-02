@@ -25,7 +25,9 @@
 #     }
 #   }
 
+import json
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -276,6 +278,64 @@ def vllm_server():
             ]
         }
     
+    def parse_tool_calls_from_text(text: str):
+        """
+        Parse Hermes-style tool calls from generated text.
+        
+        Note: Since we're using a custom FastAPI endpoint (not vLLM's built-in OpenAI server),
+        we need to manually parse tool calls from the generated text. vLLM's automatic tool call
+        parsing is only available when using `vllm serve` with `--enable-auto-tool-choice --tool-call-parser hermes`.
+        
+        Qwen3 models generate tool calls in Hermes format, which we parse here to return
+        OpenAI-compatible tool_calls in the response.
+        """
+        import re
+        tool_calls = []
+        
+        # Try to find tool calls in various formats that Qwen3 might generate
+        # Format 1: <tool_call>{"name": "...", "arguments": "..."}</tool_call> (Hermes format)
+        pattern1 = r'<tool_call>\s*(\{.*?\})\s*</tool_call>'
+        matches1 = re.findall(pattern1, text, re.DOTALL)
+        
+        # Format 2: <tool>{"name": "...", "parameters": {...}}</tool> (legacy format)
+        pattern2 = r'<tool>\s*(\{.*?\})\s*</tool>'
+        matches2 = re.findall(pattern2, text, re.DOTALL)
+        
+        # Format 3: {"name": "...", "arguments": "..."} (standalone JSON, no tags)
+        pattern3 = r'\{\s*"name"\s*:\s*"[^"]+"\s*,\s*"(?:arguments|parameters)"\s*:\s*"[^"]*"\s*\}'
+        matches3 = re.findall(pattern3, text, re.DOTALL)
+        
+        all_matches = matches1 + matches2 + matches3
+        
+        for i, match in enumerate(all_matches):
+            try:
+                # Clean up the match
+                match = match.strip()
+                # Try to parse as JSON
+                tool_call_dict = json.loads(match)
+                
+                # Extract name and arguments/parameters
+                name = tool_call_dict.get("name")
+                arguments = tool_call_dict.get("arguments") or tool_call_dict.get("parameters", {})
+                
+                # If arguments is a dict, convert to JSON string
+                if isinstance(arguments, dict):
+                    arguments = json.dumps(arguments)
+                
+                if name:
+                    tool_calls.append({
+                        "id": f"call_{i}_{hash(match) % 10000}",
+                        "type": "function",
+                        "function": {
+                            "name": name,
+                            "arguments": arguments if isinstance(arguments, str) else json.dumps(arguments)
+                        }
+                    })
+            except json.JSONDecodeError:
+                continue
+        
+        return tool_calls
+    
     @app.post("/v1/chat/completions")
     async def chat_completions(request: fastapi.Request):
         try:
@@ -284,8 +344,11 @@ def vllm_server():
             model = req.get("model", MODEL_ID)
             max_tokens = req.get("max_tokens", req.get("max_completion_tokens", 512))  # Support both
             temperature = req.get("temperature", 0.7)
+            tools = req.get("tools", None)  # Extract tools parameter
             
             print(f"📥 Received request: model={model}, max_tokens={max_tokens}, messages={len(messages)}")
+            if tools:
+                print(f"   Tools: {len(tools)} tool(s) provided")
             
             # Extract messages and image
             processed_messages, image = await extract_messages_and_image(messages)
@@ -294,14 +357,55 @@ def vllm_server():
                 print("⚠️ Warning: No image found in request, but this is a vision model")
             
             # Format messages using processor's chat template
+            # Qwen3's chat template should handle tools automatically if provided
+            # According to Qwen3 docs, the chat template in tokenizer_config.json includes support for Hermes-style tool use
             try:
+                # Try to pass tools to chat template (Qwen3 models support this)
+                template_kwargs = {}
+                if tools:
+                    # Qwen3's chat template supports tools parameter for function calling
+                    template_kwargs["tools"] = tools
+                    print(f"✓ Passing {len(tools)} tool(s) to chat template")
+                
                 formatted_prompt = processor.apply_chat_template(
                     processed_messages,
                     tokenize=False,
-                    add_generation_prompt=True
+                    add_generation_prompt=True,
+                    **template_kwargs
                 )
+                if tools:
+                    print(f"✓ Chat template processed tools successfully")
+            except TypeError as e:
+                # Template doesn't support tools parameter directly
+                # This might happen with older Qwen3 versions - try without tools
+                print(f"⚠️ Chat template doesn't support tools parameter: {e}")
+                print(f"   Attempting to format without tools parameter...")
+                try:
+                    formatted_prompt = processor.apply_chat_template(
+                        processed_messages,
+                        tokenize=False,
+                        add_generation_prompt=True
+                    )
+                    if tools:
+                        print(f"⚠️ Tools were provided but template doesn't support them - model may not generate tool calls correctly")
+                except Exception as e2:
+                    # Fallback: format manually
+                    print(f"⚠️ Using fallback formatting: {e2}")
+                    formatted_prompt = ""
+                    for msg in processed_messages:
+                        role = msg.get("role", "user")
+                        content = msg.get("content", "")
+                        if isinstance(content, str):
+                            formatted_prompt += f"{role}: {content}\n"
+                        elif isinstance(content, list):
+                            for item in content:
+                                if item.get("type") == "text":
+                                    formatted_prompt += f"{role}: {item.get('text', '')}\n"
+                                elif item.get("type") == "image_url":
+                                    formatted_prompt += "<image>\n"
             except Exception as e:
                 # Fallback: format manually
+                print(f"⚠️ Error in chat template, using fallback formatting: {e}")
                 formatted_prompt = ""
                 for msg in processed_messages:
                     role = msg.get("role", "user")
@@ -314,7 +418,6 @@ def vllm_server():
                                 formatted_prompt += f"{role}: {item.get('text', '')}\n"
                             elif item.get("type") == "image_url":
                                 formatted_prompt += "<image>\n"
-                print(f"⚠️ Using fallback formatting: {e}")
             
             # Create sampling params
             sampling_params = SamplingParams(
@@ -353,6 +456,25 @@ def vllm_server():
             
             print(f"✅ Generated {len(generated_text)} characters")
             
+            # Parse tool calls from generated text if tools were provided
+            tool_calls = None
+            finish_reason = "stop"
+            content = generated_text
+            
+            if tools:
+                parsed_tool_calls = parse_tool_calls_from_text(generated_text)
+                if parsed_tool_calls:
+                    tool_calls = parsed_tool_calls
+                    finish_reason = "tool_calls"
+                    # Remove tool call markers from content if present
+                    # Keep the reasoning/thinking part if any
+                    content = re.sub(r'<tool_call>.*?</tool_call>', '', generated_text, flags=re.DOTALL)
+                    content = re.sub(r'<tool>.*?</tool>', '', content, flags=re.DOTALL)
+                    content = content.strip()
+                    if not content:
+                        content = None
+                    print(f"✅ Parsed {len(tool_calls)} tool call(s) from response")
+            
             # Estimate tokens (rough approximation)
             prompt_text = ""
             for msg in processed_messages:
@@ -367,17 +489,23 @@ def vllm_server():
             prompt_tokens = len(prompt_text.split()) if prompt_text else 0
             completion_tokens = len(generated_text.split())
             
+            # Build response message
+            message = {
+                "role": "assistant",
+                "content": content,
+            }
+            
+            if tool_calls:
+                message["tool_calls"] = tool_calls
+            
             return JSONResponse({
                 "id": "chatcmpl-modal",
                 "object": "chat.completion",
                 "model": model,
                 "choices": [{
                     "index": 0,
-                    "message": {
-                        "role": "assistant",
-                        "content": generated_text,
-                    },
-                    "finish_reason": "stop",
+                    "message": message,
+                    "finish_reason": finish_reason,
                 }],
                 "usage": {
                     "prompt_tokens": prompt_tokens,

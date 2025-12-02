@@ -37,6 +37,7 @@ def send_generate_request(
     model="meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
     api_key=None,
     max_tokens=4096,
+    tools=None,
 ):
     """
     Sends a request to the OpenAI-compatible API endpoint using the OpenAI client library.
@@ -45,10 +46,13 @@ def send_generate_request(
         server_url (str): The base URL of the server, e.g. "http://127.0.0.1:8000"
         messages (list): A list of message dicts, each containing role and content.
         model (str): The model to use for generation (default: "llama-4")
+        api_key (str): API key for authentication (can be empty for some backends)
         max_tokens (int): Maximum number of tokens to generate (default: 4096)
+        tools (list, optional): List of tool definitions in OpenAI function calling format
 
     Returns:
-        str: The generated response text from the server.
+        str or dict: The generated response text from the server, or a dict with 'tool_calls' and 'content' 
+                    if tool calls are present in the response.
     """
     # Process messages to convert image paths to base64
     processed_messages = []
@@ -100,25 +104,64 @@ def send_generate_request(
             processed_message["content"] = processed_content
         processed_messages.append(processed_message)
 
+    # Normalize server URL - ensure it ends with /v1 for OpenAI-compatible APIs
+    if server_url and not server_url.endswith('/v1'):
+        if server_url.endswith('/'):
+            server_url = server_url + 'v1'
+        else:
+            server_url = server_url + '/v1'
+
     # Create OpenAI client with custom base URL
-    client = OpenAI(api_key=api_key, base_url=server_url)
+    client = OpenAI(api_key=api_key or "not-needed", base_url=server_url)
 
     try:
         print(f"🔍 Calling model {model}...")
         print(f"   Server URL: {server_url}")
         print(f"   Messages: {len(processed_messages)} messages")
+        if tools:
+            print(f"   Tools: {len(tools)} tool(s) provided")
         
-        response = client.chat.completions.create(
-            model=model,
-            messages=processed_messages,
-            max_tokens=max_tokens,
-            n=1,
-        )
-        # print(f"Received response: {response.choices[0].message}")
+        # Prepare request parameters
+        request_params = {
+            "model": model,
+            "messages": processed_messages,
+            "max_tokens": max_tokens,
+            "n": 1,
+        }
+        
+        # Add tools if provided
+        if tools:
+            request_params["tools"] = tools
+            request_params["tool_choice"] = "auto"  # Let model decide when to use tools
+        
+        response = client.chat.completions.create(**request_params)
 
-        # Extract the response content
+        # Extract the response
         if response.choices and len(response.choices) > 0:
-            content = response.choices[0].message.content
+            message = response.choices[0].message
+            
+            # Check for tool calls in response
+            if hasattr(message, 'tool_calls') and message.tool_calls:
+                print(f"✅ Received {len(message.tool_calls)} tool call(s)")
+                # Return structured response with tool calls
+                tool_calls_list = []
+                for tool_call in message.tool_calls:
+                    tool_calls_list.append({
+                        "id": tool_call.id,
+                        "type": tool_call.type,
+                        "function": {
+                            "name": tool_call.function.name,
+                            "arguments": tool_call.function.arguments,  # JSON string
+                        }
+                    })
+                
+                return {
+                    "tool_calls": tool_calls_list,
+                    "content": message.content or "",
+                }
+            
+            # Regular text response
+            content = message.content
             if content is None:
                 print(f"⚠️ Warning: Response content is None")
                 print(f"   Full response: {response}")
