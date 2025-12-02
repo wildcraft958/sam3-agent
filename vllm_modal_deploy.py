@@ -1,8 +1,8 @@
 # vllm_modal_deploy.py
 #
-# Deploy Qwen3-VL-32B-Thinking model with vLLM on Modal
+# Deploy Qwen3-VL-8B-Instruct model with vLLM on Modal
 #
-# This script deploys a vLLM server with Qwen3-VL-32B-Thinking model,
+# This script deploys a vLLM server with Qwen3-VL-8B-Instruct model,
 # using Modal volumes to cache model weights for fast loading.
 #
 # Usage:
@@ -19,9 +19,9 @@
 #   {
 #     "llm_config": {
 #       "base_url": "https://your-username--qwen3-vl-vllm-server.modal.run/v1",
-#       "model": "Qwen/Qwen3-VL-32B-Thinking",
+#       "model": "Qwen/Qwen3-VL-8B-Instruct",
 #       "api_key": "",
-#       "name": "qwen3-vl-32b-modal"
+#       "name": "qwen3-vl-8b-modal"
 #     }
 #   }
 
@@ -37,21 +37,20 @@ import modal
 
 app = modal.App("qwen3-vl-vllm-server")
 
-# Create volume for model weights (~64GB for bfloat16)
+# Create volume for model weights (~16GB for 8B model in bfloat16)
 # This will cache the model weights to avoid re-downloading on each deployment
-MODEL_VOLUME = modal.Volume.from_name("qwen3-vl-32b-weights", create_if_missing=True)
+MODEL_VOLUME = modal.Volume.from_name("qwen3-vl-8b-weights", create_if_missing=True)
 
 # Model configuration
-MODEL_ID = "Qwen/Qwen3-VL-32B-Thinking"
+MODEL_ID = "Qwen/Qwen3-VL-8B-Instruct"
 HF_CACHE_DIR = "/root/.cache/huggingface"  # Standard HuggingFace cache location
 
 # GPU Configuration
 # Available GPUs in Modal: "B200", "H200", "H100", "A100", "L40S", "A10", "L4", "T4"
-# For single GPU: "H100" or "B200"
-# For multiple GPUs: "H100:2", "H100:4", "A100:2", etc. (up to 8 GPUs)
+# For 8B model: Single GPU is sufficient (A100, H100, or even A10/L4)
 # Note: B200 and H200 may not be available in all regions. If unavailable, use H100 or A100.
-GPU_TYPE = "H100"  # Change to "B200", "H200", "A100", etc. as needed
-NUM_GPUS = 2  # Number of GPUs (1-8). Set to 1 for single GPU, 2+ for tensor parallelism
+GPU_TYPE = "A100"  # A100 (40GB or 80GB) is sufficient for 8B model
+NUM_GPUS = 1  # Single GPU is sufficient for 8B model
 
 # Build GPU string for Modal
 if NUM_GPUS == 1:
@@ -99,14 +98,14 @@ image = (
 @modal.asgi_app()
 def vllm_server():
     """
-    Deploy vLLM server with Qwen3-VL-32B-Thinking model.
+    Deploy vLLM server with Qwen3-VL-8B-Instruct model.
     
     This function loads the model directly and creates a FastAPI app
     that provides an OpenAI-compatible API, following the working pattern.
     
     GPU Configuration:
-    - Single GPU: Set NUM_GPUS=1, GPU_TYPE="H100" (or "B200", "H200", "A100")
-    - Multiple GPUs: Set NUM_GPUS=2+ for tensor parallelism
+    - Single GPU: Set NUM_GPUS=1, GPU_TYPE="A100" (recommended) or "H100", "A10", "L4"
+    - Multiple GPUs: Set NUM_GPUS=2+ for tensor parallelism (optional for 8B model)
     """
     import base64
     import io
@@ -127,7 +126,7 @@ def vllm_server():
     # Check multiple possible cache locations
     alt_paths = [
         model_cache_path / MODEL_ID.replace("/", "--"),
-        model_cache_path / "models--" + MODEL_ID.replace("/", "--"),
+        model_cache_path / f"models--{MODEL_ID.replace('/', '--')}",
         Path(HF_CACHE_DIR) / MODEL_ID.replace("/", "--"),
     ]
     
@@ -147,7 +146,7 @@ def vllm_server():
     
     if not model_found:
         print(f"⚠ Model not found in expected cache locations")
-        print(f"  Will download on first load (may take 20-30 minutes)")
+        print(f"  Will download on first load (may take 5-10 minutes for 8B model)")
     
     # Set HuggingFace environment variables
     os.environ["HF_HOME"] = HF_CACHE_DIR
@@ -155,21 +154,24 @@ def vllm_server():
     os.environ["HF_HUB_CACHE"] = str(model_cache_path)
     
     # Build vLLM LLM initialization parameters
+    # Optimized for 8B model - single GPU sufficient
     llm_kwargs = {
         "model": MODEL_ID,
         "trust_remote_code": True,
         "dtype": "bfloat16",
-        "gpu_memory_utilization": 0.7,
-        "max_model_len": 8192,
-        "limit_mm_per_prompt": {"image": 1},  # For vision models
+        "gpu_memory_utilization": 0.9,  # Higher utilization possible with 8B model
+        "max_model_len": 16384,  # Sufficient for vision models with multiple images
+        "limit_mm_per_prompt": {"image": 2},  # Allow up to 2 images per prompt (for SAM3 agent context)
         "enforce_eager": True,  # More stable for vision models
-        "max_num_seqs": 4,
+        "max_num_seqs": 8,  # Can handle more sequences with 8B model
     }
     
-    # Add tensor parallelism for multiple GPUs
+    # Add tensor parallelism for multiple GPUs (optional for 8B, but can help with throughput)
     if NUM_GPUS > 1:
         llm_kwargs["tensor_parallel_size"] = NUM_GPUS
         print(f"✓ Tensor parallelism enabled: {NUM_GPUS} GPUs")
+    else:
+        print(f"✓ Using single GPU (sufficient for 8B model)")
     
     # Try to enable flash attention
     try:
@@ -180,9 +182,15 @@ def vllm_server():
         print("⚠ Flash attention not available, using default attention")
     
     # Load the model - this happens during container startup
-    print("Loading model into GPU memory (this may take 5-15 minutes)...")
-    llm = LLM(**llm_kwargs)
-    print("✅ Model loaded successfully!")
+    print("Loading model into GPU memory (this may take 2-5 minutes for 8B model)...")
+    try:
+        llm = LLM(**llm_kwargs)
+        print("✅ Model loaded successfully!")
+    except Exception as e:
+        import traceback
+        print(f"❌ Failed to load model: {e}")
+        print(f"   Traceback: {traceback.format_exc()}")
+        raise
     
     # Load processor for chat template formatting
     print("Loading processor...")
@@ -400,7 +408,7 @@ def vllm_server():
     gpu="A100",  # Use A100 for download (or any available GPU - doesn't need to match server GPU)
     volumes={HF_CACHE_DIR: MODEL_VOLUME},
     secrets=[modal.Secret.from_name("huggingface-secret")],
-    timeout=7200,  # 2 hours for large model download
+    timeout=3600,  # 1 hour for 8B model download (sufficient)
 )
 def download_model_to_volume():
     """
@@ -421,7 +429,7 @@ def download_model_to_volume():
     
     print(f"Downloading {MODEL_ID} to volume...")
     print(f"Cache directory: {HF_CACHE_DIR}")
-    print("This may take 20-30 minutes for a 32B model...")
+    print("This may take 5-10 minutes for an 8B model...")
     
     # Set HuggingFace environment variables
     os.environ["HF_HOME"] = HF_CACHE_DIR

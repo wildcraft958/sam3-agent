@@ -185,7 +185,7 @@ class SAM3Model:
         bpe_path = "/root/sam3/assets/bpe_simple_vocab_16e6.txt.gz"
         self.model = build_sam3_image_model(bpe_path=bpe_path)
         # Use lower confidence threshold (0.25) to get more results, can be adjusted per request
-        self.processor = Sam3Processor(self.model, confidence_threshold=0.25)
+        self.processor = Sam3Processor(self.model, confidence_threshold=0.4)
         print(f"SAM3 model loaded successfully with confidence threshold: {self.processor.confidence_threshold}")
 
     @modal.method()
