@@ -10,6 +10,15 @@ from PIL import Image
 from .client_llm import send_generate_request
 from .client_sam3 import call_sam_service
 from .viz import visualize
+from .helpers.spatial_filtering import filter_masks_by_spatial_position
+from .helpers.region_segmentation import segment_in_region, transform_masks_to_global
+from .helpers.attribute_filtering import filter_masks_by_attributes
+from .helpers.relative_spatial import filter_masks_by_relative_position
+from .helpers.pyramidal_tiling import (
+    create_pyramidal_tiles,
+    transform_mask_coordinates,
+    merge_tile_results,
+)
 
 # OpenAI function calling format for Qwen3
 TOOLS = [
@@ -67,6 +76,145 @@ TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {}
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "filter_masks_by_spatial_position",
+            "description": "Filter existing masks by their spatial position in the image. Use this after segment_phrase to select masks based on spatial relationships like 'leftmost', 'rightmost', 'second from right', etc.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "spatial_criteria": {
+                        "type": "string",
+                        "enum": ["leftmost", "rightmost", "topmost", "bottommost", "center", "second_from_left", "second_from_right", "third_from_left", "third_from_right", "left_of_all", "right_of_all", "above_all", "below_all"],
+                        "description": "Spatial position criteria to filter masks"
+                    }
+                },
+                "required": ["spatial_criteria"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "segment_phrase_in_region",
+            "description": "Segment a phrase within a specific bounding box region. Useful when you know the approximate location or want to focus on a specific area.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text_prompt": {
+                        "type": "string",
+                        "description": "A short and simple noun phrase"
+                    },
+                    "bbox": {
+                        "type": "array",
+                        "items": {"type": "number"},
+                        "description": "Bounding box [x_min, y_min, x_max, y_max] in normalized coordinates (0-1) or pixel coordinates",
+                        "minItems": 4,
+                        "maxItems": 4
+                    },
+                    "use_normalized": {
+                        "type": "boolean",
+                        "description": "Whether bbox is in normalized coordinates (default: true)",
+                        "default": True
+                    }
+                },
+                "required": ["text_prompt", "bbox"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "filter_masks_by_attributes",
+            "description": "Filter existing masks by visual attributes like color, size, or shape. Use after segment_phrase to narrow down results.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "color": {
+                        "type": "string",
+                        "description": "Filter by dominant color (e.g., 'red', 'blue', 'white', 'black')"
+                    },
+                    "min_size_ratio": {
+                        "type": "number",
+                        "description": "Minimum size as ratio of image (0-1)"
+                    },
+                    "max_size_ratio": {
+                        "type": "number",
+                        "description": "Maximum size as ratio of image (0-1)"
+                    },
+                    "aspect_ratio_range": {
+                        "type": "array",
+                        "items": {"type": "number"},
+                        "description": "Min and max aspect ratio [min, max]",
+                        "minItems": 2,
+                        "maxItems": 2
+                    }
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "filter_masks_by_relative_position",
+            "description": "Filter masks based on their position relative to other masks. Use when query involves relationships like 'left of', 'above', 'near'.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "relationship": {
+                        "type": "string",
+                        "enum": ["left_of", "right_of", "above", "below", "near", "far_from"],
+                        "description": "Spatial relationship"
+                    },
+                    "reference_mask_indices": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                        "description": "Reference mask indices to compare against (1-indexed)",
+                        "minItems": 1
+                    },
+                    "distance_threshold": {
+                        "type": "number",
+                        "description": "For 'near'/'far_from': distance threshold as ratio of image diagonal (default: 0.2)",
+                        "default": 0.2
+                    }
+                },
+                "required": ["relationship", "reference_mask_indices"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "segment_phrase_with_tiling",
+            "description": "Segment a phrase using pyramidal tiling for better detection of small objects or handling large images. Splits image into overlapping tiles, segments each, and merges results intelligently.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text_prompt": {
+                        "type": "string",
+                        "description": "A short and simple noun phrase"
+                    },
+                    "tile_size": {
+                        "type": "integer",
+                        "description": "Size of each tile (default: 1024)",
+                        "default": 1024
+                    },
+                    "overlap_ratio": {
+                        "type": "number",
+                        "description": "Overlap ratio between tiles (0.0-0.5, default: 0.2)",
+                        "default": 0.2
+                    },
+                    "min_tile_size": {
+                        "type": "integer",
+                        "description": "Minimum tile size for recursive splitting (default: 512)",
+                        "default": 512
+                    }
+                },
+                "required": ["text_prompt"]
             }
         }
     }
@@ -278,33 +426,131 @@ def agent_inference(
     while generated_response is not None:
         save_debug_messages(messages, debug, debug_folder_path, debug_jsonl_path)
         
-        # Check if response contains structured tool calls
-        if isinstance(generated_response, dict) and "tool_calls" in generated_response:
-            tool_calls_list = generated_response["tool_calls"]
-            generated_text = generated_response.get("content", "")
-        else:
-            # Fallback: plain text response (shouldn't happen with tools, but handle gracefully)
-            generated_text = generated_response if isinstance(generated_response, str) else str(generated_response)
-            print("⚠️ Warning: Received plain text response instead of tool calls. This may indicate the model is not using tools.")
-            # Try to continue with text response or break
+        # Initialize tool_calls_list to avoid NameError
+        tool_calls_list = []
+        generated_text = ""
+        
+        # Comprehensive type checking for all possible response types
+        if generated_response is None:
+            print("❌ Error: generated_response is None")
+            print(f"   This indicates the LLM API returned no response")
             break
         
+        elif isinstance(generated_response, dict):
+            # Check if response contains structured tool calls
+            if "tool_calls" in generated_response:
+                tool_calls_list = generated_response.get("tool_calls", [])
+                generated_text = generated_response.get("content", "")
+                
+                # Validate tool_calls_list is actually a list
+                if not isinstance(tool_calls_list, list):
+                    print(f"❌ Error: tool_calls is not a list, got {type(tool_calls_list)}")
+                    print(f"   Response: {str(generated_response)[:500]}")
+                    break
+                
+                if not tool_calls_list:
+                    print("⚠️ Warning: tool_calls list is empty")
+                    break
+                    
+                print(f"✅ Received {len(tool_calls_list)} tool call(s) in structured format")
+            else:
+                # Dict response without tool_calls - might be an error response
+                print(f"⚠️ Warning: Received dict response without 'tool_calls' field")
+                print(f"   Response keys: {list(generated_response.keys())}")
+                print(f"   Response: {str(generated_response)[:500]}")
+                break
+                
+        elif isinstance(generated_response, list):
+            # Handle unexpected list response
+            print(f"❌ Error: Received list response instead of dict/string")
+            print(f"   Response type: {type(generated_response)}")
+            print(f"   List length: {len(generated_response)}")
+            print(f"   First item type: {type(generated_response[0]) if generated_response else 'N/A'}")
+            print(f"   Response preview: {str(generated_response)[:500]}")
+            print(f"   Expected: dict with 'tool_calls' field or string")
+            break
+            
+        elif isinstance(generated_response, str):
+            # Plain text response (shouldn't happen with tools, but handle gracefully)
+            generated_text = generated_response
+            print("⚠️ Warning: Received plain text response instead of tool calls")
+            print(f"   Response length: {len(generated_text)}")
+            print(f"   Response preview: {generated_text[:200]}")
+            print(f"   This may indicate the model is not using tools or the API format changed")
+            break
+            
+        else:
+            # Unexpected response type
+            print(f"❌ Error: Unexpected response type: {type(generated_response)}")
+            print(f"   Response value: {str(generated_response)[:500]}")
+            print(f"   Expected: dict with 'tool_calls' field, string, or None")
+            break
+        
+        # Validate tool_calls_list before processing
         if not tool_calls_list:
-            print("⚠️ Warning: No tool calls in response")
+            print("⚠️ Warning: No tool calls to process")
+            break
+        
+        # Validate tool call structure before processing
+        if not isinstance(tool_calls_list, list):
+            print(f"❌ Error: tool_calls_list is not a list, got {type(tool_calls_list)}")
             break
         
         # Process the first tool call (we handle one at a time)
         tool_call_data = tool_calls_list[0]
-        tool_call_id = tool_call_data.get("id", f"call_{generation_count}")
-        function_data = tool_call_data.get("function", {})
-        function_name = function_data.get("name")
-        function_arguments_str = function_data.get("arguments", "{}")
         
-        # Parse function arguments
+        # Validate tool_call_data structure
+        if not isinstance(tool_call_data, dict):
+            print(f"❌ Error: tool_call_data is not a dict, got {type(tool_call_data)}")
+            print(f"   Tool call data: {tool_call_data}")
+            break
+        
+        # Extract and validate tool_call_id
+        tool_call_id = tool_call_data.get("id")
+        if not tool_call_id:
+            tool_call_id = f"call_{generation_count}_{hash(str(tool_call_data)) % 10000}"
+            print(f"⚠️ Warning: tool_call missing 'id' field, generated: {tool_call_id}")
+        
+        # Extract and validate function data
+        function_data = tool_call_data.get("function", {})
+        if not isinstance(function_data, dict):
+            print(f"❌ Error: tool_call 'function' field is not a dict, got {type(function_data)}")
+            print(f"   Tool call data: {tool_call_data}")
+            break
+        
+        # Extract and validate function name
+        function_name = function_data.get("name")
+        if not function_name or not isinstance(function_name, str):
+            print(f"❌ Error: tool_call missing or invalid 'function.name' field")
+            print(f"   Function data: {function_data}")
+            print(f"   Tool call data: {tool_call_data}")
+            break
+        
+        # Extract and validate function arguments
+        function_arguments_str = function_data.get("arguments", "{}")
+        if not isinstance(function_arguments_str, str):
+            print(f"⚠️ Warning: function arguments is not a string, converting: {type(function_arguments_str)}")
+            try:
+                function_arguments_str = json.dumps(function_arguments_str)
+            except (TypeError, ValueError) as e:
+                print(f"❌ Error: Cannot convert arguments to JSON string: {e}")
+                print(f"   Arguments: {function_arguments_str}")
+                break
+        
+        # Parse function arguments with better error handling
         try:
             function_arguments = json.loads(function_arguments_str)
+            if not isinstance(function_arguments, dict):
+                print(f"⚠️ Warning: Parsed arguments is not a dict, got {type(function_arguments)}")
+                print(f"   Arguments: {function_arguments}")
+                # Try to wrap it in a dict or use empty dict
+                function_arguments = {"value": function_arguments} if function_arguments else {}
         except json.JSONDecodeError as e:
-            raise ValueError(f"Invalid JSON in tool call arguments: {function_arguments_str}, error: {e}")
+            print(f"❌ Error: Invalid JSON in tool call arguments")
+            print(f"   Arguments string: {function_arguments_str[:200]}")
+            print(f"   JSON error: {e}")
+            print(f"   Tool call: {function_name}")
+            raise ValueError(f"Invalid JSON in tool call arguments for '{function_name}': {function_arguments_str[:100]}..., error: {e}")
         
         # Build tool_call dict in expected format
         tool_call = {
@@ -313,11 +559,13 @@ def agent_inference(
         }
         
         if PATH_TO_LATEST_OUTPUT_JSON == "":
-            # The first tool call must be segment_phrase or report_no_mask
+            # The first tool call must be segment_phrase, segment_phrase_with_tiling, segment_phrase_in_region, or report_no_mask
             assert (
                 tool_call["name"] == "segment_phrase"
+                or tool_call["name"] == "segment_phrase_with_tiling"
+                or tool_call["name"] == "segment_phrase_in_region"
                 or tool_call["name"] == "report_no_mask"
-            ), f"First tool call must be segment_phrase or report_no_mask, got {tool_call['name']}"
+            ), f"First tool call must be segment_phrase, segment_phrase_with_tiling, segment_phrase_in_region, or report_no_mask, got {tool_call['name']}"
 
         if tool_call["name"] == "segment_phrase":
             print("🔍 Calling segment_phrase tool...")
@@ -400,6 +648,363 @@ def agent_inference(
                     })
                 print("\n\n>>> sam3_output_text_message:\n", sam3_output_text_message)
 
+        elif tool_call["name"] == "segment_phrase_in_region":
+            print("🔍 Calling segment_phrase_in_region tool...")
+            assert "text_prompt" in tool_call["parameters"] and "bbox" in tool_call["parameters"], \
+                f"Expected ['text_prompt', 'bbox'], got {list(tool_call['parameters'].keys())}"
+            
+            current_text_prompt = tool_call["parameters"]["text_prompt"]
+            bbox = tool_call["parameters"]["bbox"]
+            use_normalized = tool_call["parameters"].get("use_normalized", True)
+            
+            # Validate bbox
+            if not isinstance(bbox, list) or len(bbox) != 4:
+                raise ValueError(f"bbox must be a list of 4 numbers [x_min, y_min, x_max, y_max], got {bbox}")
+            
+            if use_normalized:
+                if not all(0 <= coord <= 1 for coord in bbox):
+                    raise ValueError(f"Normalized bbox coordinates must be in [0, 1], got {bbox}")
+                if bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
+                    raise ValueError(f"Invalid bbox: x_max <= x_min or y_max <= y_min, got {bbox}")
+            else:
+                if any(coord < 0 for coord in bbox):
+                    raise ValueError(f"Pixel bbox coordinates must be non-negative, got {bbox}")
+                if bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
+                    raise ValueError(f"Invalid bbox: x_max <= x_min or y_max <= y_min, got {bbox}")
+            
+            # Check if this text_prompt has been used before
+            if current_text_prompt in USED_TEXT_PROMPTS:
+                print(
+                    f"❌ Text prompt '{current_text_prompt}' has been used before. Requesting a different prompt."
+                )
+                duplicate_prompt_message = f"You have previously used '{current_text_prompt}' as your text_prompt to call the segment_phrase tool. You may not use it again. Please call the segment_phrase or segment_phrase_in_region tool again with a different, perhaps more general, or more creative simple noun phrase prompt, while adhering to all the rules stated in the system prompt. You must also never use any of the following text_prompt(s): {str(list(USED_TEXT_PROMPTS))}."
+                messages.append({
+                    "role": "assistant",
+                    "content": generated_text if generated_text else None,
+                    "tool_calls": [tool_call_data],
+                })
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": [{"type": "text", "text": duplicate_prompt_message}],
+                    }
+                )
+            else:
+                # Add the text_prompt to the set of used prompts
+                USED_TEXT_PROMPTS.add(current_text_prompt)
+                LATEST_SAM3_TEXT_PROMPT = current_text_prompt
+                
+                # Load original image and crop to region
+                original_image = Image.open(img_path)
+                cropped_image, region_bbox = segment_in_region(original_image, bbox, use_normalized)
+                
+                # Save cropped image temporarily
+                import tempfile
+                with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False, dir=sam_output_dir) as tmp_file:
+                    cropped_image_path = tmp_file.name
+                    cropped_image.save(cropped_image_path)
+                
+                try:
+                    # Call SAM3 on cropped region
+                    region_output_json = call_sam_service(
+                        image_path=cropped_image_path,
+                        text_prompt=current_text_prompt,
+                        output_folder_path=sam_output_dir,
+                    )
+                    
+                    # Load region results
+                    region_outputs = json.load(open(region_output_json, "r"))
+                    
+                    # Transform masks back to global coordinates
+                    orig_img_h = int(region_outputs["orig_img_h"])
+                    orig_img_w = int(region_outputs["orig_img_w"])
+                    # Note: region_outputs has dimensions of cropped image, we need original image dimensions
+                    original_image = Image.open(img_path)
+                    orig_img_h_full, orig_img_w_full = original_image.size[1], original_image.size[0]
+                    
+                    transformed_boxes, transformed_masks = transform_masks_to_global(
+                        region_outputs["pred_boxes"],
+                        region_outputs["pred_masks"],
+                        region_bbox,
+                        orig_img_h_full,
+                        orig_img_w_full,
+                    )
+                    
+                    # Create outputs in global coordinates
+                    sam3_outputs = {
+                        "original_image_path": img_path,
+                        "orig_img_h": orig_img_h_full,
+                        "orig_img_w": orig_img_w_full,
+                        "pred_boxes": transformed_boxes,
+                        "pred_masks": transformed_masks,
+                        "pred_scores": region_outputs["pred_scores"],
+                    }
+                    
+                    # Save outputs
+                    text_prompt_for_save_path = (
+                        current_text_prompt.replace("/", "_") if "/" in current_text_prompt else current_text_prompt
+                    )
+                    image_basename = os.path.basename(img_path)
+                    image_basename_no_ext = os.path.splitext(image_basename)[0]
+                    safe_dir_name = image_basename_no_ext.replace("/", "_").replace("\\", "_")
+                    if not safe_dir_name or safe_dir_name.startswith("-"):
+                        safe_dir_name = "image_" + safe_dir_name if safe_dir_name else "image"
+                    
+                    os.makedirs(
+                        os.path.join(sam_output_dir, safe_dir_name), exist_ok=True
+                    )
+                    PATH_TO_LATEST_OUTPUT_JSON = os.path.join(
+                        sam_output_dir,
+                        safe_dir_name,
+                        rf"{text_prompt_for_save_path}_region.json",
+                    )
+                    sam3_output_image_path = os.path.join(
+                        sam_output_dir,
+                        safe_dir_name,
+                        rf"{text_prompt_for_save_path}_region.png",
+                    )
+                    
+                    sam3_outputs["output_image_path"] = sam3_output_image_path
+                    json.dump(sam3_outputs, open(PATH_TO_LATEST_OUTPUT_JSON, "w"), indent=4)
+                    
+                    # Visualize
+                    from .viz import visualize
+                    viz_image = visualize(sam3_outputs)
+                    viz_image.save(sam3_output_image_path)
+                    
+                    num_masks = len(sam3_outputs.get("pred_boxes", []))
+                    
+                    # Append assistant message with tool call
+                    messages.append({
+                        "role": "assistant",
+                        "content": generated_text if generated_text else None,
+                        "tool_calls": [tool_call_data],
+                    })
+                    
+                    if num_masks == 0:
+                        print("❌ No masks generated by SAM3 in region, reporting no mask to Qwen.")
+                        sam3_output_text_message = f"The segment_phrase_in_region tool did not generate any masks for the text_prompt '{current_text_prompt}' in the specified region. Now, please call the segment_phrase or segment_phrase_in_region tool again with a different, perhaps more general, or more creative simple noun phrase text_prompt, while adhering to all the rules stated in the system prompt. Please be reminded that the original user query was '{initial_text_prompt}'."
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call_id,
+                            "content": json.dumps({"message": sam3_output_text_message, "num_masks": 0}),
+                        })
+                    else:
+                        sam3_output_text_message = rf"The segment_phrase_in_region tool generated {num_masks} available masks in the specified region. All {num_masks} available masks are rendered in this image below, now you must analyze the {num_masks} available mask(s) carefully, compare them against the raw input image and the original user query, and determine your next action. Please be reminded that the original user query was '{initial_text_prompt}'."
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call_id,
+                            "content": json.dumps({
+                                "message": sam3_output_text_message,
+                                "num_masks": num_masks,
+                                "output_image_path": sam3_output_image_path,
+                            }),
+                        })
+                        messages.append({
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": "Please analyze the masks shown in the image below."},
+                                {"type": "image", "image": sam3_output_image_path},
+                            ],
+                        })
+                    print("\n\n>>> sam3_output_text_message:\n", sam3_output_text_message)
+                    
+                finally:
+                    # Clean up temporary cropped image
+                    try:
+                        os.unlink(cropped_image_path)
+                    except Exception as e:
+                        print(f"Warning: Could not delete temporary cropped image: {e}")
+
+        elif tool_call["name"] == "segment_phrase_with_tiling":
+            print("🔍 Calling segment_phrase_with_tiling tool...")
+            assert "text_prompt" in tool_call["parameters"], \
+                f"Expected ['text_prompt'], got {list(tool_call['parameters'].keys())}"
+            
+            current_text_prompt = tool_call["parameters"]["text_prompt"]
+            tile_size = tool_call["parameters"].get("tile_size", 1024)
+            overlap_ratio = tool_call["parameters"].get("overlap_ratio", 0.2)
+            min_tile_size = tool_call["parameters"].get("min_tile_size", 512)
+            
+            # Validate parameters
+            if tile_size < 256 or tile_size > 4096:
+                raise ValueError(f"tile_size must be in [256, 4096], got {tile_size}")
+            if overlap_ratio < 0.0 or overlap_ratio > 0.5:
+                raise ValueError(f"overlap_ratio must be in [0.0, 0.5], got {overlap_ratio}")
+            if min_tile_size < 128 or min_tile_size > tile_size:
+                raise ValueError(f"min_tile_size must be in [128, tile_size], got {min_tile_size}")
+            
+            # Check if this text_prompt has been used before
+            if current_text_prompt in USED_TEXT_PROMPTS:
+                print(
+                    f"❌ Text prompt '{current_text_prompt}' has been used before. Requesting a different prompt."
+                )
+                duplicate_prompt_message = f"You have previously used '{current_text_prompt}' as your text_prompt to call the segment_phrase tool. You may not use it again. Please call the segment_phrase or segment_phrase_with_tiling tool again with a different, perhaps more general, or more creative simple noun phrase prompt, while adhering to all the rules stated in the system prompt. You must also never use any of the following text_prompt(s): {str(list(USED_TEXT_PROMPTS))}."
+                messages.append({
+                    "role": "assistant",
+                    "content": generated_text if generated_text else None,
+                    "tool_calls": [tool_call_data],
+                })
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": [{"type": "text", "text": duplicate_prompt_message}],
+                    }
+                )
+            else:
+                # Add the text_prompt to the set of used prompts
+                USED_TEXT_PROMPTS.add(current_text_prompt)
+                LATEST_SAM3_TEXT_PROMPT = current_text_prompt
+                
+                # Load original image
+                original_image = Image.open(img_path)
+                orig_img_w, orig_img_h = original_image.size
+                
+                # Create tiles
+                tiles = create_pyramidal_tiles(
+                    orig_img_w, orig_img_h, tile_size, overlap_ratio, min_tile_size
+                )
+                print(f"📐 Created {len(tiles)} tiles for pyramidal tiling")
+                
+                # Segment each tile
+                all_tile_results = []
+                import tempfile
+                
+                for tile_idx, tile_bbox in enumerate(tiles):
+                    x_min, y_min, x_max, y_max = tile_bbox
+                    print(f"🔍 Processing tile {tile_idx + 1}/{len(tiles)}: ({x_min}, {y_min}, {x_max}, {y_max})")
+                    
+                    # Crop image to tile
+                    tile_image = original_image.crop((x_min, y_min, x_max, y_max))
+                    
+                    # Save cropped tile temporarily
+                    with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False, dir=sam_output_dir) as tmp_file:
+                        tile_image_path = tmp_file.name
+                        tile_image.save(tile_image_path)
+                    
+                    try:
+                        # Call SAM3 on tile
+                        tile_output_json = call_sam_service(
+                            image_path=tile_image_path,
+                            text_prompt=current_text_prompt,
+                            output_folder_path=sam_output_dir,
+                        )
+                        
+                        # Load tile results
+                        tile_outputs = json.load(open(tile_output_json, "r"))
+                        
+                        # Transform masks to global coordinates
+                        transformed_boxes = []
+                        transformed_masks = []
+                        
+                        for box, mask in zip(tile_outputs["pred_boxes"], tile_outputs["pred_masks"]):
+                            trans_box, trans_mask = transform_mask_coordinates(
+                                box, mask, tile_bbox, orig_img_h, orig_img_w
+                            )
+                            transformed_boxes.append(trans_box)
+                            transformed_masks.append(trans_mask)
+                        
+                        # Store tile results
+                        all_tile_results.append({
+                            "pred_boxes": transformed_boxes,
+                            "pred_masks": transformed_masks,
+                            "pred_scores": tile_outputs["pred_scores"],
+                            "tile_bbox": tile_bbox,
+                        })
+                        
+                    finally:
+                        # Clean up temporary tile image
+                        try:
+                            os.unlink(tile_image_path)
+                        except Exception as e:
+                            print(f"Warning: Could not delete temporary tile image: {e}")
+                
+                # Merge results from all tiles
+                print(f"🔗 Merging results from {len(tiles)} tiles...")
+                merged_outputs = merge_tile_results(all_tile_results, orig_img_h, orig_img_w)
+                
+                # Apply overlap removal
+                try:
+                    from .helpers.mask_overlap_removal import remove_overlapping_masks
+                    merged_outputs = remove_overlapping_masks(merged_outputs)
+                    print(f"✓ Applied mask overlap removal")
+                except Exception as e:
+                    print(f"⚠ Warning: Could not apply mask overlap removal: {e}")
+                
+                # Save outputs
+                text_prompt_for_save_path = (
+                    current_text_prompt.replace("/", "_") if "/" in current_text_prompt else current_text_prompt
+                )
+                image_basename = os.path.basename(img_path)
+                image_basename_no_ext = os.path.splitext(image_basename)[0]
+                safe_dir_name = image_basename_no_ext.replace("/", "_").replace("\\", "_")
+                if not safe_dir_name or safe_dir_name.startswith("-"):
+                    safe_dir_name = "image_" + safe_dir_name if safe_dir_name else "image"
+                
+                os.makedirs(
+                    os.path.join(sam_output_dir, safe_dir_name), exist_ok=True
+                )
+                PATH_TO_LATEST_OUTPUT_JSON = os.path.join(
+                    sam_output_dir,
+                    safe_dir_name,
+                    rf"{text_prompt_for_save_path}_tiling.json",
+                )
+                sam3_output_image_path = os.path.join(
+                    sam_output_dir,
+                    safe_dir_name,
+                    rf"{text_prompt_for_save_path}_tiling.png",
+                )
+                
+                sam3_outputs = {
+                    "original_image_path": img_path,
+                    "output_image_path": sam3_output_image_path,
+                    **merged_outputs,
+                }
+                
+                json.dump(sam3_outputs, open(PATH_TO_LATEST_OUTPUT_JSON, "w"), indent=4)
+                
+                # Visualize
+                viz_image = visualize(sam3_outputs)
+                viz_image.save(sam3_output_image_path)
+                
+                num_masks = len(sam3_outputs.get("pred_boxes", []))
+                
+                # Append assistant message with tool call
+                messages.append({
+                    "role": "assistant",
+                    "content": generated_text if generated_text else None,
+                    "tool_calls": [tool_call_data],
+                })
+                
+                if num_masks == 0:
+                    print("❌ No masks generated by SAM3 with tiling, reporting no mask to Qwen.")
+                    sam3_output_text_message = f"The segment_phrase_with_tiling tool did not generate any masks for the text_prompt '{current_text_prompt}'. Now, please call the segment_phrase or segment_phrase_with_tiling tool again with a different, perhaps more general, or more creative simple noun phrase text_prompt, while adhering to all the rules stated in the system prompt. Please be reminded that the original user query was '{initial_text_prompt}'."
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call_id,
+                        "content": json.dumps({"message": sam3_output_text_message, "num_masks": 0}),
+                    })
+                else:
+                    sam3_output_text_message = rf"The segment_phrase_with_tiling tool generated {num_masks} available masks using pyramidal tiling across {len(tiles)} tiles. All {num_masks} available masks are rendered in this image below, now you must analyze the {num_masks} available mask(s) carefully, compare them against the raw input image and the original user query, and determine your next action. Please be reminded that the original user query was '{initial_text_prompt}'."
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call_id,
+                        "content": json.dumps({
+                            "message": sam3_output_text_message,
+                            "num_masks": num_masks,
+                            "output_image_path": sam3_output_image_path,
+                            "num_tiles": len(tiles),
+                        }),
+                    })
+                    messages.append({
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "Please analyze the masks shown in the image below."},
+                            {"type": "image", "image": sam3_output_image_path},
+                        ],
+                    })
+                print("\n\n>>> sam3_output_text_message:\n", sam3_output_text_message)
+
         elif tool_call["name"] == "examine_each_mask":
             print("🔍 Calling examine_each_mask tool...")
             assert LATEST_SAM3_TEXT_PROMPT != ""
@@ -473,16 +1078,33 @@ def agent_inference(
                     raise ValueError(
                         f"Exceeded maximum number of allowed generation requests ({max_generations})"
                     )
-                checking_generated_text = send_generate_request(
+                checking_response = send_generate_request(
                     iterative_checking_messages,
                     tools=None  # Iterative checking doesn't use tools
                 )
 
-                # Process the generated text to determine if the mask should be kept or rejected
-                if checking_generated_text is None:
+                # Normalize response to string (handle dict/list responses)
+                if checking_response is None:
                     raise ValueError(
                         "Generated text is None, which is unexpected. Please check the Qwen server and the input parameters."
                     )
+                elif isinstance(checking_response, dict):
+                    # Extract content from dict response (might have tool_calls)
+                    checking_generated_text = checking_response.get("content", "")
+                    if not checking_generated_text:
+                        raise ValueError(
+                            "Response dict has no 'content' field. This may indicate the model returned tool calls instead of text."
+                        )
+                elif isinstance(checking_response, list):
+                    # Handle unexpected list response
+                    print(f"⚠️ Warning: Received list response in iterative checking, converting to string")
+                    checking_generated_text = str(checking_response)
+                elif not isinstance(checking_response, str):
+                    # Convert other types to string
+                    checking_generated_text = str(checking_response)
+                else:
+                    checking_generated_text = checking_response
+                
                 print(f"Generated text for mask {i+1}: {checking_generated_text}")
                 verdict = (
                     checking_generated_text.split("<verdict>")[-1]
@@ -574,6 +1196,293 @@ def agent_inference(
                     ".json", f"masks_{'_'.join(map(str, masks_to_keep))}.json"
                 )
             json.dump(updated_outputs, open(PATH_TO_LATEST_OUTPUT_JSON, "w"), indent=4)
+
+        elif tool_call["name"] == "filter_masks_by_spatial_position":
+            print("🔍 Calling filter_masks_by_spatial_position tool...")
+            if not os.path.exists(PATH_TO_LATEST_OUTPUT_JSON):
+                raise FileNotFoundError(
+                    f"SAM3 output file not found: {PATH_TO_LATEST_OUTPUT_JSON}"
+                )
+            current_outputs = json.load(open(PATH_TO_LATEST_OUTPUT_JSON, "r"))
+            
+            assert list(tool_call["parameters"].keys()) == ["spatial_criteria"]
+            spatial_criteria = tool_call["parameters"]["spatial_criteria"]
+            
+            # Validate spatial criteria
+            valid_criteria = [
+                "leftmost", "rightmost", "topmost", "bottommost", "center",
+                "second_from_left", "second_from_right", "third_from_left", "third_from_right",
+                "left_of_all", "right_of_all", "above_all", "below_all"
+            ]
+            if spatial_criteria not in valid_criteria:
+                raise ValueError(f"Invalid spatial_criteria: {spatial_criteria}. Must be one of {valid_criteria}")
+            
+            # Apply spatial filtering
+            filtered_outputs = filter_masks_by_spatial_position(current_outputs, spatial_criteria)
+            num_kept = len(filtered_outputs["pred_masks"])
+            filter_desc = filtered_outputs.get("spatial_filter_description", "")
+            
+            # Save updated outputs
+            image_w_filtered_masks = visualize(filtered_outputs)
+            image_w_filtered_masks_path = os.path.join(
+                sam_output_dir, rf"{LATEST_SAM3_TEXT_PROMPT}.png"
+            ).replace(
+                ".png",
+                f"_spatial_filter_{spatial_criteria}.png".replace("/", "_"),
+            )
+            image_w_filtered_masks.save(image_w_filtered_masks_path)
+            
+            # Update PATH_TO_LATEST_OUTPUT_JSON
+            base_path = PATH_TO_LATEST_OUTPUT_JSON
+            if "masks_" in base_path:
+                base_path = base_path.split("masks_")[0] + ".json"
+            if num_kept == 0:
+                PATH_TO_LATEST_OUTPUT_JSON = base_path.replace(
+                    ".json", "masks_none.json"
+                )
+            else:
+                kept_indices = list(range(num_kept))
+                PATH_TO_LATEST_OUTPUT_JSON = base_path.replace(
+                    ".json", f"masks_{'_'.join(map(str, kept_indices))}.json"
+                )
+            json.dump(filtered_outputs, open(PATH_TO_LATEST_OUTPUT_JSON, "w"), indent=4)
+            
+            # Append assistant message with tool call
+            messages.append({
+                "role": "assistant",
+                "content": generated_text if generated_text else None,
+                "tool_calls": [tool_call_data],
+            })
+            
+            if num_kept == 0:
+                tool_result_message = f"The original user query was: '{initial_text_prompt}'. The filter_masks_by_spatial_position tool filtered all masks out. {filter_desc} Now, please call the segment_phrase tool again with a different text_prompt, or try a different spatial criteria."
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "content": json.dumps({"message": tool_result_message, "num_masks": 0}),
+                })
+            else:
+                tool_result_message = f"The original user query was: '{initial_text_prompt}'. After calling the filter_masks_by_spatial_position tool with criteria '{spatial_criteria}', the number of available masks is now {num_kept}. {filter_desc} All {num_kept} available masks are rendered in this image below, now you must analyze the {num_kept} available mask(s) carefully, compare them against the raw input image and the original user query, and determine your next action."
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "content": json.dumps({
+                        "message": tool_result_message,
+                        "num_masks": num_kept,
+                        "output_image_path": image_w_filtered_masks_path,
+                        "spatial_criteria": spatial_criteria,
+                    }),
+                })
+                # For vision models: Add user message with image so model can visually analyze masks
+                messages.append({
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Please analyze the spatially filtered masks shown in the image below."},
+                        {"type": "image", "image": image_w_filtered_masks_path},
+                    ],
+                })
+
+        elif tool_call["name"] == "filter_masks_by_attributes":
+            print("🔍 Calling filter_masks_by_attributes tool...")
+            if not os.path.exists(PATH_TO_LATEST_OUTPUT_JSON):
+                raise FileNotFoundError(
+                    f"SAM3 output file not found: {PATH_TO_LATEST_OUTPUT_JSON}"
+                )
+            current_outputs = json.load(open(PATH_TO_LATEST_OUTPUT_JSON, "r"))
+            
+            # Extract filter parameters (all optional)
+            color = tool_call["parameters"].get("color")
+            min_size_ratio = tool_call["parameters"].get("min_size_ratio")
+            max_size_ratio = tool_call["parameters"].get("max_size_ratio")
+            aspect_ratio_range = tool_call["parameters"].get("aspect_ratio_range")
+            
+            # Validate parameters
+            if min_size_ratio is not None and (min_size_ratio < 0 or min_size_ratio > 1):
+                raise ValueError(f"min_size_ratio must be in [0, 1], got {min_size_ratio}")
+            if max_size_ratio is not None and (max_size_ratio < 0 or max_size_ratio > 1):
+                raise ValueError(f"max_size_ratio must be in [0, 1], got {max_size_ratio}")
+            if aspect_ratio_range is not None:
+                if not isinstance(aspect_ratio_range, list) or len(aspect_ratio_range) != 2:
+                    raise ValueError(f"aspect_ratio_range must be a list of 2 numbers [min, max], got {aspect_ratio_range}")
+                if aspect_ratio_range[0] < 0 or aspect_ratio_range[1] < 0:
+                    raise ValueError(f"aspect_ratio_range values must be non-negative, got {aspect_ratio_range}")
+                if aspect_ratio_range[0] > aspect_ratio_range[1]:
+                    raise ValueError(f"aspect_ratio_range min must be <= max, got {aspect_ratio_range}")
+            
+            # Check that at least one filter is provided
+            if color is None and min_size_ratio is None and max_size_ratio is None and aspect_ratio_range is None:
+                raise ValueError("At least one filter parameter (color, min_size_ratio, max_size_ratio, or aspect_ratio_range) must be provided")
+            
+            # Apply attribute filtering
+            filtered_outputs = filter_masks_by_attributes(
+                current_outputs,
+                color=color,
+                min_size_ratio=min_size_ratio,
+                max_size_ratio=max_size_ratio,
+                aspect_ratio_range=aspect_ratio_range,
+            )
+            num_kept = len(filtered_outputs["pred_masks"])
+            filter_desc = filtered_outputs.get("attribute_filter_description", "")
+            
+            # Save updated outputs
+            image_w_filtered_masks = visualize(filtered_outputs)
+            image_w_filtered_masks_path = os.path.join(
+                sam_output_dir, rf"{LATEST_SAM3_TEXT_PROMPT}.png"
+            ).replace(
+                ".png",
+                f"_attribute_filter.png".replace("/", "_"),
+            )
+            image_w_filtered_masks.save(image_w_filtered_masks_path)
+            
+            # Update PATH_TO_LATEST_OUTPUT_JSON
+            base_path = PATH_TO_LATEST_OUTPUT_JSON
+            if "masks_" in base_path:
+                base_path = base_path.split("masks_")[0] + ".json"
+            if num_kept == 0:
+                PATH_TO_LATEST_OUTPUT_JSON = base_path.replace(
+                    ".json", "masks_none.json"
+                )
+            else:
+                kept_indices = list(range(num_kept))
+                PATH_TO_LATEST_OUTPUT_JSON = base_path.replace(
+                    ".json", f"masks_{'_'.join(map(str, kept_indices))}.json"
+                )
+            json.dump(filtered_outputs, open(PATH_TO_LATEST_OUTPUT_JSON, "w"), indent=4)
+            
+            # Append assistant message with tool call
+            messages.append({
+                "role": "assistant",
+                "content": generated_text if generated_text else None,
+                "tool_calls": [tool_call_data],
+            })
+            
+            if num_kept == 0:
+                tool_result_message = f"The original user query was: '{initial_text_prompt}'. The filter_masks_by_attributes tool filtered all masks out. {filter_desc} Now, please call the segment_phrase tool again with a different text_prompt, or try different attribute filters."
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "content": json.dumps({"message": tool_result_message, "num_masks": 0}),
+                })
+            else:
+                tool_result_message = f"The original user query was: '{initial_text_prompt}'. After calling the filter_masks_by_attributes tool, the number of available masks is now {num_kept}. {filter_desc} All {num_kept} available masks are rendered in this image below, now you must analyze the {num_kept} available mask(s) carefully, compare them against the raw input image and the original user query, and determine your next action."
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "content": json.dumps({
+                        "message": tool_result_message,
+                        "num_masks": num_kept,
+                        "output_image_path": image_w_filtered_masks_path,
+                    }),
+                })
+                # For vision models: Add user message with image so model can visually analyze masks
+                messages.append({
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Please analyze the attribute-filtered masks shown in the image below."},
+                        {"type": "image", "image": image_w_filtered_masks_path},
+                    ],
+                })
+
+        elif tool_call["name"] == "filter_masks_by_relative_position":
+            print("🔍 Calling filter_masks_by_relative_position tool...")
+            if not os.path.exists(PATH_TO_LATEST_OUTPUT_JSON):
+                raise FileNotFoundError(
+                    f"SAM3 output file not found: {PATH_TO_LATEST_OUTPUT_JSON}"
+                )
+            current_outputs = json.load(open(PATH_TO_LATEST_OUTPUT_JSON, "r"))
+            
+            assert "relationship" in tool_call["parameters"] and "reference_mask_indices" in tool_call["parameters"], \
+                f"Expected ['relationship', 'reference_mask_indices'], got {list(tool_call['parameters'].keys())}"
+            
+            relationship = tool_call["parameters"]["relationship"]
+            reference_mask_indices = tool_call["parameters"]["reference_mask_indices"]
+            distance_threshold = tool_call["parameters"].get("distance_threshold", 0.2)
+            
+            # Validate relationship
+            valid_relationships = ["left_of", "right_of", "above", "below", "near", "far_from"]
+            if relationship not in valid_relationships:
+                raise ValueError(f"Invalid relationship: {relationship}. Must be one of {valid_relationships}")
+            
+            # Validate reference_mask_indices
+            if not isinstance(reference_mask_indices, list) or len(reference_mask_indices) == 0:
+                raise ValueError(f"reference_mask_indices must be a non-empty list, got {reference_mask_indices}")
+            if not all(isinstance(idx, int) and idx > 0 for idx in reference_mask_indices):
+                raise ValueError(f"reference_mask_indices must be positive integers (1-indexed), got {reference_mask_indices}")
+            
+            # Validate distance_threshold
+            if distance_threshold < 0 or distance_threshold > 1:
+                raise ValueError(f"distance_threshold must be in [0, 1], got {distance_threshold}")
+            
+            # Apply relative spatial filtering
+            filtered_outputs = filter_masks_by_relative_position(
+                current_outputs,
+                relationship,
+                reference_mask_indices,
+                distance_threshold,
+            )
+            num_kept = len(filtered_outputs["pred_masks"])
+            filter_desc = filtered_outputs.get("relative_spatial_filter_description", "")
+            
+            # Save updated outputs
+            image_w_filtered_masks = visualize(filtered_outputs)
+            image_w_filtered_masks_path = os.path.join(
+                sam_output_dir, rf"{LATEST_SAM3_TEXT_PROMPT}.png"
+            ).replace(
+                ".png",
+                f"_relative_filter_{relationship}.png".replace("/", "_"),
+            )
+            image_w_filtered_masks.save(image_w_filtered_masks_path)
+            
+            # Update PATH_TO_LATEST_OUTPUT_JSON
+            base_path = PATH_TO_LATEST_OUTPUT_JSON
+            if "masks_" in base_path:
+                base_path = base_path.split("masks_")[0] + ".json"
+            if num_kept == 0:
+                PATH_TO_LATEST_OUTPUT_JSON = base_path.replace(
+                    ".json", "masks_none.json"
+                )
+            else:
+                kept_indices = list(range(num_kept))
+                PATH_TO_LATEST_OUTPUT_JSON = base_path.replace(
+                    ".json", f"masks_{'_'.join(map(str, kept_indices))}.json"
+                )
+            json.dump(filtered_outputs, open(PATH_TO_LATEST_OUTPUT_JSON, "w"), indent=4)
+            
+            # Append assistant message with tool call
+            messages.append({
+                "role": "assistant",
+                "content": generated_text if generated_text else None,
+                "tool_calls": [tool_call_data],
+            })
+            
+            if num_kept == 0:
+                tool_result_message = f"The original user query was: '{initial_text_prompt}'. The filter_masks_by_relative_position tool filtered all masks out. {filter_desc} Now, please call the segment_phrase tool again with a different text_prompt, or try different reference masks or relationship."
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "content": json.dumps({"message": tool_result_message, "num_masks": 0}),
+                })
+            else:
+                tool_result_message = f"The original user query was: '{initial_text_prompt}'. After calling the filter_masks_by_relative_position tool with relationship '{relationship}' relative to reference mask(s) {reference_mask_indices}, the number of available masks is now {num_kept}. {filter_desc} All {num_kept} available masks are rendered in this image below, now you must analyze the {num_kept} available mask(s) carefully, compare them against the raw input image and the original user query, and determine your next action."
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "content": json.dumps({
+                        "message": tool_result_message,
+                        "num_masks": num_kept,
+                        "output_image_path": image_w_filtered_masks_path,
+                        "relationship": relationship,
+                        "reference_mask_indices": reference_mask_indices,
+                    }),
+                })
+                # For vision models: Add user message with image so model can visually analyze masks
+                messages.append({
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Please analyze the relative-position-filtered masks shown in the image below."},
+                        {"type": "image", "image": image_w_filtered_masks_path},
+                    ],
+                })
 
         elif tool_call["name"] == "select_masks_and_return":
             print("🔍 Calling select_masks_and_return tool...")

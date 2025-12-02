@@ -143,6 +143,8 @@ def validate_llm_config(llm_config: Dict[str, Any]) -> Dict[str, Any]:
     gpu="A100",
     timeout=600,
     image=image,
+    scaledown_window=3600,  # Keep container alive for 1 hour after last request
+    min_containers=1,  # Keep at least 1 container always running (always loaded)
     # Required secrets - SAM3 is a gated repository on HuggingFace:
     #   - "hf-token" containing key HF_TOKEN (REQUIRED - SAM3 model is gated)
     # To add secret: modal secret create hf-token HF_TOKEN=<your-token>
@@ -193,16 +195,33 @@ class SAM3Model:
         self,
         image_bytes: bytes,
         text_prompt: str,
+        confidence_threshold: float = None,
     ) -> Dict[str, Any]:
         """
         Pure SAM3 inference only (no LLM/agent).
         Returns the same format as sam3_inference function.
+        
+        Args:
+            image_bytes: Raw image bytes
+            text_prompt: Text prompt for segmentation
+            confidence_threshold: Optional confidence threshold (0.0-1.0). 
+                               If None, uses processor's default (0.4)
         """
         from PIL import Image
         import io
         import torch
         from sam3.model.box_ops import box_xyxy_to_xywh
         from sam3.train.masks_ops import rle_encode
+        
+        # Set confidence threshold if provided
+        if confidence_threshold is not None:
+            if not 0.0 <= confidence_threshold <= 1.0:
+                return {
+                    "status": "error",
+                    "message": f"confidence_threshold must be between 0.0 and 1.0, got {confidence_threshold}"
+                }
+            self.processor.confidence_threshold = confidence_threshold
+            print(f"✓ Using confidence threshold: {confidence_threshold}")
         
         # Load image from bytes and convert to RGB if needed
         image = Image.open(io.BytesIO(image_bytes))
@@ -334,6 +353,7 @@ class SAM3Model:
         prompt: str,
         llm_config: Dict[str, Any],
         debug: bool = False,
+        confidence_threshold: float = None,
     ) -> Dict[str, Any]:
         """
         Core GPU inference method - LLM provider agnostic.
@@ -348,15 +368,15 @@ class SAM3Model:
                 - base_url: API endpoint URL (required) - any OpenAI-compatible endpoint
                 - model: Model name/identifier (required) - any model name
                 - api_key: API key (required, can be empty string for backends without auth)
-                - name: Name for output files (optional, defaults to model name)
-                - max_tokens: Maximum tokens (optional, defaults to 4096)
+            - name: Name for output files (optional, defaults to model name)
+            - max_tokens: Maximum tokens (optional, defaults to 4096)
             debug: whether to return a visualization image (base64)
+            confidence_threshold: Optional confidence threshold (0.0-1.0). If None, uses processor's default (0.4)
         
         Returns:
             Dict with status, regions, summary, and optional debug visualization
         """
         try:
-            from sam3.agent.inference import run_single_image_inference
             from sam3.agent.client_llm import (
                 send_generate_request as send_generate_request_orig,
             )
@@ -375,12 +395,27 @@ class SAM3Model:
         except Exception as e:
             return {"status": "error", "message": f"Invalid llm_config: {str(e)}"}
 
+        # Set confidence threshold if provided
+        if confidence_threshold is not None:
+            if not 0.0 <= confidence_threshold <= 1.0:
+                return {
+                    "status": "error",
+                    "message": f"confidence_threshold must be between 0.0 and 1.0, got {confidence_threshold}"
+                }
+            self.processor.confidence_threshold = confidence_threshold
+            print(f"✓ Using confidence threshold: {confidence_threshold}")
+
+        # Cap max_tokens to 4096 to allow longer reasoning outputs for 32B Thinking model
+        # Note: llm_config is already validated, so max_tokens is guaranteed to exist
+        requested_max_tokens = llm_config["max_tokens"]
+        safe_max_tokens = min(requested_max_tokens, 4096)
+        
         send_generate_request = partial(
             send_generate_request_orig,
             server_url=llm_config["base_url"],
             model=llm_config["model"],
             api_key=llm_config["api_key"],
-            max_tokens=llm_config.get("max_tokens", 4096),
+            max_tokens=safe_max_tokens,
         )
 
         call_sam_service = partial(
@@ -407,7 +442,7 @@ class SAM3Model:
                     call_sam_service=call_sam_service,
                     debug=debug,
                     output_dir=output_dir,
-                    max_generations=4,  # Limit LLM API calls to 4
+                    max_generations=7,  # Limit LLM API calls to 7
                 )
 
                 if not final_output_dict:
@@ -506,6 +541,7 @@ def sam3_infer(body: Dict[str, Any]) -> Dict[str, Any]:
     {
       "text_prompt": "...",
       "image_b64": "...",   # or "image_url": "https://..."
+      "confidence_threshold": 0.5  # Optional: confidence threshold (0.0-1.0, default: 0.4)
     }
     
     Returns:
@@ -522,6 +558,7 @@ def sam3_infer(body: Dict[str, Any]) -> Dict[str, Any]:
         return {"status": "error", "message": "Missing 'text_prompt' in request body."}
     
     text_prompt = body["text_prompt"]
+    confidence_threshold = body.get("confidence_threshold")
     
     # Get image bytes from either image_b64 or image_url
     if "image_b64" in body:
@@ -550,12 +587,13 @@ def sam3_infer(body: Dict[str, Any]) -> Dict[str, Any]:
         }
     
     # Call the GPU-backed model for SAM3 inference only
-    model_instance = SAM3Model()
+    # Use class reference directly to ensure persistent container reuse
     try:
         print(f"📞 Calling sam3_infer_only with prompt: '{text_prompt}'")
-        result = model_instance.sam3_infer_only.remote(
+        result = SAM3Model().sam3_infer_only.remote(
             image_bytes=image_bytes,
             text_prompt=text_prompt,
+            confidence_threshold=confidence_threshold,
         )
         print(f"✓ sam3_infer_only returned {len(result.get('pred_boxes', []))} predictions")
         return result
@@ -646,6 +684,7 @@ def sam3_segment(body: Dict[str, Any]) -> Dict[str, Any]:
     prompt = body["prompt"]
     debug = bool(body.get("debug", False))
     llm_config = body["llm_config"]
+    confidence_threshold = body.get("confidence_threshold")
 
     # Get image bytes from either image_b64 or image_url
     if "image_b64" in body:
@@ -657,7 +696,7 @@ def sam3_segment(body: Dict[str, Any]) -> Dict[str, Any]:
         import requests
 
         try:
-            resp = requests.get(body["image_url"])
+            resp = requests.get(body["image_url"], timeout=30)
             resp.raise_for_status()
             image_bytes = resp.content
         except Exception as e:
@@ -672,12 +711,13 @@ def sam3_segment(body: Dict[str, Any]) -> Dict[str, Any]:
         }
 
     # Call the GPU-backed model
-    model = SAM3Model()
-    result = model.infer.remote(
+    # Use class reference directly to ensure persistent container reuse
+    result = SAM3Model().infer.remote(
         image_bytes=image_bytes,
         prompt=prompt,
         llm_config=llm_config,
         debug=debug,
+        confidence_threshold=confidence_threshold,
     )
     return result
 

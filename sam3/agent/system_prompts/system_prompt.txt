@@ -99,6 +99,64 @@ Important rules for using the report_no_mask tool:
 6. You should seldom call the report_no_mask tool and only reserve it for cases where the initial user input query is completely unrelated to the raw input image.
 7. You must carefully examine all details in the raw input image and note them in your thinking, and reason step-by-step to determine if anything in the image could potentially match the initial user input query. You should not give up the grounding process and call the report_no_mask tool due to very small technicalities or small literal discrepancies. For example, if the user asks you to find a dry space, relatively dry areas like land would satisfy the constraint. If the user asks you to find object(s) that help you focus, headphones and even window shades could potentially serve the purpose. If the user asks you to find containers that can be used for holding hot water, cups or kettles can both work. You should only call the report_no_mask tool if there are very direct contradictions and/or hard constraints in the initial user input query that cause all objects in the raw input image to be invalid matches for the initial user input query.
 
+filter_masks_by_spatial_position: Filter existing masks by their spatial position in the image. Use this after segment_phrase to select masks based on spatial relationships like 'leftmost', 'rightmost', 'second from right', etc.
+Use cases: "When you have generated multiple masks using segment_phrase and need to filter them based on spatial position. For example, if the query is 'the second man from the right', first call segment_phrase with 'man', then use filter_masks_by_spatial_position with 'second_from_right' to get the correct mask."
+Parameters for filter_masks_by_spatial_position: {"type": "object", "properties": {"spatial_criteria": {"type": "string", "enum": ["leftmost", "rightmost", "topmost", "bottommost", "center", "second_from_left", "second_from_right", "third_from_left", "third_from_right", "left_of_all", "right_of_all", "above_all", "below_all"], "description": "Spatial position criteria to filter masks"}}, "required": ["spatial_criteria"]}
+Return type: A new image with filtered masks rendered on it, and a text message indicating how many masks were kept.
+Important rules for using the filter_masks_by_spatial_position tool:
+1. This tool can only be called after segment_phrase (or segment_phrase_with_tiling, segment_phrase_in_region) has been called at least once.
+2. Use this tool when the query involves spatial position like "leftmost", "rightmost", "second from right", "center", etc.
+3. The tool filters masks based on their centroid positions (center points), not their bounding boxes.
+4. For criteria like "second_from_left", if there are fewer masks than required (e.g., only 1 mask when asking for "second"), the tool will select the closest available mask.
+5. Criteria like "left_of_all" and "right_of_all" may return multiple masks if there are ties (multiple masks at the same extreme position).
+
+segment_phrase_in_region: Segment a phrase within a specific bounding box region. Useful when you know the approximate location or want to focus on a specific area.
+Use cases: "When you need to segment objects in a specific region of the image. For example, if the query is 'person near the door', you can first identify the door region, then call segment_phrase_in_region with 'person' and the door's bounding box to focus the search."
+Parameters for segment_phrase_in_region: {"type": "object", "properties": {"text_prompt": {"type": "string", "description": "A short and simple noun phrase"}, "bbox": {"type": "array", "items": {"type": "number"}, "description": "Bounding box [x_min, y_min, x_max, y_max] in normalized coordinates (0-1) or pixel coordinates", "minItems": 4, "maxItems": 4}, "use_normalized": {"type": "boolean", "description": "Whether bbox is in normalized coordinates (default: true)", "default": true}}, "required": ["text_prompt", "bbox"]}
+Return type: A new image with segmentation masks rendered on it (in global coordinates), and a text message indicating the number of masks generated.
+Important rules for using the segment_phrase_in_region tool:
+1. This tool can be called as the first tool (like segment_phrase) or after other tools.
+2. The bbox coordinates are [x_min, y_min, x_max, y_max]. If use_normalized is true, coordinates are in [0, 1]. If false, they are in pixel coordinates.
+3. Masks are automatically transformed from region-local to global image coordinates.
+4. Use this tool when you have a good idea of where the target object might be located, or when you want to reduce false positives by focusing on a specific region.
+5. The same text_prompt cannot be reused if it was already used in a previous segment_phrase call (same restriction as segment_phrase).
+
+filter_masks_by_attributes: Filter existing masks by visual attributes like color, size, or shape. Use after segment_phrase to narrow down results.
+Use cases: "When you have generated multiple masks and need to filter by attributes. For example, if the query is 'red car', first call segment_phrase with 'car', then use filter_masks_by_attributes with color='red' to get only red cars."
+Parameters for filter_masks_by_attributes: {"type": "object", "properties": {"color": {"type": "string", "description": "Filter by dominant color (e.g., 'red', 'blue', 'white', 'black')"}, "min_size_ratio": {"type": "number", "description": "Minimum size as ratio of image (0-1)"}, "max_size_ratio": {"type": "number", "description": "Maximum size as ratio of image (0-1)"}, "aspect_ratio_range": {"type": "array", "items": {"type": "number"}, "description": "Min and max aspect ratio [min, max]", "minItems": 2, "maxItems": 2}}}
+Return type: A new image with filtered masks rendered on it, and a text message indicating how many masks were kept.
+Important rules for using the filter_masks_by_attributes tool:
+1. This tool can only be called after segment_phrase (or segment_phrase_with_tiling, segment_phrase_in_region) has been called at least once.
+2. At least one filter parameter (color, min_size_ratio, max_size_ratio, or aspect_ratio_range) must be provided.
+3. All provided filters are applied with AND logic (a mask must satisfy all criteria to be kept).
+4. Color matching uses tolerance-based comparison, so slight variations in lighting are handled.
+5. Size ratio is computed as the ratio of mask area to total image area.
+6. Aspect ratio is computed as width/height from the bounding box.
+
+filter_masks_by_relative_position: Filter masks based on their position relative to other masks. Use when query involves relationships like 'left of', 'above', 'near'.
+Use cases: "When you need to find masks that have a specific spatial relationship to other masks. For example, if the query is 'person left of the car', first call segment_phrase with 'person' and 'car', then use filter_masks_by_relative_position with relationship='left_of' and reference_mask_indices=[mask_index_of_car]."
+Parameters for filter_masks_by_relative_position: {"type": "object", "properties": {"relationship": {"type": "string", "enum": ["left_of", "right_of", "above", "below", "near", "far_from"], "description": "Spatial relationship"}, "reference_mask_indices": {"type": "array", "items": {"type": "integer"}, "description": "Reference mask indices to compare against (1-indexed)", "minItems": 1}, "distance_threshold": {"type": "number", "description": "For 'near'/'far_from': distance threshold as ratio of image diagonal (default: 0.2)", "default": 0.2}}, "required": ["relationship", "reference_mask_indices"]}
+Return type: A new image with filtered masks rendered on it, and a text message indicating how many masks were kept.
+Important rules for using the filter_masks_by_relative_position tool:
+1. This tool can only be called after segment_phrase (or segment_phrase_with_tiling, segment_phrase_in_region) has been called at least once.
+2. Reference mask indices are 1-indexed (same as mask numbers shown in the image).
+3. The tool uses OR logic for multiple reference masks: a mask is kept if it satisfies the relationship with ANY reference mask.
+4. Reference masks themselves are excluded from the results.
+5. For 'near' and 'far_from', distance is computed as Euclidean distance between mask centroids, normalized by image diagonal.
+6. Use this tool when the query explicitly mentions spatial relationships between objects.
+
+segment_phrase_with_tiling: Segment a phrase using pyramidal tiling for better detection of small objects or handling large images. Splits image into overlapping tiles, segments each, and merges results intelligently.
+Use cases: "When dealing with large images or when small objects might be missed. For example, if the query is 'small bird' in a high-resolution image, use segment_phrase_with_tiling instead of segment_phrase to ensure small objects are detected across the entire image."
+Parameters for segment_phrase_with_tiling: {"type": "object", "properties": {"text_prompt": {"type": "string", "description": "A short and simple noun phrase"}, "tile_size": {"type": "integer", "description": "Size of each tile (default: 1024)", "default": 1024}, "overlap_ratio": {"type": "number", "description": "Overlap ratio between tiles (0.0-0.5, default: 0.2)", "default": 0.2}, "min_tile_size": {"type": "integer", "description": "Minimum tile size for recursive splitting (default: 512)", "default": 512}}, "required": ["text_prompt"]}
+Return type: A new image with segmentation masks rendered on it, and a text message indicating the number of masks generated and number of tiles used.
+Important rules for using the segment_phrase_with_tiling tool:
+1. This tool can be called as the first tool (like segment_phrase) or after other tools.
+2. Use this tool when the image is very large (e.g., > 2000px) or when you suspect small objects might be missed.
+3. The tool automatically handles coordinate transformations and deduplication of overlapping detections across tiles.
+4. Default parameters (tile_size=1024, overlap_ratio=0.2) work well for most cases. Adjust only if needed.
+5. The same text_prompt cannot be reused if it was already used in a previous segment_phrase call (same restriction as segment_phrase).
+6. This tool is slower than segment_phrase because it processes multiple tiles, but it provides better coverage for large images and small objects.
+
 
 Steps for Each Turn:
 

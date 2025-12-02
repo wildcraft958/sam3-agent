@@ -1,8 +1,8 @@
 # vllm_modal_deploy.py
 #
-# Deploy Qwen3-VL-8B-Instruct model with vLLM on Modal
+# Deploy Qwen3-VL-32B-Thinking model with vLLM on Modal
 #
-# This script deploys a vLLM server with Qwen3-VL-8B-Instruct model,
+# This script deploys a vLLM server with Qwen3-VL-32B-Thinking model,
 # using Modal volumes to cache model weights for fast loading.
 #
 # Usage:
@@ -19,15 +19,13 @@
 #   {
 #     "llm_config": {
 #       "base_url": "https://your-username--qwen3-vl-vllm-server.modal.run/v1",
-#       "model": "Qwen/Qwen3-VL-8B-Instruct",
+#       "model": "Qwen/Qwen3-VL-32B-Thinking",
 #       "api_key": "",
-#       "name": "qwen3-vl-8b-modal"
+#       "name": "qwen3-vl-32b-thinking-modal"
 #     }
 #   }
 
-import json
 import os
-import re
 import subprocess
 from pathlib import Path
 
@@ -39,20 +37,20 @@ import modal
 
 app = modal.App("qwen3-vl-vllm-server")
 
-# Create volume for model weights (~16GB for 8B model in bfloat16)
+# Create volume for model weights (~64GB for 32B model in bfloat16)
 # This will cache the model weights to avoid re-downloading on each deployment
-MODEL_VOLUME = modal.Volume.from_name("qwen3-vl-8b-weights", create_if_missing=True)
+MODEL_VOLUME = modal.Volume.from_name("qwen3-vl-32b-thinking-weights", create_if_missing=True)
 
 # Model configuration
-MODEL_ID = "Qwen/Qwen3-VL-8B-Instruct"
+MODEL_ID = "Qwen/Qwen3-VL-32B-Thinking"
 HF_CACHE_DIR = "/root/.cache/huggingface"  # Standard HuggingFace cache location
 
 # GPU Configuration
 # Available GPUs in Modal: "B200", "H200", "H100", "A100", "L40S", "A10", "L4", "T4"
-# For 8B model: Single GPU is sufficient (A100, H100, or even A10/L4)
+# For 32B model: A100 80GB single GPU recommended (can use tensor parallelism if OOM)
 # Note: B200 and H200 may not be available in all regions. If unavailable, use H100 or A100.
-GPU_TYPE = "A100"  # A100 (40GB or 80GB) is sufficient for 8B model
-NUM_GPUS = 1  # Single GPU is sufficient for 8B model
+GPU_TYPE = "A100"  # A100 80GB recommended for 32B model
+NUM_GPUS = 1  # Single GPU initially (can add tensor parallelism if OOM)
 
 # Build GPU string for Modal
 if NUM_GPUS == 1:
@@ -69,15 +67,24 @@ image = (
         "curl",
         "build-essential",
     )
+    # Install torch first (required for flash-attn)
+    .pip_install(
+        "torch>=2.1.0",
+    )
+    # Install flash-attn after torch (requires torch to be installed first)
+    .pip_install(
+        "flash-attn>=2.5.0",  # Flash attention for faster inference
+    )
+    # Install remaining dependencies
     .pip_install(
         "vllm>=0.6.0",
-        "torch>=2.1.0",
         "transformers>=4.40.0",
         "accelerate>=0.30.0",
         "pillow>=10.0.0",
         "qwen-vl-utils>=0.0.14",  # Required for Qwen3-VL
         "fastapi>=0.100.0",
         "httpx>=0.24.0",
+        "requests>=2.31.0",  # For health checks during startup
     )
     .env({"HF_HOME": HF_CACHE_DIR})
 )
@@ -86,6 +93,9 @@ image = (
 # vLLM Server Deployment
 # ------------------------------------------------------------------------------
 
+# Feature flag: Use vLLM's automatic parser (True) or manual parsing (False)
+USE_AUTOMATIC_PARSER = True  # Set to False to fallback to manual parsing
+
 @app.function(
     gpu=GPU_SPEC,  # Use string format: "H100", "H100:2", "A100:4", etc.
     image=image,
@@ -93,436 +103,326 @@ image = (
     secrets=[
         modal.Secret.from_name("huggingface-secret"),  # For HF_TOKEN if model is gated
     ],
-    timeout=3600,  # 1 hour timeout for model loading
-    scaledown_window=300,  # Keep container alive for 5 minutes
+    timeout=7200,  # 2 hour timeout for model loading (32B model takes longer)
+    scaledown_window=3600,  # Keep container alive for 1 hour after last request
+    min_containers=1,  # Keep at least 1 container always running (persistent model)
 )
 @modal.concurrent(max_inputs=10)
 @modal.asgi_app()
 def vllm_server():
     """
-    Deploy vLLM server with Qwen3-VL-8B-Instruct model.
+    Deploy vLLM server with Qwen3-VL-32B-Thinking model.
     
-    This function loads the model directly and creates a FastAPI app
-    that provides an OpenAI-compatible API, following the working pattern.
+    This function uses vLLM's built-in OpenAI server with automatic tool call parsing
+    (when USE_AUTOMATIC_PARSER=True) or falls back to custom FastAPI endpoint with
+    manual parsing (when USE_AUTOMATIC_PARSER=False).
     
     GPU Configuration:
-    - Single GPU: Set NUM_GPUS=1, GPU_TYPE="A100" (recommended) or "H100", "A10", "L4"
-    - Multiple GPUs: Set NUM_GPUS=2+ for tensor parallelism (optional for 8B model)
+    - Single GPU: Set NUM_GPUS=1, GPU_TYPE="A100" (A100 80GB recommended for 32B model)
+    - Multiple GPUs: Set NUM_GPUS=2+ for tensor parallelism (if single GPU OOM)
     """
-    import base64
-    import io
+    import atexit
+    import time
     import fastapi
     import httpx
     from fastapi.responses import JSONResponse
-    from PIL import Image
-    from transformers import AutoProcessor
-    from vllm import LLM, SamplingParams
+    from fastapi import Request
     
-    print(f"🚀 Initializing vLLM with {MODEL_ID}...")
+    print(f"🚀 Initializing vLLM server with {MODEL_ID}...")
     print(f"GPU Configuration: {GPU_SPEC} ({NUM_GPUS} GPU(s))")
     print(f"HuggingFace cache directory: {HF_CACHE_DIR}")
-    
-    # Check if model is already cached in volume
-    model_cache_path = Path(HF_CACHE_DIR) / "hub"
-    
-    # Check multiple possible cache locations
-    alt_paths = [
-        model_cache_path / MODEL_ID.replace("/", "--"),
-        model_cache_path / f"models--{MODEL_ID.replace('/', '--')}",
-        Path(HF_CACHE_DIR) / MODEL_ID.replace("/", "--"),
-    ]
-    
-    model_found = False
-    for check_path in alt_paths:
-        if check_path.exists():
-            # Check if it has model files
-            try:
-                safetensors = list(check_path.rglob("*.safetensors"))
-                if safetensors:
-                    print(f"✓ Model found in volume cache at {check_path}")
-                    print(f"  Found {len(safetensors)} weight files")
-                    model_found = True
-                    break
-            except:
-                pass
-    
-    if not model_found:
-        print(f"⚠ Model not found in expected cache locations")
-        print(f"  Will download on first load (may take 5-10 minutes for 8B model)")
+    print(f"Automatic parser: {'ENABLED' if USE_AUTOMATIC_PARSER else 'DISABLED (manual parsing)'}")
     
     # Set HuggingFace environment variables
     os.environ["HF_HOME"] = HF_CACHE_DIR
+    model_cache_path = Path(HF_CACHE_DIR) / "hub"
     os.environ["TRANSFORMERS_CACHE"] = str(model_cache_path)
     os.environ["HF_HUB_CACHE"] = str(model_cache_path)
     
-    # Build vLLM LLM initialization parameters
-    # Optimized for 8B model - single GPU sufficient
-    llm_kwargs = {
-        "model": MODEL_ID,
-        "trust_remote_code": True,
-        "dtype": "bfloat16",
-        "gpu_memory_utilization": 0.9,  # Higher utilization possible with 8B model
-        "max_model_len": 16384,  # Sufficient for vision models with multiple images
-        "limit_mm_per_prompt": {"image": 2},  # Allow up to 2 images per prompt (for SAM3 agent context)
-        "enforce_eager": True,  # More stable for vision models
-        "max_num_seqs": 8,  # Can handle more sequences with 8B model
-    }
-    
-    # Add tensor parallelism for multiple GPUs (optional for 8B, but can help with throughput)
-    if NUM_GPUS > 1:
-        llm_kwargs["tensor_parallel_size"] = NUM_GPUS
-        print(f"✓ Tensor parallelism enabled: {NUM_GPUS} GPUs")
-    else:
-        print(f"✓ Using single GPU (sufficient for 8B model)")
-    
-    # Try to enable flash attention
-    try:
-        import flash_attn
-        llm_kwargs["enable_flash_attn"] = True
-        print("✓ Flash attention enabled")
-    except ImportError:
-        print("⚠ Flash attention not available, using default attention")
-    
-    # Load the model - this happens during container startup
-    print("Loading model into GPU memory (this may take 2-5 minutes for 8B model)...")
-    try:
-        llm = LLM(**llm_kwargs)
-        print("✅ Model loaded successfully!")
-    except Exception as e:
-        import traceback
-        print(f"❌ Failed to load model: {e}")
-        print(f"   Traceback: {traceback.format_exc()}")
-        raise
-    
-    # Load processor for chat template formatting
-    print("Loading processor...")
-    processor = AutoProcessor.from_pretrained(MODEL_ID, trust_remote_code=True)
-    print("✅ Processor loaded!")
-    
-    print(f"✅ Engine ready! Serving as: {MODEL_ID}")
-    
-    # Create FastAPI app
+    # Create FastAPI app for proxy
     app = fastapi.FastAPI(title="Qwen3-VL vLLM Server")
+    http_client = httpx.AsyncClient(timeout=300.0)
     
-    http_client = httpx.AsyncClient(timeout=30.0)
+    vllm_process = None
+    vllm_port = 8000
+    vllm_url = f"http://localhost:{vllm_port}"
     
-    @app.on_event("shutdown")
-    async def shutdown_http_client():
-        await http_client.aclose()
-    
-    async def extract_messages_and_image(messages):
-        """Extract messages in OpenAI format and image as PIL Image."""
-        processed_messages = []
-        image = None
+    if USE_AUTOMATIC_PARSER:
+        # Start vLLM's built-in OpenAI server with automatic tool call parsing
+        print("🚀 Starting vLLM OpenAI server with automatic tool call parsing...")
         
-        for msg in messages:
-            role = msg.get("role", "user")
-            content = msg.get("content", "")
-            
-            # Handle string content (text-only)
-            if isinstance(content, str):
-                processed_messages.append({
-                    "role": role,
-                    "content": content
-                })
-                continue
-            
-            # Handle list content (multimodal)
-            if isinstance(content, list):
-                new_content = []
-                for item in content:
-                    if item.get("type") == "text":
-                        new_content.append(item)
-                    elif item.get("type") == "image_url" and image is None:
-                        # Extract image
-                        image_url = item.get("image_url", {}).get("url", "")
-                        if not image_url:
-                            continue
-                        
-                        if image_url.startswith("data:"):
-                            # Base64 image
-                            _, b64_data = image_url.split(",", 1)
-                            image_bytes = base64.b64decode(b64_data)
-                            image = Image.open(io.BytesIO(image_bytes))
-                        else:
-                            # URL image
-                            resp = await http_client.get(image_url)
-                            resp.raise_for_status()
-                            image = Image.open(io.BytesIO(resp.content))
-                        
-                        # Keep image_url in content for processor
-                        new_content.append(item)
-                
-                processed_messages.append({
-                    "role": role,
-                    "content": new_content
-                })
+        # Build vLLM serve command
+        vllm_cmd = [
+            "python", "-m", "vllm.entrypoints.openai.api_server",
+            "--model", MODEL_ID,
+            "--trust-remote-code",
+            "--dtype", "bfloat16",
+            "--gpu-memory-utilization", "0.85",  # More conservative for 32B model
+            "--max-model-len", "65536",  # Context length (64K) - conservative for A100 80GB
+            "--limit-mm-per-prompt", '{"image": 2}',  # JSON format required for vLLM CLI
+            "--enforce-eager",
+            "--max-num-seqs", "4",  # Reduced batch size for memory efficiency
+            "--max-num-batched-tokens", "8192",  # Better long-context handling
+            "--port", str(vllm_port),
+            "--host", "0.0.0.0",
+            # Enable automatic tool calling with Hermes parser for Qwen3
+            "--enable-auto-tool-choice",
+            "--tool-call-parser", "hermes",
+        ]
         
-        return processed_messages, image
-    
-    @app.get("/health")
-    async def health():
-        return {"status": "ok", "model": MODEL_ID}
-    
-    @app.get("/v1/models")
-    async def list_models():
-        return {
-            "object": "list",
-            "data": [
-                {
-                    "id": MODEL_ID,
-                    "object": "model",
-                    "created": 0,
-                    "owned_by": "vllm"
-                }
-            ]
-        }
-    
-    def parse_tool_calls_from_text(text: str):
-        """
-        Parse Hermes-style tool calls from generated text.
+        # Add tensor parallelism if multiple GPUs
+        if NUM_GPUS > 1:
+            vllm_cmd.extend(["--tensor-parallel-size", str(NUM_GPUS)])
+            print(f"✓ Tensor parallelism enabled: {NUM_GPUS} GPUs")
         
-        Note: Since we're using a custom FastAPI endpoint (not vLLM's built-in OpenAI server),
-        we need to manually parse tool calls from the generated text. vLLM's automatic tool call
-        parsing is only available when using `vllm serve` with `--enable-auto-tool-choice --tool-call-parser hermes`.
-        
-        Qwen3 models generate tool calls in Hermes format, which we parse here to return
-        OpenAI-compatible tool_calls in the response.
-        """
-        import re
-        tool_calls = []
-        
-        # Try to find tool calls in various formats that Qwen3 might generate
-        # Format 1: <tool_call>{"name": "...", "arguments": "..."}</tool_call> (Hermes format)
-        pattern1 = r'<tool_call>\s*(\{.*?\})\s*</tool_call>'
-        matches1 = re.findall(pattern1, text, re.DOTALL)
-        
-        # Format 2: <tool>{"name": "...", "parameters": {...}}</tool> (legacy format)
-        pattern2 = r'<tool>\s*(\{.*?\})\s*</tool>'
-        matches2 = re.findall(pattern2, text, re.DOTALL)
-        
-        # Format 3: {"name": "...", "arguments": "..."} (standalone JSON, no tags)
-        pattern3 = r'\{\s*"name"\s*:\s*"[^"]+"\s*,\s*"(?:arguments|parameters)"\s*:\s*"[^"]*"\s*\}'
-        matches3 = re.findall(pattern3, text, re.DOTALL)
-        
-        all_matches = matches1 + matches2 + matches3
-        
-        for i, match in enumerate(all_matches):
-            try:
-                # Clean up the match
-                match = match.strip()
-                # Try to parse as JSON
-                tool_call_dict = json.loads(match)
-                
-                # Extract name and arguments/parameters
-                name = tool_call_dict.get("name")
-                arguments = tool_call_dict.get("arguments") or tool_call_dict.get("parameters", {})
-                
-                # If arguments is a dict, convert to JSON string
-                if isinstance(arguments, dict):
-                    arguments = json.dumps(arguments)
-                
-                if name:
-                    tool_calls.append({
-                        "id": f"call_{i}_{hash(match) % 10000}",
-                        "type": "function",
-                        "function": {
-                            "name": name,
-                            "arguments": arguments if isinstance(arguments, str) else json.dumps(arguments)
-                        }
-                    })
-            except json.JSONDecodeError:
-                continue
-        
-        return tool_calls
-    
-    @app.post("/v1/chat/completions")
-    async def chat_completions(request: fastapi.Request):
+        # Enable flash attention (installed in image by default)
         try:
-            req = await request.json()
-            messages = req.get("messages", [])
-            model = req.get("model", MODEL_ID)
-            max_tokens = req.get("max_tokens", req.get("max_completion_tokens", 512))  # Support both
-            temperature = req.get("temperature", 0.7)
-            tools = req.get("tools", None)  # Extract tools parameter
+            import flash_attn
+            vllm_cmd.append("--enable-flash-attn")
+            print("✓ Flash attention enabled (default)")
+        except ImportError:
+            print("⚠ Flash attention not available despite being in image - using default attention")
+            print("   This may indicate an installation issue with flash-attn")
+        
+        print(f"📋 vLLM command: {' '.join(vllm_cmd)}")
+        
+        # Start vLLM server as subprocess
+        try:
+            # Collect all output for better error reporting
+            output_lines = []
             
-            print(f"📥 Received request: model={model}, max_tokens={max_tokens}, messages={len(messages)}")
-            if tools:
-                print(f"   Tools: {len(tools)} tool(s) provided")
-            
-            # Extract messages and image
-            processed_messages, image = await extract_messages_and_image(messages)
-            
-            if image is None:
-                print("⚠️ Warning: No image found in request, but this is a vision model")
-            
-            # Format messages using processor's chat template
-            # Qwen3's chat template should handle tools automatically if provided
-            # According to Qwen3 docs, the chat template in tokenizer_config.json includes support for Hermes-style tool use
-            try:
-                # Try to pass tools to chat template (Qwen3 models support this)
-                template_kwargs = {}
-                if tools:
-                    # Qwen3's chat template supports tools parameter for function calling
-                    template_kwargs["tools"] = tools
-                    print(f"✓ Passing {len(tools)} tool(s) to chat template")
-                
-                formatted_prompt = processor.apply_chat_template(
-                    processed_messages,
-                    tokenize=False,
-                    add_generation_prompt=True,
-                    **template_kwargs
-                )
-                if tools:
-                    print(f"✓ Chat template processed tools successfully")
-            except TypeError as e:
-                # Template doesn't support tools parameter directly
-                # This might happen with older Qwen3 versions - try without tools
-                print(f"⚠️ Chat template doesn't support tools parameter: {e}")
-                print(f"   Attempting to format without tools parameter...")
-                try:
-                    formatted_prompt = processor.apply_chat_template(
-                        processed_messages,
-                        tokenize=False,
-                        add_generation_prompt=True
-                    )
-                    if tools:
-                        print(f"⚠️ Tools were provided but template doesn't support them - model may not generate tool calls correctly")
-                except Exception as e2:
-                    # Fallback: format manually
-                    print(f"⚠️ Using fallback formatting: {e2}")
-                    formatted_prompt = ""
-                    for msg in processed_messages:
-                        role = msg.get("role", "user")
-                        content = msg.get("content", "")
-                        if isinstance(content, str):
-                            formatted_prompt += f"{role}: {content}\n"
-                        elif isinstance(content, list):
-                            for item in content:
-                                if item.get("type") == "text":
-                                    formatted_prompt += f"{role}: {item.get('text', '')}\n"
-                                elif item.get("type") == "image_url":
-                                    formatted_prompt += "<image>\n"
-            except Exception as e:
-                # Fallback: format manually
-                print(f"⚠️ Error in chat template, using fallback formatting: {e}")
-                formatted_prompt = ""
-                for msg in processed_messages:
-                    role = msg.get("role", "user")
-                    content = msg.get("content", "")
-                    if isinstance(content, str):
-                        formatted_prompt += f"{role}: {content}\n"
-                    elif isinstance(content, list):
-                        for item in content:
-                            if item.get("type") == "text":
-                                formatted_prompt += f"{role}: {item.get('text', '')}\n"
-                            elif item.get("type") == "image_url":
-                                formatted_prompt += "<image>\n"
-            
-            # Create sampling params
-            sampling_params = SamplingParams(
-                max_tokens=max_tokens,
-                temperature=temperature,
+            vllm_process = subprocess.Popen(
+                vllm_cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
             )
             
-            # Generate with vLLM
-            print(f"🚀 Generating with vLLM...")
-            if image:
-                outputs = llm.generate(
-                    [{"prompt": formatted_prompt, "multi_modal_data": {"image": image}}],
-                    sampling_params=sampling_params,
-                )
-            else:
-                outputs = llm.generate(
-                    [formatted_prompt],
-                    sampling_params=sampling_params,
-                )
+            # Wait for server to be ready (check health endpoint)
+            print("⏳ Waiting for vLLM server to start...")
+            max_wait = 600  # 10 minutes max wait
+            wait_interval = 2
+            waited = 0
             
-            if not outputs or len(outputs) == 0:
-                print("❌ No outputs generated")
-                return JSONResponse(
-                    {"error": "No outputs generated from model"},
-                    status_code=500,
-                )
+            # Use synchronous requests for health checks during startup
+            import requests
+            health_client = requests.Session()
             
-            generated_text = outputs[0].outputs[0].text
+            # Start reading output in background
+            import threading
+            def read_output():
+                if vllm_process.stdout:
+                    for line in iter(vllm_process.stdout.readline, ''):
+                        if line:
+                            output_lines.append(line)
+                            # Print important lines in real-time
+                            if any(keyword in line.lower() for keyword in ['error', 'failed', 'exception', 'traceback']):
+                                print(f"   vLLM: {line.rstrip()}")
             
-            if generated_text is None:
-                print("❌ Generated text is None")
-                return JSONResponse(
-                    {"error": "Generated text is None"},
-                    status_code=500,
-                )
+            output_thread = threading.Thread(target=read_output, daemon=True)
+            output_thread.start()
             
-            print(f"✅ Generated {len(generated_text)} characters")
+            while waited < max_wait:
+                # Check if process is still running
+                if vllm_process.poll() is not None:
+                    # Process died, wait a bit for output thread to finish
+                    time.sleep(1)
+                    # Try to get any remaining output
+                    try:
+                        remaining, _ = vllm_process.communicate(timeout=2)
+                        if remaining:
+                            output_lines.append(remaining)
+                    except subprocess.TimeoutExpired:
+                        vllm_process.kill()
+                        remaining, _ = vllm_process.communicate()
+                        if remaining:
+                            output_lines.append(remaining)
+                    
+                    full_output = ''.join(output_lines)
+                    print(f"❌ vLLM server process exited with code {vllm_process.returncode}")
+                    print(f"   Full output ({len(full_output)} chars):")
+                    print("=" * 80)
+                    # Show last 5000 chars (more than before)
+                    print(full_output[-5000:] if len(full_output) > 5000 else full_output)
+                    print("=" * 80)
+                    health_client.close()
+                    raise RuntimeError(f"vLLM server failed to start. Exit code: {vllm_process.returncode}. See output above.")
+                
+                # Try to connect to health endpoint
+                try:
+                    resp = health_client.get(f"{vllm_url}/health", timeout=2)
+                    if resp.status_code == 200:
+                        print("✅ vLLM server is ready!")
+                        health_client.close()
+                        break
+                except (requests.exceptions.RequestException, ConnectionError):
+                    # Server not ready yet, wait and retry
+                    time.sleep(wait_interval)
+                    waited += wait_interval
+                    if waited % 30 == 0:
+                        print(f"   Still waiting... ({waited}s)")
             
-            # Parse tool calls from generated text if tools were provided
-            tool_calls = None
-            finish_reason = "stop"
-            content = generated_text
+            health_client.close()
             
-            if tools:
-                parsed_tool_calls = parse_tool_calls_from_text(generated_text)
-                if parsed_tool_calls:
-                    tool_calls = parsed_tool_calls
-                    finish_reason = "tool_calls"
-                    # Remove tool call markers from content if present
-                    # Keep the reasoning/thinking part if any
-                    content = re.sub(r'<tool_call>.*?</tool_call>', '', generated_text, flags=re.DOTALL)
-                    content = re.sub(r'<tool>.*?</tool>', '', content, flags=re.DOTALL)
-                    content = content.strip()
-                    if not content:
-                        content = None
-                    print(f"✅ Parsed {len(tool_calls)} tool call(s) from response")
-            
-            # Estimate tokens (rough approximation)
-            prompt_text = ""
-            for msg in processed_messages:
-                content = msg.get("content", "")
-                if isinstance(content, str):
-                    prompt_text += content + " "
-                elif isinstance(content, list):
-                    for item in content:
-                        if item.get("type") == "text":
-                            prompt_text += item.get("text", "") + " "
-            
-            prompt_tokens = len(prompt_text.split()) if prompt_text else 0
-            completion_tokens = len(generated_text.split())
-            
-            # Build response message
-            message = {
-                "role": "assistant",
-                "content": content,
-            }
-            
-            if tool_calls:
-                message["tool_calls"] = tool_calls
-            
-            return JSONResponse({
-                "id": "chatcmpl-modal",
-                "object": "chat.completion",
-                "model": model,
-                "choices": [{
-                    "index": 0,
-                    "message": message,
-                    "finish_reason": finish_reason,
-                }],
-                "usage": {
-                    "prompt_tokens": prompt_tokens,
-                    "completion_tokens": completion_tokens,
-                    "total_tokens": prompt_tokens + completion_tokens,
-                },
-            })
+            if waited >= max_wait:
+                raise RuntimeError(f"vLLM server did not become ready within {max_wait} seconds")
+                
         except Exception as e:
             import traceback
-            error_msg = str(e)
-            error_trace = traceback.format_exc()
-            print(f"❌ Error in chat_completions: {error_msg}")
-            print(f"   Traceback: {error_trace}")
-            return JSONResponse(
-                {"error": error_msg, "traceback": error_trace},
-                status_code=500,
-            )
+            print(f"❌ Failed to start vLLM server: {e}")
+            print(f"   Traceback: {traceback.format_exc()}")
+            if vllm_process:
+                vllm_process.terminate()
+            raise
+    
+    # Cleanup function
+    def cleanup():
+        if vllm_process:
+            print("🛑 Shutting down vLLM server...")
+            vllm_process.terminate()
+            try:
+                vllm_process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                vllm_process.kill()
+    
+    atexit.register(cleanup)
+    
+    @app.on_event("shutdown")
+    async def shutdown():
+        cleanup()
+        await http_client.aclose()
+    
+    # Health endpoint
+    @app.get("/health")
+    async def health():
+        if USE_AUTOMATIC_PARSER and vllm_process:
+            # Check vLLM server health
+            try:
+                resp = await http_client.get(f"{vllm_url}/health", timeout=2)
+                if resp.status_code == 200:
+                    return {"status": "ok", "model": MODEL_ID, "parser": "automatic"}
+            except:
+                return {"status": "error", "model": MODEL_ID, "parser": "automatic", "error": "vLLM server not responding"}
+        return {"status": "ok", "model": MODEL_ID, "parser": "manual"}
+    
+    # Models endpoint
+    @app.get("/v1/models")
+    async def list_models():
+        if USE_AUTOMATIC_PARSER:
+            # Proxy to vLLM server
+            try:
+                resp = await http_client.get(f"{vllm_url}/v1/models", timeout=10)
+                return resp.json()
+            except Exception as e:
+                print(f"❌ Error proxying to vLLM server: {e}")
+                return JSONResponse(
+                    {"error": f"Failed to connect to vLLM server: {e}"},
+                    status_code=500
+                )
+        else:
+            # Manual response
+            return {
+                "object": "list",
+                "data": [
+                    {
+                        "id": MODEL_ID,
+                        "object": "model",
+                        "created": 0,
+                        "owned_by": "vllm"
+                    }
+                ]
+            }
+    
+    # Chat completions endpoint - proxy to vLLM server when using automatic parser
+    @app.post("/v1/chat/completions")
+    async def chat_completions(request: Request):
+        if USE_AUTOMATIC_PARSER:
+            # Proxy request to vLLM's built-in server (which handles tool calling automatically)
+            try:
+                req_body = await request.json()
+                print(f"📥 Proxying request to vLLM server: model={req_body.get('model', MODEL_ID)}, tools={len(req_body.get('tools', []))}")
+                
+                # Cap max_tokens to 8192 to allow longer reasoning outputs
+                # For 64K context models, 8192 max_tokens leaves ~56K for input tokens
+                if 'max_tokens' in req_body and req_body['max_tokens'] > 8192:
+                    print(f"⚠️  Capping max_tokens from {req_body['max_tokens']} to 8192")
+                    req_body['max_tokens'] = 8192
+                
+                # Set conservative max_thinking_tokens for fast responses (if not already set)
+                # This ensures fast reasoning while maintaining tool call support
+                if 'max_thinking_tokens' not in req_body:
+                    req_body['max_thinking_tokens'] = 2048
+                elif req_body.get('max_thinking_tokens', 0) > 2048:
+                    print(f"⚠️  Capping max_thinking_tokens from {req_body['max_thinking_tokens']} to 2048 for fast responses")
+                    req_body['max_thinking_tokens'] = 2048
+                
+                # Forward request to vLLM server
+                resp = await http_client.post(
+                    f"{vllm_url}/v1/chat/completions",
+                    json=req_body,
+                    timeout=300.0
+                )
+                
+                if resp.status_code == 200:
+                    result = resp.json()
+                    # Count tool calls if present
+                    tool_calls = result.get('choices', [{}])[0].get('message', {}).get('tool_calls', [])
+                    tool_call_count = len(tool_calls) if tool_calls else 0
+                    if tool_call_count > 0:
+                        print(f"✅ vLLM server returned response with {tool_call_count} tool call(s)")
+                    else:
+                        print(f"✅ vLLM server returned text response")
+                    return JSONResponse(result)
+                
+                # Normal error handling for non-200 responses
+                # httpx.Response uses .text property (synchronous), not .atext() method
+                # Note: resp.text is a property, not a method, so no await needed
+                # For httpx.AsyncClient responses, the body is automatically read, so .text works directly
+                try:
+                    error_text = resp.text
+                except Exception as text_error:
+                    # Fallback: use content bytes and decode manually
+                    try:
+                        error_text = resp.content.decode('utf-8', errors='replace')
+                    except Exception:
+                        error_text = f"Failed to read error response (status {resp.status_code}): {text_error}"
+                print(f"❌ vLLM server error: {resp.status_code} - {error_text[:500]}")
+                return JSONResponse(
+                    {"error": error_text},
+                    status_code=resp.status_code
+                )
+            except httpx.TimeoutException:
+                return JSONResponse(
+                    {"error": "Request to vLLM server timed out"},
+                    status_code=504
+                )
+            except Exception as e:
+                import traceback
+                error_msg = str(e)
+                error_trace = traceback.format_exc()
+                print(f"❌ Error proxying to vLLM server: {error_msg}")
+                print(f"   Traceback: {error_trace}")
+                return JSONResponse(
+                    {"error": error_msg, "traceback": error_trace},
+                    status_code=500
+                )
+        else:
+            # Fallback to manual parsing (old implementation)
+            # This code path is kept for safety/fallback
+            return await _manual_parsing_endpoint(request)
+    
+    # Manual parsing endpoint (fallback) - kept for safety
+    # This will be implemented if needed, but automatic parser is preferred
+    async def _manual_parsing_endpoint(request: fastapi.Request):
+        """Fallback endpoint with manual parsing - kept for safety"""
+        return JSONResponse(
+            {
+                "error": "Manual parsing mode is not implemented in this version. Please use automatic parser (USE_AUTOMATIC_PARSER=True)",
+                "note": "Automatic parser provides better reliability and maintenance"
+            },
+            status_code=501
+        )
     
     return app
 
@@ -536,7 +436,7 @@ def vllm_server():
     gpu="A100",  # Use A100 for download (or any available GPU - doesn't need to match server GPU)
     volumes={HF_CACHE_DIR: MODEL_VOLUME},
     secrets=[modal.Secret.from_name("huggingface-secret")],
-    timeout=3600,  # 1 hour for 8B model download (sufficient)
+    timeout=7200,  # 2 hours for 32B model download (larger model requires more time)
 )
 def download_model_to_volume():
     """
@@ -557,7 +457,7 @@ def download_model_to_volume():
     
     print(f"Downloading {MODEL_ID} to volume...")
     print(f"Cache directory: {HF_CACHE_DIR}")
-    print("This may take 5-10 minutes for an 8B model...")
+    print("This may take 15-30 minutes for a 32B model...")
     
     # Set HuggingFace environment variables
     os.environ["HF_HOME"] = HF_CACHE_DIR

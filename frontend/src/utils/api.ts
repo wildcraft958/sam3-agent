@@ -17,12 +17,14 @@ export interface SegmentRequest {
   image_url?: string;
   llm_config: LLMConfig;
   debug?: boolean;
+  confidence_threshold?: number;
 }
 
 export interface InferRequest {
   text_prompt: string;
   image_b64?: string;
   image_url?: string;
+  confidence_threshold?: number;
 }
 
 export interface Region {

@@ -12,7 +12,7 @@ export default function LLMConfigForm({ onConfigChange, initialConfig }: LLMConf
     model: initialConfig?.model || 'gpt-4o',
     api_key: initialConfig?.api_key || '',
     name: initialConfig?.name || '',
-    max_tokens: initialConfig?.max_tokens || 4096,
+    max_tokens: initialConfig?.max_tokens || 2048,
   });
 
   const [showAdvanced, setShowAdvanced] = useState(false);
@@ -86,8 +86,26 @@ export default function LLMConfigForm({ onConfigChange, initialConfig }: LLMConf
             <input
               id="max_tokens"
               type="number"
-              value={config.max_tokens || 4096}
-              onChange={(e) => handleChange('max_tokens', parseInt(e.target.value) || 4096)}
+              value={config.max_tokens ?? 2048}
+              onChange={(e) => {
+                const value = e.target.value;
+                if (value === '') {
+                  // Allow empty input temporarily
+                  handleChange('max_tokens', undefined as any);
+                } else {
+                  const numValue = parseInt(value, 10);
+                  if (!isNaN(numValue) && numValue > 0) {
+                    handleChange('max_tokens', numValue);
+                  }
+                }
+              }}
+              onBlur={(e) => {
+                // On blur, if empty or invalid, set to default
+                const value = e.target.value;
+                if (value === '' || isNaN(parseInt(value, 10)) || parseInt(value, 10) <= 0) {
+                  handleChange('max_tokens', 2048);
+                }
+              }}
               min="1"
               max="32768"
             />

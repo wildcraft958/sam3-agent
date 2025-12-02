@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import ImageUpload from './components/ImageUpload';
 import LLMConfigForm from './components/LLMConfigForm';
+import SAM3ConfigForm, { SAM3Config } from './components/SAM3ConfigForm';
 import ImageVisualization from './components/ImageVisualization';
 import ResultsPanel from './components/ResultsPanel';
 import CommunicationLog from './components/CommunicationLog';
@@ -14,13 +15,16 @@ function App() {
     base_url: 'https://api.openai.com/v1',
     model: 'gpt-4o',
     api_key: '',
-    max_tokens: 4096,
+    max_tokens: 2048,
   });
   const [prompt, setPrompt] = useState<string>('segment all objects');
   const [response, setResponse] = useState<SegmentResponse | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [useInfer, setUseInfer] = useState<boolean>(false);
+  const [sam3Config, setSam3Config] = useState<SAM3Config>({
+    confidence_threshold: 0.4,
+  });
   const abortControllerRef = useRef<AbortController | null>(null);
 
   const handleImageSelect = (base64: string, file: File) => {
@@ -34,6 +38,10 @@ function App() {
 
   const handleConfigChange = (config: LLMConfig) => {
     setLlmConfig(config);
+  };
+
+  const handleSAM3ConfigChange = (config: SAM3Config) => {
+    setSam3Config(config);
   };
 
   const handleStop = () => {
@@ -88,6 +96,7 @@ function App() {
         const inferResponse = await inferImage({
           text_prompt: prompt,
           image_b64: imageBase64,
+          confidence_threshold: sam3Config.confidence_threshold,
         }, signal);
 
         // Check if request was cancelled
@@ -127,6 +136,7 @@ function App() {
           image_b64: imageBase64,
           llm_config: llmConfig,
           debug: true,
+          confidence_threshold: sam3Config.confidence_threshold,
         }, signal);
 
         // Check if request was cancelled
@@ -207,6 +217,13 @@ function App() {
               />
             </div>
           )}
+
+          <div className="panel-section">
+            <SAM3ConfigForm
+              onConfigChange={handleSAM3ConfigChange}
+              initialConfig={sam3Config}
+            />
+          </div>
 
           <div className="panel-section">
             <div className="button-group">

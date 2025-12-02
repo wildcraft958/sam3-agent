@@ -36,7 +36,7 @@ def send_generate_request(
     server_url=None,
     model="meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
     api_key=None,
-    max_tokens=4096,
+    max_tokens=2048,  # Reduced default to be safer for models with smaller context windows
     tools=None,
 ):
     """
@@ -47,7 +47,7 @@ def send_generate_request(
         messages (list): A list of message dicts, each containing role and content.
         model (str): The model to use for generation (default: "llama-4")
         api_key (str): API key for authentication (can be empty for some backends)
-        max_tokens (int): Maximum number of tokens to generate (default: 4096)
+        max_tokens (int): Maximum number of tokens to generate (default: 2048, reduced for safety with smaller context windows)
         tools (list, optional): List of tool definitions in OpenAI function calling format
 
     Returns:
