@@ -1,5 +1,9 @@
 # SAM 3: Segment Anything with Concepts
 
+> **Note:** This is a fork of the original [facebookresearch/sam3](https://github.com/facebookresearch/sam3) repository. See [FORK.md](FORK.md) for details about modifications made in this fork.
+
+---
+
 Meta Superintelligence Labs
 
 [Nicolas Carion](https://www.nicolascarion.com/)\*,

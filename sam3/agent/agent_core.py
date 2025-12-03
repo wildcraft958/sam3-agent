@@ -22,23 +22,23 @@ from .helpers.pyramidal_tiling import (
 
 # OpenAI function calling format for Qwen3
 TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "segment_phrase",
-            "description": "Use the experimental Segment Anything 3 model to ground all instances of a simple noun phrase by generating segmentation mask(s) that cover those instances on the raw input image. At the same time, all previously generated mask(s) will be deleted and cannot be referred to in future messages.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "text_prompt": {
-                        "type": "string",
-                        "description": "A short and simple noun phrase, e.g., rope, bird beak, speed monitor, brown handbag, person torso"
-                    }
-                },
-                "required": ["text_prompt"]
-            }
-        }
-    },
+    # {
+    #     "type": "function",
+    #     "function": {
+    #         "name": "segment_phrase",
+    #         "description": "Use the experimental Segment Anything 3 model to ground all instances of a simple noun phrase by generating segmentation mask(s) that cover those instances on the raw input image. At the same time, all previously generated mask(s) will be deleted and cannot be referred to in future messages.",
+    #         "parameters": {
+    #             "type": "object",
+    #             "properties": {
+    #                 "text_prompt": {
+    #                     "type": "string",
+    #                     "description": "A short and simple noun phrase, e.g., rope, bird beak, speed monitor, brown handbag, person torso"
+    #                 }
+    #             },
+    #             "required": ["text_prompt"]
+    #         }
+    #     }
+    # },
     {
         "type": "function",
         "function": {
