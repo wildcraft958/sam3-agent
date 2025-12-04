@@ -46,7 +46,7 @@ import base64
 import tempfile
 from functools import partial
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, List, Optional
 
 import modal
 
@@ -230,7 +230,7 @@ class SAM3Model:
             config.update(pyramidal_config)
         
         # Run pyramidal inference
-        result = self.sam3_pyramidal_infer(
+        result = self._sam3_pyramidal_infer_impl(
             image_bytes=image_bytes,
             text_prompt=text_prompt,
             tile_size=config["tile_size"],
@@ -446,20 +446,19 @@ class SAM3Model:
         
         return extracted
 
-    @modal.method()
-    def sam3_pyramidal_infer(
+    def _sam3_pyramidal_infer_impl(
         self,
         image_bytes: bytes,
         text_prompt: str,
         tile_size: int = 512,
         overlap_ratio: float = 0.15,
-        scales: list = None,
+        scales: Optional[List[float]] = None,
         iou_threshold: float = 0.5,
         confidence_threshold: float = 0.5,
         batch_size: int = 16,
     ) -> Dict[str, Any]:
         """
-        Pyramidal batch inference with text encoding cache.
+        Internal implementation for pyramidal batch inference with text encoding cache.
         
         Optimizations:
         1. Text encoded ONCE via self.processor.model.backbone.forward_text()
@@ -611,7 +610,10 @@ class SAM3Model:
                 # Free batch memory
                 del batch_state
                 if batch_start % (batch_size * 2) == 0:
-                    torch.cuda.empty_cache()
+                    try:
+                        torch.cuda.empty_cache()
+                    except Exception:
+                        pass  # Ignore cleanup errors
         
         stats["total_tiles"] = total_tiles
         print(f"✓ Processed {total_tiles} tiles across {len(scales)} scales")
@@ -632,6 +634,30 @@ class SAM3Model:
             "orig_img_h": orig_h,
             "pyramidal_stats": stats,
         }
+
+    @modal.method()
+    def sam3_pyramidal_infer(
+        self,
+        image_bytes: bytes,
+        text_prompt: str,
+        tile_size: int = 512,
+        overlap_ratio: float = 0.15,
+        scales: Optional[List[float]] = None,
+        iou_threshold: float = 0.5,
+        confidence_threshold: float = 0.5,
+        batch_size: int = 16,
+    ) -> Dict[str, Any]:
+        """Modal wrapper around the local pyramidal inference implementation."""
+        return self._sam3_pyramidal_infer_impl(
+            image_bytes=image_bytes,
+            text_prompt=text_prompt,
+            tile_size=tile_size,
+            overlap_ratio=overlap_ratio,
+            scales=scales,
+            iou_threshold=iou_threshold,
+            confidence_threshold=confidence_threshold,
+            batch_size=batch_size,
+        )
 
     @modal.method()
     def sam3_count(
@@ -670,7 +696,7 @@ class SAM3Model:
             config.update(pyramidal_config)
         
         # Run pyramidal inference
-        result = self.sam3_pyramidal_infer(
+        result = self._sam3_pyramidal_infer_impl(
             image_bytes=image_bytes,
             text_prompt=text_prompt,
             tile_size=config["tile_size"],
@@ -685,15 +711,17 @@ class SAM3Model:
             return result
         
         # Calculate confidence breakdown
+        # Note: All detections already pass confidence_threshold, so breakdown is relative to that
         detections = result["detections"]
         high_conf = sum(1 for d in detections if d["score"] >= 0.8)
-        medium_conf = sum(1 for d in detections if 0.5 <= d["score"] < 0.8)
-        low_conf = sum(1 for d in detections if d["score"] < 0.5)
+        medium_conf = sum(1 for d in detections if confidence_threshold <= d["score"] < 0.8)
+        # Low confidence only exists if threshold is below 0.5
+        low_conf = sum(1 for d in detections if d["score"] < 0.5) if confidence_threshold < 0.5 else 0
         
         confidence_summary = {
             "high": high_conf,      # >= 0.8
-            "medium": medium_conf,  # 0.5 - 0.8
-            "low": low_conf,        # < 0.5
+            "medium": medium_conf,  # threshold <= score < 0.8
+            "low": low_conf,        # < 0.5 (only if threshold < 0.5)
         }
         
         # Extract object type from prompt (simple heuristic)
@@ -742,8 +770,8 @@ class SAM3Model:
         Returns:
             Dict with object count, total area, coverage percentage, and per-object areas
         """
-        import numpy as np
-        from pycocotools import mask as mask_utils
+        # Note: Using box-based area calculation (accurate in original image space)
+        # Mask-based area not used due to tile resolution mismatch
         
         # Set default pyramidal config
         config = {
@@ -757,7 +785,7 @@ class SAM3Model:
             config.update(pyramidal_config)
         
         # Run pyramidal inference
-        result = self.sam3_pyramidal_infer(
+        result = self._sam3_pyramidal_infer_impl(
             image_bytes=image_bytes,
             text_prompt=text_prompt,
             tile_size=config["tile_size"],
@@ -776,26 +804,26 @@ class SAM3Model:
         orig_h = result["orig_img_h"]
         total_image_pixels = orig_w * orig_h
         
-        # Calculate areas for each detection
+        # Calculate areas for each detection using box area (accurate in original image space)
+        # Note: Mask-based area is NOT used because masks are encoded at tile resolution,
+        # not original image resolution. Box area provides accurate measurements.
         individual_areas = []
         total_pixel_area = 0
         
         for idx, det in enumerate(detections):
-            mask_rle = det.get("mask_rle")
-            if not mask_rle:
-                continue
-            
             try:
-                # Decode RLE mask using pycocotools
-                # Ensure mask_rle has the right format for pycocotools
-                if isinstance(mask_rle, dict):
-                    rle_for_decode = mask_rle
-                else:
-                    # If it's not a dict, skip
+                # Use pre-calculated box area (in original image pixels)
+                # This is computed during detection and accounts for scale transformation
+                pixel_area = det.get("box_area_pixels", 0)
+                
+                # Fallback: calculate from box coordinates if not present
+                if pixel_area == 0:
+                    box = det["box"]
+                    pixel_area = int((box[2] - box[0]) * (box[3] - box[1]))
+                
+                if pixel_area <= 0:
                     continue
                 
-                # Calculate pixel area from RLE
-                pixel_area = int(mask_utils.area(rle_for_decode))
                 total_pixel_area += pixel_area
                 
                 area_info = {
@@ -873,7 +901,7 @@ class SAM3Model:
             image_bytes = f.read()
         
         # Run pyramidal inference
-        result = self.sam3_pyramidal_infer(
+        result = self._sam3_pyramidal_infer_impl(
             image_bytes=image_bytes,
             text_prompt=text_prompt,
             tile_size=config["tile_size"],
@@ -887,6 +915,8 @@ class SAM3Model:
         if result["status"] != "success":
             # Return empty results on error
             outputs = {
+                "original_image_path": image_path,
+                "output_image_path": "",
                 "orig_img_h": 0,
                 "orig_img_w": 0,
                 "pred_boxes": [],
@@ -918,6 +948,8 @@ class SAM3Model:
                 pred_scores.append(det["score"])
             
             outputs = {
+                "original_image_path": image_path,
+                "output_image_path": "",  # set after path construction
                 "orig_img_h": orig_h,
                 "orig_img_w": orig_w,
                 "pred_boxes": pred_boxes,
@@ -932,14 +964,34 @@ class SAM3Model:
         image_basename_no_ext = _os.path.splitext(image_basename)[0]
         safe_dir_name = image_basename_no_ext.replace("/", "_").replace("\\", "_")
         
+        # Fallback for empty directory name (e.g., if filename starts with dot)
+        if not safe_dir_name or safe_dir_name.startswith("-"):
+            safe_dir_name = "output" if not safe_dir_name else "image_" + safe_dir_name
+        
         output_dir = _os.path.join(output_folder_path, safe_dir_name, text_prompt_for_save)
         _os.makedirs(output_dir, exist_ok=True)
         
         json_path = _os.path.join(output_dir, "sam3_output.json")
+        output_image_path = _os.path.join(output_dir, "sam3_output.png")
+        outputs["output_image_path"] = output_image_path
+        
+        # Save outputs JSON
         with open(json_path, "w") as f:
             _json.dump(outputs, f, indent=2)
-        
         print(f"✓ Pyramidal SAM3 found {len(outputs['pred_boxes'])} objects")
+        
+        # Render visualization; fall back to copying the raw image if rendering fails
+        try:
+            from sam3.agent.viz import visualize
+            viz_img = visualize(outputs)
+            viz_img.save(output_image_path)
+        except Exception as e:
+            print(f"⚠ Warning: Failed to render pyramidal visualization: {e}")
+            try:
+                import shutil as _shutil
+                _shutil.copy(image_path, output_image_path)
+            except Exception as copy_e:
+                print(f"⚠ Warning: Failed to copy raw image as fallback: {copy_e}")
         
         return json_path
 

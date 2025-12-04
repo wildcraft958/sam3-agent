@@ -47,10 +47,10 @@ HF_CACHE_DIR = "/root/.cache/huggingface"  # Standard HuggingFace cache location
 
 # GPU Configuration
 # Available GPUs in Modal: "B200", "H200", "H100", "A100", "L40S", "A10", "L4", "T4"
-# For 32B model: A100 80GB single GPU recommended (can use tensor parallelism if OOM)
+# For 30B model: Use tensor parallelism (2-4 GPUs) to avoid OOM
 # Note: B200 and H200 may not be available in all regions. If unavailable, use H100 or A100.
-GPU_TYPE = "A100-80GB"  # A100 80GB recommended for 32B model
-NUM_GPUS = 1  # Single GPU initially (can add tensor parallelism if OOM)
+GPU_TYPE = "A100-80GB"  # A100 80GB recommended for 30B model
+NUM_GPUS = 2  # Use 2 GPUs with tensor parallelism to avoid OOM (increase to 3-4 if still OOM)
 
 # Build GPU string for Modal
 if NUM_GPUS == 1:
@@ -127,6 +127,7 @@ def vllm_server():
     import httpx
     from fastapi.responses import JSONResponse
     from fastapi import Request
+    from starlette.requests import ClientDisconnect
     
     print(f"🚀 Initializing vLLM server with {MODEL_ID}...")
     print(f"GPU Configuration: {GPU_SPEC} ({NUM_GPUS} GPU(s))")
@@ -157,22 +158,23 @@ def vllm_server():
             "--model", MODEL_ID,
             "--trust-remote-code",
             "--dtype", "bfloat16",
-            "--gpu-memory-utilization", "0.95",  # More conservative for 32B model
-            "--max-model-len", "60000",  # Context length (64K) - conservative for A100 80GB
+            "--gpu-memory-utilization", "0.85",  # Reduced from 0.95 to avoid OOM
+            "--max-model-len", "32768",  # Reduced from 60K to 32K to save memory (increase if needed)
             "--limit-mm-per-prompt", '{"image": 4}',  # Increased to 4 for examine_each_mask (needs 3 images: raw, masked, zoomed)
-            "--enforce-eager",
-            "--max-num-seqs", "4",  # Reduced batch size for memory efficiency
-            "--max-num-batched-tokens", "8192",  # Better long-context handling
+            "--enforce-eager",  # Disables CUDA graphs to save memory
+            "--max-num-seqs", "2",  # Further reduced batch size for memory efficiency
+            "--max-num-batched-tokens", "4096",  # Reduced to save memory
+            "--swap-space", "4",  # Enable 4GB CPU swap space for overflow
             "--port", str(vllm_port),
-            "--quantization", "fp8",
             "--host", "0.0.0.0",
-            "--block-size", "16",
         ]
         
-        # Add tensor parallelism if multiple GPUs
+        # Add tensor parallelism if multiple GPUs (required for 30B model to avoid OOM)
         if NUM_GPUS > 1:
             vllm_cmd.extend(["--tensor-parallel-size", str(NUM_GPUS)])
-            print(f"✓ Tensor parallelism enabled: {NUM_GPUS} GPUs")
+            print(f"✓ Tensor parallelism enabled: {NUM_GPUS} GPUs (splits model across GPUs to avoid OOM)")
+        else:
+            print("⚠️  WARNING: Single GPU may cause OOM for 30B model. Consider setting NUM_GPUS=2 or higher.")
         
         # Enable flash attention (installed in image by default)
         # try:
@@ -339,7 +341,17 @@ def vllm_server():
         if USE_AUTOMATIC_PARSER:
             # Proxy request to vLLM's built-in server (which handles tool calling automatically)
             try:
-                req_body = await request.json()
+                # Handle potential client disconnection when reading request body
+                try:
+                    req_body = await request.json()
+                except ClientDisconnect:
+                    # Handle ClientDisconnect gracefully
+                    print(f"⚠️  Client disconnected while reading request body")
+                    return JSONResponse(
+                        {"error": "Client disconnected before request was fully received"},
+                        status_code=499  # 499 Client Closed Request
+                    )
+                
                 print(f"📥 Proxying request to vLLM server: model={req_body.get('model', MODEL_ID)}, tools={len(req_body.get('tools', []))}")
                 
                 # Cap max_tokens to 8192 to allow longer reasoning outputs

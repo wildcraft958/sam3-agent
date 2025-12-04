@@ -166,6 +166,15 @@ def render_zoom_in(
     binary_mask = mask_utils.decode(object_data["segmentation"])
     alpha = Image.fromarray((binary_mask * 255).astype("uint8"))
     img_rgba = img.convert("RGBA")
+    
+    # Ensure alpha channel size matches image size
+    img_w_actual, img_h_actual = img.size
+    alpha_w, alpha_h = alpha.size
+    
+    if (alpha_w, alpha_h) != (img_w_actual, img_h_actual):
+        # Resize alpha channel to match image size
+        alpha = alpha.resize((img_w_actual, img_h_actual), Image.Resampling.NEAREST)
+    
     img_rgba.putalpha(alpha)
     zoom_in_box_xyxy = [
         zoom_in_box[0],

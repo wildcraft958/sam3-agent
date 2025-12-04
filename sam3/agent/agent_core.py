@@ -482,6 +482,31 @@ def _prune_messages_for_next_round(
             break
 
     part2 = messages_list[part2_start_idx:] if part2_start_idx is not None else []
+    
+    # Remove surplus images from part2 so the total stays within the 2-image limit
+    max_images_allowed = 2
+    max_images_in_part2 = max(0, max_images_allowed - count_images(part1))
+    images_kept = 0
+    part2_cleaned = []
+    for msg in part2:
+        msg_copy = copy.deepcopy(msg)
+        if msg_copy.get("content") and isinstance(msg_copy["content"], list):
+            filtered_content = []
+            for item in msg_copy["content"]:
+                if (
+                    isinstance(item, dict)
+                    and item.get("type") == "image"
+                ):
+                    # Skip duplicate of the initial raw image and cap total images
+                    if item.get("image") == img_path:
+                        continue
+                    if images_kept < max_images_in_part2:
+                        filtered_content.append(item)
+                        images_kept += 1
+                else:
+                    filtered_content.append(item)
+            msg_copy["content"] = filtered_content
+        part2_cleaned.append(msg_copy)
 
     # Part 3: decide whether to add warning text to the second message in part1
     previously_used = (
@@ -489,7 +514,7 @@ def _prune_messages_for_next_round(
         if latest_sam3_text_prompt
         else list(used_text_prompts)
     )
-    if part2 and len(previously_used) > 0:
+    if part2_cleaned and len(previously_used) > 0:
         warning_text = f'Note that we have previously called the segment_phrase tool with each "text_prompt" in this list: {list(previously_used)}, but none of the generated results were satisfactory. So make sure that you do not use any of these phrases as the "text_prompt" to call the segment_phrase tool again.'
         # Replace the second message entirely to keep exactly 2 content items
         part1[1] = {
@@ -508,7 +533,7 @@ def _prune_messages_for_next_round(
 
     # Build the new messages list: part1 (with optional warning), then part2
     new_messages = list(part1)
-    new_messages.extend(part2)
+    new_messages.extend(part2_cleaned)
     return new_messages
 
 
@@ -1213,6 +1238,9 @@ def agent_inference(
                     f"SAM3 output file not found: {PATH_TO_LATEST_OUTPUT_JSON}"
                 )
             current_outputs = json.load(open(PATH_TO_LATEST_OUTPUT_JSON, "r"))
+            # Ensure original_image_path is present (required for visualization)
+            if "original_image_path" not in current_outputs:
+                current_outputs["original_image_path"] = img_path
             num_masks = len(current_outputs.get("pred_masks", []))
             masks_to_keep = []
 
@@ -1314,6 +1342,8 @@ def agent_inference(
                     current_outputs["pred_scores"][i] for i in masks_to_keep
                 ],
                 "pred_masks": [current_outputs["pred_masks"][i] for i in masks_to_keep],
+                # Keep track of the visualization path so downstream prompts always have a real image
+                "output_image_path": "",  # populated below
             }
 
             image_w_check_masks = visualize(updated_outputs)
@@ -1325,6 +1355,7 @@ def agent_inference(
                     "/", "_"
                 ),
             )
+            updated_outputs["output_image_path"] = image_w_check_masks_path
             image_w_check_masks.save(image_w_check_masks_path)
             # save the updated json outputs and append to message history
             messages.append({
@@ -1392,6 +1423,9 @@ def agent_inference(
                     f"SAM3 output file not found: {PATH_TO_LATEST_OUTPUT_JSON}"
                 )
             current_outputs = json.load(open(PATH_TO_LATEST_OUTPUT_JSON, "r"))
+            # Ensure original_image_path is present (required for visualization)
+            if "original_image_path" not in current_outputs:
+                current_outputs["original_image_path"] = img_path
             
             # Extract filter parameters (all optional)
             color = tool_call["parameters"].get("color")
@@ -1435,6 +1469,7 @@ def agent_inference(
                 ".png",
                 f"_attribute_filter.png".replace("/", "_"),
             )
+            filtered_outputs["output_image_path"] = image_w_filtered_masks_path
             image_w_filtered_masks.save(image_w_filtered_masks_path)
             
             # Update PATH_TO_LATEST_OUTPUT_JSON
@@ -1499,6 +1534,9 @@ def agent_inference(
                     f"SAM3 output file not found: {PATH_TO_LATEST_OUTPUT_JSON}"
                 )
             current_outputs = json.load(open(PATH_TO_LATEST_OUTPUT_JSON, "r"))
+            # Ensure original_image_path is present (required for visualization)
+            if "original_image_path" not in current_outputs:
+                current_outputs["original_image_path"] = img_path
 
             assert list(tool_call["parameters"].keys()) == ["final_answer_masks"]
             masks_to_keep = tool_call["parameters"]["final_answer_masks"]

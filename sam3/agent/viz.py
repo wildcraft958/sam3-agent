@@ -34,7 +34,12 @@ def visualize(
     # Common fields
     orig_h = int(input_json["orig_img_h"])
     orig_w = int(input_json["orig_img_w"])
-    img_path = input_json["original_image_path"]
+    img_path = input_json.get("original_image_path")
+    if img_path is None:
+        raise KeyError(
+            "original_image_path is required in input_json but was not found. "
+            "Please ensure the JSON output includes 'original_image_path' when saving SAM3 results."
+        )
 
     # ---------- Mode A: Full-scene render ----------
     if zoom_in_index is None:
