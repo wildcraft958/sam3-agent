@@ -86,7 +86,7 @@ image = (
         "psutil",
         "pandas",
         "scipy",
-        "fastapi",  # Required for fastapi_endpoint decorator
+        "fastapi",  # Required for ASGI endpoints with CORS
         "requests",  # For downloading images from URLs
     )
     .env({"PYTHONPATH": "/root/sam3"})
@@ -395,6 +395,36 @@ class SAM3Model:
         except Exception as e:
             return {"status": "error", "message": f"Invalid llm_config: {str(e)}"}
 
+        # Guard against accidentally pointing the LLM base_url at this agent endpoint
+        try:
+            from urllib.parse import urlparse
+
+            parsed = urlparse(llm_config["base_url"])
+            host = parsed.netloc
+            path = parsed.path or ""
+            if ("sam3-agent" in host and "modal.run" in host) or "sam3-agent-sam3" in host:
+                return {
+                    "status": "error",
+                    "message": (
+                        "llm_config.base_url is pointing to the SAM3 agent endpoint "
+                        f"('{llm_config['base_url']}'), but it must point to an LLM server (e.g. https://api.openai.com/v1 "
+                        "or your vLLM endpoint). Update the LLM base_url in the UI or request body."
+                    ),
+                }
+            if host == "" and path.startswith("/"):
+                return {
+                    "status": "error",
+                    "message": (
+                        "llm_config.base_url is missing a hostname. Provide a full URL such as "
+                        "https://api.openai.com/v1 or your vLLM server base URL."
+                    ),
+                }
+        except Exception as e:
+            return {
+                "status": "error",
+                "message": f"Failed to parse llm_config.base_url '{llm_config.get('base_url', '')}': {e}",
+            }
+
         # Set confidence threshold if provided
         if confidence_threshold is not None:
             if not 0.0 <= confidence_threshold <= 1.0:
@@ -524,43 +554,27 @@ class SAM3Model:
 
 
 # ------------------------------------------------------------------------------
-# HTTP endpoint: /sam3/infer (SAM3-only inference, no LLM/agent)
+# HTTP helpers (SAM3-only inference and full agent)
 # ------------------------------------------------------------------------------
 
-from modal import fastapi_endpoint  # lightweight JSON endpoint decorator
+
+def _normalize_allowed_origins() -> list[str]:
+    raw = os.environ.get("CORS_ALLOW_ORIGINS", "*")
+    if not raw or raw.strip() == "*":
+        return ["*"]
+    return [origin.strip() for origin in raw.split(",") if origin.strip()]
 
 
-@app.function(timeout=600, image=image)
-@fastapi_endpoint(method="POST")
 def sam3_infer(body: Dict[str, Any]) -> Dict[str, Any]:
     """
-    HTTP endpoint for pure SAM3 inference (no LLM/agent logic):
-    
-    POST /sam3/infer
-    JSON body:
-    {
-      "text_prompt": "...",
-      "image_b64": "...",   # or "image_url": "https://..."
-      "confidence_threshold": 0.5  # Optional: confidence threshold (0.0-1.0, default: 0.4)
-    }
-    
-    Returns:
-    {
-      "orig_img_h": int,
-      "orig_img_w": int,
-      "pred_boxes": [[x, y, w, h], ...],  # normalized [0, 1]
-      "pred_masks": ["rle_string", ...],
-      "pred_scores": [float, ...]
-    }
+    SAM3 inference logic (no LLM/agent). Used by the ASGI app with explicit CORS.
     """
-    # Basic validation
     if "text_prompt" not in body:
         return {"status": "error", "message": "Missing 'text_prompt' in request body."}
     
     text_prompt = body["text_prompt"]
     confidence_threshold = body.get("confidence_threshold")
     
-    # Get image bytes from either image_b64 or image_url
     if "image_b64" in body:
         try:
             image_bytes = base64.b64decode(body["image_b64"])
@@ -586,8 +600,6 @@ def sam3_infer(body: Dict[str, Any]) -> Dict[str, Any]:
             "message": "Provide either 'image_b64' or 'image_url' in the request body.",
         }
     
-    # Call the GPU-backed model for SAM3 inference only
-    # Use class reference directly to ensure persistent container reuse
     try:
         print(f"📞 Calling sam3_infer_only with prompt: '{text_prompt}'")
         result = SAM3Model().sam3_infer_only.remote(
@@ -611,70 +623,10 @@ def sam3_infer(body: Dict[str, Any]) -> Dict[str, Any]:
         }
 
 
-# ------------------------------------------------------------------------------
-# HTTP endpoint: /sam3/segment (Full agent with LLM)
-# ------------------------------------------------------------------------------
-
-
-@app.function(timeout=600, image=image)
-@fastapi_endpoint(method="POST")
 def sam3_segment(body: Dict[str, Any]) -> Dict[str, Any]:
     """
-    HTTP endpoint for SAM3 Agent - LLM Provider Agnostic
-    
-    This endpoint accepts any LLM configuration via the request body.
-    No hardcoded providers - works with any OpenAI-compatible API.
-
-    POST /sam3/segment
-    JSON body:
-    {
-      "prompt": "...",                    # Required: text prompt for segmentation
-      "image_url": "https://...",         # OR "image_b64": "..." (one required)
-      "llm_config": {                     # Required: complete LLM configuration (provider-agnostic)
-        "base_url": "https://api.openai.com/v1",  # Any OpenAI-compatible endpoint
-        "model": "gpt-4o",                 # Any model name
-        "api_key": "sk-...",              # API key (can be empty for some backends)
-        "name": "openai-gpt4o",           # Optional: for output files
-        "max_tokens": 4096                 # Optional: default 4096
-      },
-      "debug": true                       # Optional: get visualization
-    }
-    
-    Example with OpenAI:
-    {
-      "prompt": "segment all objects",
-      "image_b64": "...",
-      "llm_config": {
-        "base_url": "https://api.openai.com/v1",
-        "model": "gpt-4o",
-        "api_key": "sk-your-key-here"
-      }
-    }
-    
-    Example with vLLM:
-    {
-      "prompt": "segment all objects",
-      "image_b64": "...",
-      "llm_config": {
-        "base_url": "http://localhost:8001/v1",
-        "model": "Qwen/Qwen3-VL-8B-Thinking",
-        "api_key": "",
-        "name": "vllm-local"
-      }
-    }
-    
-    Example with Anthropic (if OpenAI-compatible):
-    {
-      "prompt": "segment all objects",
-      "image_b64": "...",
-      "llm_config": {
-        "base_url": "https://api.anthropic.com/v1",
-        "model": "claude-3-opus",
-        "api_key": "sk-ant-..."
-      }
-    }
+    Full SAM3 agent endpoint logic (LLM provider agnostic). Used by the ASGI app with explicit CORS.
     """
-    # Basic validation
     if "prompt" not in body:
         return {"status": "error", "message": "Missing 'prompt' in request body."}
 
@@ -686,7 +638,6 @@ def sam3_segment(body: Dict[str, Any]) -> Dict[str, Any]:
     llm_config = body["llm_config"]
     confidence_threshold = body.get("confidence_threshold")
 
-    # Get image bytes from either image_b64 or image_url
     if "image_b64" in body:
         try:
             image_bytes = base64.b64decode(body["image_b64"])
@@ -710,8 +661,6 @@ def sam3_segment(body: Dict[str, Any]) -> Dict[str, Any]:
             "message": "Provide either 'image_b64' or 'image_url' in the request body.",
         }
 
-    # Call the GPU-backed model
-    # Use class reference directly to ensure persistent container reuse
     result = SAM3Model().infer.remote(
         image_bytes=image_bytes,
         prompt=prompt,
@@ -720,6 +669,61 @@ def sam3_segment(body: Dict[str, Any]) -> Dict[str, Any]:
         confidence_threshold=confidence_threshold,
     )
     return result
+
+
+# ------------------------------------------------------------------------------
+# ASGI endpoints with explicit CORS (replaces fastapi_endpoint URLs)
+# ------------------------------------------------------------------------------
+
+
+@app.function(timeout=600, image=image)
+@modal.asgi_app(label="sam3-agent-sam3-infer")
+def sam3_infer_app():
+    import fastapi
+    from fastapi.responses import JSONResponse
+    from fastapi.middleware.cors import CORSMiddleware
+
+    app = fastapi.FastAPI(title="SAM3 Infer API")
+    allowed_origins = _normalize_allowed_origins()
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=allowed_origins or ["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+        expose_headers=["*"],
+    )
+
+    @app.post("/")
+    async def _infer(body: Dict[str, Any]):
+        return JSONResponse(sam3_infer(body))
+
+    return app
+
+
+@app.function(timeout=600, image=image)
+@modal.asgi_app(label="sam3-agent-sam3-segment")
+def sam3_segment_app():
+    import fastapi
+    from fastapi.responses import JSONResponse
+    from fastapi.middleware.cors import CORSMiddleware
+
+    app = fastapi.FastAPI(title="SAM3 Segment API")
+    allowed_origins = _normalize_allowed_origins()
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=allowed_origins or ["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+        expose_headers=["*"],
+    )
+
+    @app.post("/")
+    async def _segment(body: Dict[str, Any]):
+        return JSONResponse(sam3_segment(body))
+
+    return app
 
 
 # ------------------------------------------------------------------------------

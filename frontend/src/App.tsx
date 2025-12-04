@@ -76,9 +76,38 @@ function App() {
       return;
     }
 
-    if (!useInfer && !llmConfig.api_key) {
-      setError('Please provide an API key');
-      return;
+    if (!useInfer) {
+      const baseUrl = llmConfig.base_url?.trim();
+      if (!baseUrl) {
+        setError('Please provide an LLM base URL (e.g., your vLLM /v1 endpoint or https://api.openai.com/v1).');
+        return;
+      }
+      try {
+        const parsed = new URL(baseUrl);
+        if (!parsed.protocol.startsWith('http')) {
+          setError('LLM base URL must start with http:// or https://');
+          return;
+        }
+        if (!parsed.pathname.endsWith('/v1') && !parsed.pathname.includes('/v1/')) {
+          setError('LLM base URL must include /v1 (e.g., https://your-endpoint.modal.run/v1).');
+          return;
+        }
+        if (parsed.host.includes('sam3-agent')) {
+          setError('LLM base URL points to the SAM3 agent. Please set it to your LLM server (e.g., vLLM /v1).');
+          return;
+        }
+      } catch {
+        setError('LLM base URL is not a valid URL. Example: https://your-endpoint.modal.run/v1');
+        return;
+      }
+      if (!llmConfig.model?.trim()) {
+        setError('Please provide an LLM model name.');
+        return;
+      }
+      if (!llmConfig.api_key) {
+        setError('Please provide an API key for the LLM (or leave empty only if your backend allows).');
+        return;
+      }
     }
 
     // Cancel any existing request
@@ -333,4 +362,3 @@ function App() {
 }
 
 export default App;
-

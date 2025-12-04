@@ -128,6 +128,7 @@ def vllm_server():
     from fastapi.responses import JSONResponse
     from fastapi import Request
     from starlette.requests import ClientDisconnect
+    from fastapi.middleware.cors import CORSMiddleware
     
     print(f"🚀 Initializing vLLM server with {MODEL_ID}...")
     print(f"GPU Configuration: {GPU_SPEC} ({NUM_GPUS} GPU(s))")
@@ -142,6 +143,21 @@ def vllm_server():
     
     # Create FastAPI app for proxy
     app = fastapi.FastAPI(title="Qwen3-VL vLLM Server")
+    # Robust CORS: allow frontend origins configured via env (default: allow all)
+    allowed_origins_raw = os.environ.get("CORS_ALLOW_ORIGINS", "*")
+    allowed_origins = (
+        ["*"]
+        if allowed_origins_raw.strip() == "*"
+        else [o.strip() for o in allowed_origins_raw.split(",") if o.strip()]
+    )
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=allowed_origins or ["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+        expose_headers=["*"],
+    )
     http_client = httpx.AsyncClient(timeout=300.0)
     
     vllm_process = None
