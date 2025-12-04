@@ -11,6 +11,7 @@ export interface RLEMask {
 /**
  * Decode RLE mask to binary array
  * Supports both string counts and array counts formats
+ * OPTIMIZED: Uses fill instead of nested loops for much better performance
  */
 export function decodeRLE(rle: RLEMask, width?: number, height?: number): Uint8Array {
   const [h, w] = rle.size;
@@ -30,14 +31,14 @@ export function decodeRLE(rle: RLEMask, width?: number, height?: number): Uint8A
   let pos = 0;
   let value = 0;
 
+  // OPTIMIZED: Use fill() instead of nested loop for much better performance
   for (let i = 0; i < counts.length; i++) {
     const count = counts[i];
-    for (let j = 0; j < count; j++) {
-      if (pos < mask.length) {
-        mask[pos] = value;
-        pos++;
-      }
+    if (value === 1 && pos + count <= mask.length) {
+      // Only fill when value is 1 (mask pixels), skip when 0 (already initialized to 0)
+      mask.fill(1, pos, pos + count);
     }
+    pos += count;
     value = 1 - value; // Toggle between 0 and 1
   }
 

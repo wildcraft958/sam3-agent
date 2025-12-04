@@ -55,6 +55,7 @@ function hslToRgb(h: number, s: number, l: number): [number, number, number] {
 
 /**
  * Draw a mask on canvas with semi-transparent overlay
+ * OPTIMIZED: Pre-calculate colors and use more efficient blending
  */
 export function drawMask(
   ctx: CanvasRenderingContext2D,
@@ -68,21 +69,80 @@ export function drawMask(
   const imageData = ctx.getImageData(0, 0, imgWidth, imgHeight);
   const data = imageData.data;
 
-  // Parse color
+  // Parse color and pre-calculate blending factors
   const rgb = parseColor(color);
   const [r, g, b] = rgb;
+  const alphaFg = alpha;
+  const alphaBg = 1 - alpha;
+  
+  // Pre-calculate foreground color components
+  const rFg = r * alphaFg;
+  const gFg = g * alphaFg;
+  const bFg = b * alphaFg;
 
+  // OPTIMIZED: Only process pixels that are part of the mask
   for (let i = 0; i < decodedMask.length; i++) {
     if (decodedMask[i] > 0) {
       const idx = i * 4;
-      // Alpha blend
-      data[idx] = Math.round(r * alpha + data[idx] * (1 - alpha));
-      data[idx + 1] = Math.round(g * alpha + data[idx + 1] * (1 - alpha));
-      data[idx + 2] = Math.round(b * alpha + data[idx + 2] * (1 - alpha));
-      // Keep original alpha
+      // Optimized alpha blend with pre-calculated values
+      data[idx] = rFg + data[idx] * alphaBg;
+      data[idx + 1] = gFg + data[idx + 1] * alphaBg;
+      data[idx + 2] = bFg + data[idx + 2] * alphaBg;
+      // Keep original alpha (data[idx + 3] unchanged)
     }
   }
 
+  ctx.putImageData(imageData, 0, 0);
+}
+
+/**
+ * Draw multiple masks efficiently in a single pass
+ * OPTIMIZED: Batch processing to avoid multiple getImageData/putImageData calls
+ */
+export function drawMasksBatch(
+  ctx: CanvasRenderingContext2D,
+  masks: RLEMask[],
+  imgWidth: number,
+  imgHeight: number,
+  colors: string[],
+  alpha: number = 0.3
+): void {
+  if (masks.length === 0) return;
+
+  // Get image data once
+  const imageData = ctx.getImageData(0, 0, imgWidth, imgHeight);
+  const data = imageData.data;
+
+  const alphaFg = alpha;
+  const alphaBg = 1 - alpha;
+
+  // Process each mask
+  for (let maskIdx = 0; maskIdx < masks.length; maskIdx++) {
+    const mask = masks[maskIdx];
+    const color = colors[maskIdx % colors.length];
+    
+    // Decode mask
+    const decodedMask = decodeRLE(mask, imgWidth, imgHeight);
+    
+    // Parse color and pre-calculate
+    const rgb = parseColor(color);
+    const [r, g, b] = rgb;
+    const rFg = r * alphaFg;
+    const gFg = g * alphaFg;
+    const bFg = b * alphaFg;
+
+    // Blend pixels
+    for (let i = 0; i < decodedMask.length; i++) {
+      if (decodedMask[i] > 0) {
+        const idx = i * 4;
+        data[idx] = rFg + data[idx] * alphaBg;
+        data[idx + 1] = gFg + data[idx + 1] * alphaBg;
+        data[idx + 2] = bFg + data[idx + 2] * alphaBg;
+      }
+    }
+  }
+
+  // Put image data once
   ctx.putImageData(imageData, 0, 0);
 }
 
