@@ -5,9 +5,13 @@ import SAM3ConfigForm, { SAM3Config } from './components/SAM3ConfigForm';
 import ImageVisualization from './components/ImageVisualization';
 import ResultsPanel from './components/ResultsPanel';
 import CommunicationLog from './components/CommunicationLog';
+import DiagnosticPage from './components/DiagnosticPage';
 import { segmentImage, inferImage, LLMConfig, SegmentResponse } from './utils/api';
 
+type ViewMode = 'main' | 'diagnostic';
+
 function App() {
+  const [viewMode, setViewMode] = useState<ViewMode>('main');
   const [imageBase64, setImageBase64] = useState<string | null>(null);
   const [imageFile, setImageFile] = useState<File | null>(null);
   const [imageUrl, setImageUrl] = useState<string | null>(null);
@@ -145,6 +149,10 @@ function App() {
         }
 
         setResponse(segmentResponse);
+        // Also set error state if response has error status
+        if (segmentResponse.status === 'error') {
+          setError(segmentResponse.message || 'Segmentation failed');
+        }
       }
     } catch (err) {
       // Don't set error if request was cancelled
@@ -152,6 +160,7 @@ function App() {
         return;
       }
       const errorMessage = err instanceof Error ? err.message : 'Unknown error occurred';
+      console.error('[App] Error in handleSegment:', err);
       setError(errorMessage);
       setResponse({
         status: 'error',
@@ -166,11 +175,45 @@ function App() {
     }
   };
 
+  if (viewMode === 'diagnostic') {
+    return (
+      <div className="app">
+        <header className="app-header">
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <div>
+              <h1>SAM3 Agent Diagnostics</h1>
+              <p>Diagnostic tools and system configuration</p>
+            </div>
+            <button
+              className="segment-button"
+              onClick={() => setViewMode('main')}
+              style={{ marginTop: 0 }}
+            >
+              Back to Main
+            </button>
+          </div>
+        </header>
+        <DiagnosticPage />
+      </div>
+    );
+  }
+
   return (
     <div className="app">
       <header className="app-header">
-        <h1>SAM3 Agent Visualization</h1>
-        <p>Upload an image and visualize segmentation results with masks and bounding boxes</p>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div>
+            <h1>SAM3 Agent Visualization</h1>
+            <p>Upload an image and visualize segmentation results with masks and bounding boxes</p>
+          </div>
+          <button
+            className="segment-button"
+            onClick={() => setViewMode('diagnostic')}
+            style={{ marginTop: 0 }}
+          >
+            Diagnostics
+          </button>
+        </div>
       </header>
 
       <div className="app-container">
@@ -245,9 +288,21 @@ function App() {
             </div>
           </div>
 
-          {error && (
+          {(error || response?.status === 'error') && (
             <div className="error-message">
-              <strong>Error:</strong> {error}
+              <strong>Error:</strong>
+              <div className="error-details">
+                {error && <div className="error-text">{error}</div>}
+                {response?.status === 'error' && response?.message && (
+                  <div className="error-text">{response.message}</div>
+                )}
+                {response?.traceback && (
+                  <details className="error-traceback">
+                    <summary>Technical Details</summary>
+                    <pre>{response.traceback}</pre>
+                  </details>
+                )}
+              </div>
             </div>
           )}
         </div>
