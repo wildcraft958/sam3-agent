@@ -446,8 +446,9 @@ def _prune_messages_for_next_round(
     1) messages[:2] (with optional warning text added to the second message's content)
     2) the latest assistant message (and everything after it) that contains a segment_phrase tool call
     """
-    # There should not be more than 10 messages in the conversation history
-    assert len(messages_list) < 10
+    # Warn if messages list is getting large, but don't crash - pruning will handle it
+    if len(messages_list) >= 10:
+        print(f"Warning: messages_list has {len(messages_list)} messages before pruning")
 
     # Part 1: always keep the first two message JSONs
     part1 = copy.deepcopy(messages_list[:2])
