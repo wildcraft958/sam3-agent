@@ -539,15 +539,34 @@ def call_lisat_segmentation(image_path, text_prompt, modal_url, max_new_tokens=2
             # Create binary mask for this object
             binary_mask = (mask_img == obj_id).astype(np.uint8) * 255
             
-            # Find contours
-            contours, _ = cv2.findContours(binary_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            # Extract bounding box using numpy (handles disconnected regions better)
+            # This approach finds ALL pixels with this object ID, regardless of connectivity
+            coords = np.where(binary_mask > 0)
             
-            if len(contours) == 0:
+            if len(coords[0]) == 0:
+                print(f"⚠ No pixels found for object ID {obj_id}")
                 continue
             
-            # Get bounding box from the largest contour
-            largest_contour = max(contours, key=cv2.contourArea)
-            x, y, w, h = cv2.boundingRect(largest_contour)
+            # Get bounding box coordinates (y, x format from np.where)
+            y_min, y_max = coords[0].min(), coords[0].max()
+            x_min, x_max = coords[1].min(), coords[1].max()
+            
+            # Convert to (x, y, w, h) format
+            x, y = x_min, y_min
+            w = x_max - x_min + 1  # +1 to include the max pixel
+            h = y_max - y_min + 1
+            
+            # Validate with contours to ensure mask quality
+            contours, _ = cv2.findContours(binary_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            if len(contours) > 0:
+                # Verify contours exist (quality check)
+                contour_area = sum(cv2.contourArea(c) for c in contours)
+                if contour_area < 10:  # Minimum area threshold
+                    print(f"⚠ Contour area too small for object ID {obj_id}: {contour_area} pixels")
+                    continue
+            else:
+                print(f"⚠ No valid contours found for object ID {obj_id}")
+                continue
             
             # Normalize coordinates to [0, 1]
             x_norm = x / orig_img_w
@@ -557,6 +576,8 @@ def call_lisat_segmentation(image_path, text_prompt, modal_url, max_new_tokens=2
             
             # Store in XYWH format (normalized)
             pred_boxes.append([x_norm, y_norm, w_norm, h_norm])
+            
+            print(f"✓ Object {obj_id}: BBox=({x}, {y}, {w}, {h}), Area={contour_area:.0f}px")
             
             # Convert mask to RLE format (SAM3 format)
             # For simplicity, store as binary array; SAM3 visualizer can handle it
@@ -1031,369 +1052,6 @@ def agent_inference(
                     })
                 print("\n\n>>> sam3_output_text_message:\n", sam3_output_text_message)
 
-        # DISABLED: segment_phrase_in_region handler - Commented out as per user request
-        # elif tool_call["name"] == "segment_phrase_in_region":
-        #     print("🔍 Calling segment_phrase_in_region tool...")
-        #     assert "text_prompt" in tool_call["parameters"] and "bbox" in tool_call["parameters"], \
-        #         f"Expected ['text_prompt', 'bbox'], got {list(tool_call['parameters'].keys())}"
-            
-            current_text_prompt = tool_call["parameters"]["text_prompt"]
-            bbox = tool_call["parameters"]["bbox"]
-            use_normalized = tool_call["parameters"].get("use_normalized", True)
-            
-            # Validate bbox
-            if not isinstance(bbox, list) or len(bbox) != 4:
-                raise ValueError(f"bbox must be a list of 4 numbers [x_min, y_min, x_max, y_max], got {bbox}")
-            
-            if use_normalized:
-                if not all(0 <= coord <= 1 for coord in bbox):
-                    raise ValueError(f"Normalized bbox coordinates must be in [0, 1], got {bbox}")
-                if bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
-                    raise ValueError(f"Invalid bbox: x_max <= x_min or y_max <= y_min, got {bbox}")
-            else:
-                if any(coord < 0 for coord in bbox):
-                    raise ValueError(f"Pixel bbox coordinates must be non-negative, got {bbox}")
-                if bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
-                    raise ValueError(f"Invalid bbox: x_max <= x_min or y_max <= y_min, got {bbox}")
-            
-            # Check if this text_prompt has been used before
-            if current_text_prompt in USED_TEXT_PROMPTS:
-                print(
-                    f"❌ Text prompt '{current_text_prompt}' has been used before. Requesting a different prompt."
-                )
-                duplicate_prompt_message = f"You have previously used '{current_text_prompt}' as your text_prompt to call the segment_phrase tool. You may not use it again. Please call the segment_phrase tool again with a different, perhaps more general, or more creative simple noun phrase prompt, while adhering to all the rules stated in the system prompt. You must also never use any of the following text_prompt(s): {str(list(USED_TEXT_PROMPTS))}."
-                messages.append({
-                    "role": "assistant",
-                    "content": generated_text if generated_text else None,
-                    "tool_calls": [tool_call_data],
-                })
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": [{"type": "text", "text": duplicate_prompt_message}],
-                    }
-                )
-            else:
-                # Add the text_prompt to the set of used prompts
-                USED_TEXT_PROMPTS.add(current_text_prompt)
-                LATEST_SAM3_TEXT_PROMPT = current_text_prompt
-                
-                # Load original image and crop to region
-                original_image = Image.open(img_path)
-                cropped_image, region_bbox = segment_in_region(original_image, bbox, use_normalized)
-                
-                # Save cropped image temporarily
-                import tempfile
-                with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False, dir=sam_output_dir) as tmp_file:
-                    cropped_image_path = tmp_file.name
-                    cropped_image.save(cropped_image_path)
-                
-                try:
-                    # Call SAM3 on cropped region
-                    region_output_json = call_sam_service(
-                        image_path=cropped_image_path,
-                        text_prompt=current_text_prompt,
-                        output_folder_path=sam_output_dir,
-                    )
-                    
-                    # Load region results
-                    region_outputs = json.load(open(region_output_json, "r"))
-                    
-                    # Transform masks back to global coordinates
-                    orig_img_h = int(region_outputs["orig_img_h"])
-                    orig_img_w = int(region_outputs["orig_img_w"])
-                    # Note: region_outputs has dimensions of cropped image, we need original image dimensions
-                    original_image = Image.open(img_path)
-                    orig_img_h_full, orig_img_w_full = original_image.size[1], original_image.size[0]
-                    
-                    transformed_boxes, transformed_masks = transform_masks_to_global(
-                        region_outputs["pred_boxes"],
-                        region_outputs["pred_masks"],
-                        region_bbox,
-                        orig_img_h_full,
-                        orig_img_w_full,
-                    )
-                    
-                    # Create outputs in global coordinates
-                    sam3_outputs = {
-                        "original_image_path": img_path,
-                        "orig_img_h": orig_img_h_full,
-                        "orig_img_w": orig_img_w_full,
-                        "pred_boxes": transformed_boxes,
-                        "pred_masks": transformed_masks,
-                        "pred_scores": region_outputs["pred_scores"],
-                    }
-                    
-                    # Save outputs
-                    text_prompt_for_save_path = (
-                        current_text_prompt.replace("/", "_") if "/" in current_text_prompt else current_text_prompt
-                    )
-                    image_basename = os.path.basename(img_path)
-                    image_basename_no_ext = os.path.splitext(image_basename)[0]
-                    safe_dir_name = image_basename_no_ext.replace("/", "_").replace("\\", "_")
-                    if not safe_dir_name or safe_dir_name.startswith("-"):
-                        safe_dir_name = "image_" + safe_dir_name if safe_dir_name else "image"
-                    
-                    os.makedirs(
-                        os.path.join(sam_output_dir, safe_dir_name), exist_ok=True
-                    )
-                    PATH_TO_LATEST_OUTPUT_JSON = os.path.join(
-                        sam_output_dir,
-                        safe_dir_name,
-                        rf"{text_prompt_for_save_path}_region.json",
-                    )
-                    sam3_output_image_path = os.path.join(
-                        sam_output_dir,
-                        safe_dir_name,
-                        rf"{text_prompt_for_save_path}_region.png",
-                    )
-                    
-                    sam3_outputs["output_image_path"] = sam3_output_image_path
-                    json.dump(sam3_outputs, open(PATH_TO_LATEST_OUTPUT_JSON, "w"), indent=4)
-                    
-                    # Visualize (using globally imported visualize)
-                    viz_image = visualize(sam3_outputs)
-                    viz_image.save(sam3_output_image_path)
-                    
-                    num_masks = len(sam3_outputs.get("pred_boxes", []))
-                    
-                    # Append assistant message with tool call
-                    messages.append({
-                        "role": "assistant",
-                        "content": generated_text if generated_text else None,
-                        "tool_calls": [tool_call_data],
-                    })
-                    
-                    if num_masks == 0:
-                        print("❌ No masks generated by SAM3 in region, reporting no mask to Qwen.")
-                        
-                        # Check if we should suggest LISAT as alternative
-                        if sam3_segmentation_count >= 3 and lisat_attempts == 0:
-                            sam3_output_text_message = f"The segment_phrase tool did not generate any masks for the text_prompt '{current_text_prompt}' in the specified region. You have now attempted SAM3 segmentation {sam3_segmentation_count} times without success. It's time to try a different approach. Please use the segment_with_lisat tool as an alternative segmentation method. LISAT uses a different model that may succeed where SAM3 has failed. Include relevant attributes from the original query ('{initial_text_prompt}') such as color, size, or location in your prompt to LISAT."
-                        else:
-                            sam3_output_text_message = f"The segment_phrase tool did not generate any masks for the text_prompt '{current_text_prompt}' in the specified region. Now, please call the segment_phrase tool again with a different, perhaps more general, or more creative simple noun phrase text_prompt, while adhering to all the rules stated in the system prompt. Please be reminded that the original user query was '{initial_text_prompt}'."
-                        
-                        messages.append({
-                            "role": "tool",
-                            "tool_call_id": tool_call_id,
-                            "content": json.dumps({"message": sam3_output_text_message, "num_masks": 0}),
-                        })
-                    else:
-                        sam3_output_text_message = rf"The segment_phrase tool generated {num_masks} available masks in the specified region. All {num_masks} available masks are rendered in this image below, now you must analyze the {num_masks} available mask(s) carefully, compare them against the raw input image and the original user query, and determine your next action. Please be reminded that the original user query was '{initial_text_prompt}'."
-                        messages.append({
-                            "role": "tool",
-                            "tool_call_id": tool_call_id,
-                            "content": json.dumps({
-                                "message": sam3_output_text_message,
-                                "num_masks": num_masks,
-                                "output_image_path": sam3_output_image_path,
-                            }),
-                        })
-                        messages.append({
-                            "role": "user",
-                            "content": [
-                                {"type": "text", "text": "Please analyze the masks shown in the image below."},
-                                {"type": "image", "image": sam3_output_image_path},
-                            ],
-                        })
-                    print("\n\n>>> sam3_output_text_message:\n", sam3_output_text_message)
-                    
-                finally:
-                    # Clean up temporary cropped image
-                    try:
-                        os.unlink(cropped_image_path)
-                    except Exception as e:
-                        print(f"Warning: Could not delete temporary cropped image: {e}")
-
-        # DISABLED: segment_phrase_with_tiling handler - Commented out as per user request
-        # elif tool_call["name"] == "segment_phrase_with_tiling":
-        #     print("🔍 Calling segment_phrase_with_tiling tool...")
-        #     assert "text_prompt" in tool_call["parameters"], \
-        #         f"Expected ['text_prompt'], got {list(tool_call['parameters'].keys())}"
-            
-            current_text_prompt = tool_call["parameters"]["text_prompt"]
-            tile_size = tool_call["parameters"].get("tile_size", 1024)
-            overlap_ratio = tool_call["parameters"].get("overlap_ratio", 0.2)
-            min_tile_size = tool_call["parameters"].get("min_tile_size", 512)
-            
-            # Validate parameters
-            if tile_size < 256 or tile_size > 4096:
-                raise ValueError(f"tile_size must be in [256, 4096], got {tile_size}")
-            if overlap_ratio < 0.0 or overlap_ratio > 0.5:
-                raise ValueError(f"overlap_ratio must be in [0.0, 0.5], got {overlap_ratio}")
-            if min_tile_size < 128 or min_tile_size > tile_size:
-                raise ValueError(f"min_tile_size must be in [128, tile_size], got {min_tile_size}")
-            
-            # Check if this text_prompt has been used before
-            if current_text_prompt in USED_TEXT_PROMPTS:
-                print(
-                    f"❌ Text prompt '{current_text_prompt}' has been used before. Requesting a different prompt."
-                )
-                duplicate_prompt_message = f"You have previously used '{current_text_prompt}' as your text_prompt to call the segment_phrase tool. You may not use it again. Please call the segment_phrase or segment_phrase_with_tiling tool again with a different, perhaps more general, or more creative simple noun phrase prompt, while adhering to all the rules stated in the system prompt. You must also never use any of the following text_prompt(s): {str(list(USED_TEXT_PROMPTS))}."
-                messages.append({
-                    "role": "assistant",
-                    "content": generated_text if generated_text else None,
-                    "tool_calls": [tool_call_data],
-                })
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": [{"type": "text", "text": duplicate_prompt_message}],
-                    }
-                )
-            else:
-                # Add the text_prompt to the set of used prompts
-                USED_TEXT_PROMPTS.add(current_text_prompt)
-                LATEST_SAM3_TEXT_PROMPT = current_text_prompt
-                
-                # Load original image
-                original_image = Image.open(img_path)
-                orig_img_w, orig_img_h = original_image.size
-                
-                # Create tiles
-                tiles = create_pyramidal_tiles(
-                    orig_img_w, orig_img_h, tile_size, overlap_ratio, min_tile_size
-                )
-                print(f"📐 Created {len(tiles)} tiles for pyramidal tiling")
-                
-                # Segment each tile
-                all_tile_results = []
-                import tempfile
-                
-                for tile_idx, tile_bbox in enumerate(tiles):
-                    x_min, y_min, x_max, y_max = tile_bbox
-                    print(f"🔍 Processing tile {tile_idx + 1}/{len(tiles)}: ({x_min}, {y_min}, {x_max}, {y_max})")
-                    
-                    # Crop image to tile
-                    tile_image = original_image.crop((x_min, y_min, x_max, y_max))
-                    
-                    # Save cropped tile temporarily
-                    with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False, dir=sam_output_dir) as tmp_file:
-                        tile_image_path = tmp_file.name
-                        tile_image.save(tile_image_path)
-                    
-                    try:
-                        # Call SAM3 on tile
-                        tile_output_json = call_sam_service(
-                            image_path=tile_image_path,
-                            text_prompt=current_text_prompt,
-                            output_folder_path=sam_output_dir,
-                        )
-                        
-                        # Load tile results
-                        tile_outputs = json.load(open(tile_output_json, "r"))
-                        
-                        # Transform masks to global coordinates
-                        transformed_boxes = []
-                        transformed_masks = []
-                        
-                        for box, mask in zip(tile_outputs["pred_boxes"], tile_outputs["pred_masks"]):
-                            trans_box, trans_mask = transform_mask_coordinates(
-                                box, mask, tile_bbox, orig_img_h, orig_img_w
-                            )
-                            transformed_boxes.append(trans_box)
-                            transformed_masks.append(trans_mask)
-                        
-                        # Store tile results
-                        all_tile_results.append({
-                            "pred_boxes": transformed_boxes,
-                            "pred_masks": transformed_masks,
-                            "pred_scores": tile_outputs["pred_scores"],
-                            "tile_bbox": tile_bbox,
-                        })
-                        
-                    finally:
-                        # Clean up temporary tile image
-                        try:
-                            os.unlink(tile_image_path)
-                        except Exception as e:
-                            print(f"Warning: Could not delete temporary tile image: {e}")
-                
-                # Merge results from all tiles
-                print(f"🔗 Merging results from {len(tiles)} tiles...")
-                merged_outputs = merge_tile_results(all_tile_results, orig_img_h, orig_img_w)
-                
-                # Apply overlap removal
-                try:
-                    from .helpers.mask_overlap_removal import remove_overlapping_masks
-                    merged_outputs = remove_overlapping_masks(merged_outputs)
-                    print(f"✓ Applied mask overlap removal")
-                except Exception as e:
-                    print(f"⚠ Warning: Could not apply mask overlap removal: {e}")
-                
-                # Save outputs
-                text_prompt_for_save_path = (
-                    current_text_prompt.replace("/", "_") if "/" in current_text_prompt else current_text_prompt
-                )
-                image_basename = os.path.basename(img_path)
-                image_basename_no_ext = os.path.splitext(image_basename)[0]
-                safe_dir_name = image_basename_no_ext.replace("/", "_").replace("\\", "_")
-                if not safe_dir_name or safe_dir_name.startswith("-"):
-                    safe_dir_name = "image_" + safe_dir_name if safe_dir_name else "image"
-                
-                os.makedirs(
-                    os.path.join(sam_output_dir, safe_dir_name), exist_ok=True
-                )
-                PATH_TO_LATEST_OUTPUT_JSON = os.path.join(
-                    sam_output_dir,
-                    safe_dir_name,
-                    rf"{text_prompt_for_save_path}_tiling.json",
-                )
-                sam3_output_image_path = os.path.join(
-                    sam_output_dir,
-                    safe_dir_name,
-                    rf"{text_prompt_for_save_path}_tiling.png",
-                )
-                
-                sam3_outputs = {
-                    "original_image_path": img_path,
-                    "output_image_path": sam3_output_image_path,
-                    **merged_outputs,
-                }
-                
-                json.dump(sam3_outputs, open(PATH_TO_LATEST_OUTPUT_JSON, "w"), indent=4)
-                
-                # Visualize
-                viz_image = visualize(sam3_outputs)
-                viz_image.save(sam3_output_image_path)
-                
-                num_masks = len(sam3_outputs.get("pred_boxes", []))
-                
-                # Append assistant message with tool call
-                messages.append({
-                    "role": "assistant",
-                    "content": generated_text if generated_text else None,
-                    "tool_calls": [tool_call_data],
-                })
-                
-                if num_masks == 0:
-                    print("❌ No masks generated by SAM3 with tiling, reporting no mask to Qwen.")
-                    sam3_output_text_message = f"The segment_phrase_with_tiling tool did not generate any masks for the text_prompt '{current_text_prompt}'. Now, please call the segment_phrase or segment_phrase_with_tiling tool again with a different, perhaps more general, or more creative simple noun phrase text_prompt, while adhering to all the rules stated in the system prompt. Please be reminded that the original user query was '{initial_text_prompt}'."
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tool_call_id,
-                        "content": json.dumps({"message": sam3_output_text_message, "num_masks": 0}),
-                    })
-                else:
-                    sam3_output_text_message = rf"The segment_phrase_with_tiling tool generated {num_masks} available masks using pyramidal tiling across {len(tiles)} tiles. All {num_masks} available masks are rendered in this image below, now you must analyze the {num_masks} available mask(s) carefully, compare them against the raw input image and the original user query, and determine your next action. Please be reminded that the original user query was '{initial_text_prompt}'."
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tool_call_id,
-                        "content": json.dumps({
-                            "message": sam3_output_text_message,
-                            "num_masks": num_masks,
-                            "output_image_path": sam3_output_image_path,
-                            "num_tiles": len(tiles),
-                        }),
-                    })
-                    messages.append({
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": "Please analyze the masks shown in the image below."},
-                            {"type": "image", "image": sam3_output_image_path},
-                        ],
-                    })
-                print("\n\n>>> sam3_output_text_message:\n", sam3_output_text_message)
 
         elif tool_call["name"] == "examine_each_mask":
             print("🔍 Calling examine_each_mask tool...")
@@ -1586,11 +1244,7 @@ def agent_inference(
                 )
             json.dump(updated_outputs, open(PATH_TO_LATEST_OUTPUT_JSON, "w"), indent=4)
 
-        # DISABLED: filter_masks_by_spatial_position - spatial filtering now done in LLM thinking
-        # The LLM reasons about mask positions based on their visual location in the image
-        # and directly calls select_masks_and_return with the appropriate mask indices.
-        # elif tool_call["name"] == "filter_masks_by_spatial_position":
-        #     ... (tool handling code removed - see git history if needed)
+    
 
         elif tool_call["name"] == "filter_masks_by_attributes":
             print("🔍 Calling filter_masks_by_attributes tool...")
@@ -1693,11 +1347,6 @@ def agent_inference(
                     ],
                 })
 
-        # DISABLED: filter_masks_by_relative_position - relative filtering now done in LLM thinking
-        # The LLM reasons about mask positions relative to other objects/features
-        # and directly calls select_masks_and_return with the appropriate mask indices.
-        # elif tool_call["name"] == "filter_masks_by_relative_position":
-        #     ... (tool handling code removed - see git history if needed)
 
         elif tool_call["name"] == "segment_with_lisat":
             print("🔍 Calling segment_with_lisat tool...")

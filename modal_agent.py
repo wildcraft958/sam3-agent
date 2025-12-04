@@ -88,6 +88,7 @@ image = (
         "scipy",
         "fastapi",  # Required for ASGI endpoints with CORS
         "requests",  # For downloading images from URLs
+        "opencv-python"
     )
     .env({"PYTHONPATH": "/root/sam3"})
     # use repo-relative paths so deploy works regardless of cwd
