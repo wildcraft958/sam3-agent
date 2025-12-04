@@ -158,8 +158,8 @@ def vllm_server():
             "--trust-remote-code",
             "--dtype", "bfloat16",
             "--gpu-memory-utilization", "0.95",  # More conservative for 32B model
-            "--max-model-len", "20000",  # Context length (64K) - conservative for A100 80GB
-            "--limit-mm-per-prompt", '{"image": 2}',  # JSON format required for vLLM CLI
+            "--max-model-len", "23000",  # Context length (64K) - conservative for A100 80GB
+            "--limit-mm-per-prompt", '{"image": 4}',  # Increased to 4 for examine_each_mask (needs 3 images: raw, masked, zoomed)
             "--enforce-eager",
             "--max-num-seqs", "4",  # Reduced batch size for memory efficiency
             "--max-num-batched-tokens", "8192",  # Better long-context handling

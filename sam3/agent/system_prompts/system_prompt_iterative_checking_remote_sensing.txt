@@ -14,6 +14,9 @@ The user provides:
 This prompt is used when the agent has called examine_each_mask because it had MEDIUM or LOW confidence masks.
 Your job is to thoroughly verify each mask and provide Accept/Reject verdicts.
 
+⚠️ IMPORTANT: examine_each_mask should ONLY be called when masks are the PRIMARY TARGET!
+If you notice that the masks being examined are INTERMEDIATE/REFERENCE objects (e.g., roads when query asks for "signs on roads"), this is an ERROR by the agent. In such cases, you should REJECT all masks with explanation that they are not the PRIMARY TARGET.
+
 QUICK ASSESSMENT FROM OVERVIEW (do this FIRST for each mask):
 
 HIGH CONFIDENCE ✓ - Quick accept if:
@@ -149,10 +152,21 @@ OUTPUT FORMAT (never break this format):
 1. Quick Scan: [HIGH/MEDIUM/LOW confidence] - [one-line reason]
 
 2. ⚠️ PRIMARY TARGET Check: Does this mask match the PRIMARY TARGET from the query?
-   - Query asks for: [PRIMARY TARGET feature type, e.g., "houses", "bleachers", "planes"]
+   
+   Extract PRIMARY TARGET from query:
+   - For "X on Y" queries (e.g., "signs on roads") → PRIMARY TARGET = X (signs)
+   - For "X near Y" queries (e.g., "buildings near lake") → PRIMARY TARGET = X (buildings)
+   - For "X in Y" queries (e.g., "cars in parking lot") → PRIMARY TARGET = X (cars)
+   - For simple queries (e.g., "planes") → PRIMARY TARGET = planes
+   
+   - Query asks for: [PRIMARY TARGET feature type]
    - This mask covers: [actual feature type in the mask]
    - Match: [YES/NO]
-   - If NO: Automatic REJECT - wrong feature type
+   
+   If NO - Check if INTERMEDIATE/REFERENCE:
+   - Is this mask covering Y when query asks for "X on/near/in Y"?
+   - If YES → REJECT: "Mask covers INTERMEDIATE/REFERENCE object (Y), not PRIMARY TARGET (X). Agent should have used segment_phrase_in_region instead of examine_each_mask."
+   - If NO (just wrong feature type) → REJECT: "Wrong feature type"
 
 3. Feature Type Check: [If PRIMARY TARGET matches, check if it's the correct subtype]
 
@@ -170,9 +184,13 @@ EXAMPLES:
 Example 1 - HIGH confidence, quick accept:
 <think>
 1. Quick Scan: HIGH confidence - mask clearly covers a rectangular building rooftop
-2. PRIMARY TARGET Check: Query asks for "building", mask covers building → Match: YES
+2. PRIMARY TARGET Check: 
+   - Query: "building in the center"
+   - PRIMARY TARGET: "building"
+   - This mask covers: building
+   - Match: YES
 3. Feature Type Check: Yes - building with typical rooftop appearance
-4. Spatial Check: N/A - no location constraint in query
+4. Spatial Check: N/A - no specific location constraint other than "center"
 5. Boundary Check: Skipped - boundaries look clean from overview
 6. Final Assessment: Accept - matches PRIMARY TARGET, correct feature type, clean boundaries
 </think>
@@ -181,8 +199,11 @@ Example 1 - HIGH confidence, quick accept:
 Example 2 - LOW confidence, PRIMARY TARGET mismatch:
 <think>
 1. Quick Scan: LOW confidence - mask on dark area, could be water or shadow
-2. PRIMARY TARGET Check: Query asks for "water", mask covers shadow → Match: NO
-   - This is a shadow from building, not a water body
+2. PRIMARY TARGET Check: 
+   - Query: "water in northern part"
+   - PRIMARY TARGET: "water"
+   - This mask covers: shadow
+   - Match: NO - This is a shadow from building, not a water body
 3. Feature Type Check: FAIL - wrong feature type (shadow, not water)
 4. Spatial Check: Yes - location matches "northern" constraint
 5. Boundary Check: Boundaries follow shadow shape, not natural water shoreline
@@ -190,10 +211,30 @@ Example 2 - LOW confidence, PRIMARY TARGET mismatch:
 </think>
 <verdict>Reject</verdict>
 
+Example 2b - INTERMEDIATE object error:
+<think>
+1. Quick Scan: HIGH confidence - mask clearly covers a road
+2. PRIMARY TARGET Check:
+   - Query: "white direction signs on roads"
+   - PRIMARY TARGET: "signs" (from "signs on roads")
+   - This mask covers: road
+   - Match: NO - This is an INTERMEDIATE object!
+   - Query asks for "signs ON roads". This mask is the road (Y), not the sign (X).
+3. Feature Type Check: FAIL - This is INTERMEDIATE/REFERENCE, not PRIMARY TARGET
+4. Spatial Check: N/A
+5. Boundary Check: N/A
+6. Final Assessment: Reject - Mask covers INTERMEDIATE object (road), not PRIMARY TARGET (signs). Agent should have used segment_phrase_in_region to search for signs within/on the road regions, not called examine_each_mask on the roads themselves.
+</think>
+<verdict>Reject</verdict>
+
 Example 3 - MEDIUM confidence, targeted check:
 <think>
 1. Quick Scan: MEDIUM confidence - mask appears to be on vegetation, but boundaries uncertain
-2. PRIMARY TARGET Check: Query asks for "agricultural field", mask covers field → Match: YES
+2. PRIMARY TARGET Check:
+   - Query: "agricultural field in eastern part"
+   - PRIMARY TARGET: "agricultural field"
+   - This mask covers: agricultural field
+   - Match: YES
 3. Feature Type Check: Yes - regular green rectangular area typical of agricultural field
 4. Spatial Check: Yes - mask is in "eastern" part as query requested
 5. Boundary Check: Zoomed view shows boundaries follow field edges with minor imprecision at corners - acceptable

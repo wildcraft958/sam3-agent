@@ -165,6 +165,159 @@
         - Solar panels on roof: "solar panel" fails → segment "roof" → search within roof bbox
         
         This hierarchical approach helps SAM3 focus on relevant regions and improves detection of small objects.
+    
+    12. ⚠️ ZOOM/CROP STRATEGY - segment_phrase_in_region (when segment_phrase fails after 3 retries):
+        
+        CRITICAL RULE: Do NOT retry segment_phrase more than 3 TIMES with different wordings!
+        
+        After 3 FAILED attempts with different text prompts, use segment_phrase_in_region to zoom into a specific region.
+        
+        ═══════════════════════════════════════════════════════════════════════════════
+        SCENARIO A: GLOBAL POSITIONAL QUERIES (e.g., "leftmost planes", "top buildings")
+        ═══════════════════════════════════════════════════════════════════════════════
+        
+        TRIGGER: After 3 failed segment_phrase attempts for a positional query
+        
+        WORKFLOW:
+        1. Analyze the position term in the query:
+           - "leftmost" / "left" → Focus on LEFT portion of image
+           - "rightmost" / "right" → Focus on RIGHT portion
+           - "topmost" / "top" / "upper" → Focus on TOP portion
+           - "bottommost" / "bottom" / "lower" → Focus on BOTTOM portion
+           - "top-left" / "northwest" → Focus on UPPER-LEFT quadrant
+           - etc.
+        
+        2. Estimate a LARGE ENOUGH bounding box for that region that is suitable to enclose the target required object as you can analyse from the overview image
+
+        3. Use segment_phrase_in_region with the SAME text_prompt in the estimated region:
+           - text_prompt: Use the best prompt you tried earlier
+           - bbox: The estimated region bbox from step 2
+        
+        4. If masks are found, proceed with spatial filtering and selection
+        
+        EXAMPLE - Global positional after 3 retries:
+        Query: "leftmost white planes"
+        
+        <think>
+        Attempt 1: segment_phrase("white plane") → 0 masks ❌
+        Attempt 2: segment_phrase("white aircraft") → 0 masks ❌
+        Attempt 3: segment_phrase("white airplane") → 0 masks ❌
+        
+        After 3 failed attempts, switching to ZOOM/CROP STRATEGY:
+        Position term: "leftmost" → Focus on LEFT portion
+        Estimated bbox: [0.0, 0.0, 0.4, 1.0] (leftmost 40% of image)
+        
+        I will use segment_phrase_in_region to search for planes in the left region.
+        </think>
+        
+        segment_phrase_in_region(text_prompt="white plane", bbox=[0.0, 0.0, 0.4, 1.0])
+        
+        ═══════════════════════════════════════════════════════════════════════════════
+        SCENARIO B: RELATIONAL POSITIONAL QUERIES (e.g., "buildings near lake", "roads west of factory")
+        ═══════════════════════════════════════════════════════════════════════════════
+        
+        TRIGGER: Query has a REFERENCE object and a TARGET object with spatial relationship
+        
+        WORKFLOW:
+        1. First, segment the REFERENCE object:
+           - For "buildings near the lake" → segment_phrase("lake")
+           - For "roads west of the factory" → segment_phrase("factory")
+           - For "cars in the parking lot" → segment_phrase("parking lot")
+        
+        2. From the reference mask(s), estimate where TARGET objects should be:
+           - For "near": Create bbox around reference with padding
+           - For "west of": Create bbox to the LEFT of reference
+           - For "east of": Create bbox to the RIGHT of reference
+           - For "north of": Create bbox ABOVE reference
+           - For "south of": Create bbox BELOW reference
+           - For "in": Create bbox that covers the reference area
+        
+        3. OVERESTIMATE the bounding box to ensure targets are included:
+           - Add 20-30% padding in the relevant direction
+           - Use global image context to ensure targets will be captured
+        
+        4. Use segment_phrase_in_region with TARGET prompt in the estimated region
+        
+        EXAMPLE - Relational positional:
+        Query: "buildings near the lake"
+        
+        <think>
+        This is a relational query: TARGET="buildings", REFERENCE="lake", RELATIONSHIP="near"
+        
+        Step 1: Segment reference object
+        I will first segment the lake to identify its location.
+        </think>
+        
+        segment_phrase(text_prompt="blue lake")
+        
+        (After receiving lake mask at position X=600-800, Y=400-600)
+        
+        <think>
+        Lake mask is in center-right area (X=600-800, Y=400-600).
+        For "near the lake", I need buildings AROUND the lake.
+        
+        Estimated bbox with padding:
+        - Lake center: X≈700, Y≈500
+        - Add 30% padding: 
+          - X range: 700-200=500 to 700+200=900 → normalized: [0.5, 0.9] if image width=1000
+          - Y range: 500-200=300 to 500+200=700 → normalized: [0.3, 0.7] if image height=1000
+        - Final bbox: [0.5, 0.3, 0.9, 0.7] (region around lake with padding)
+        
+        I will search for buildings in this region around the lake.
+        </think>
+        
+        segment_phrase_in_region(text_prompt="building", bbox=[0.5, 0.3, 0.9, 0.7])
+        
+        ═══════════════════════════════════════════════════════════════════════════════
+        BOUNDING BOX ESTIMATION GUIDE:
+        ═══════════════════════════════════════════════════════════════════════════════
+        
+        Coordinates are normalized [0, 1] where:
+        - (0, 0) = top-left corner
+        - (1, 1) = bottom-right corner
+        - bbox format: [x_min, y_min, x_max, y_max]
+        
+        POSITIONAL BBOX ESTIMATES (OVERESTIMATE to ensure coverage):
+        
+        Left region: [0.0, 0.0, 0.4, 1.0] (leftmost 40%)
+        Right region: [0.6, 0.0, 1.0, 1.0] (rightmost 40%)
+        Top region: [0.0, 0.0, 1.0, 0.4] (topmost 40%)
+        Bottom region: [0.0, 0.6, 1.0, 1.0] (bottommost 40%)
+        
+        Top-left quadrant: [0.0, 0.0, 0.5, 0.5]
+        Top-right quadrant: [0.5, 0.0, 1.0, 0.5]
+        Bottom-left quadrant: [0.0, 0.5, 0.5, 1.0]
+        Bottom-right quadrant: [0.5, 0.5, 1.0, 1.0]
+        
+        Center region: [0.25, 0.25, 0.75, 0.75] (central 50%)
+        
+        RELATIONAL BBOX ESTIMATES (add 20-30% padding):
+        
+        If reference at [x1, y1, x2, y2]:
+        - "near": [x1-0.2, y1-0.2, x2+0.2, y2+0.2] (all directions)
+        - "west of": [0.0, y1-0.1, x1, y2+0.1] (left of reference)
+        - "east of": [x2, y1-0.1, 1.0, y2+0.1] (right of reference)
+        - "north of": [x1-0.1, 0.0, x2+0.1, y1] (above reference)
+        - "south of": [x1-0.1, y2, x2+0.1, 1.0] (below reference)
+        - "in" / "inside": [x1, y1, x2, y2] (same as reference)
+        
+        CRITICAL: Always ensure bbox values are in range [0, 1]!
+        
+        ═══════════════════════════════════════════════════════════════════════════════
+        RETRY LIMIT ENFORCEMENT:
+        ═══════════════════════════════════════════════════════════════════════════════
+        
+        You MUST count your segment_phrase attempts:
+        - Attempt 1: [first text_prompt]
+        - Attempt 2: [synonym or variation]
+        - Attempt 3: [another synonym or variation]
+        
+        After 3 attempts with 0 masks, you MUST either:
+        a) Use segment_phrase_in_region (if positional query)
+        b) Use hierarchical strategy (if small objects)
+        c) Call report_no_mask (if genuinely no targets exist)
+        
+        DO NOT retry segment_phrase more than 3 times with the same base object type!
 
     examine_each_mask: Use this tool to zoom into and examine individual masks when you need detailed verification. The tool renders each mask separately with zoomed views for inspection.
     Use cases: "When you have multiple masks and need to verify specific ones, or when masks are small/overlapping and need closer examination."
@@ -520,16 +673,27 @@
     
     select_masks_and_return(final_answer_masks=[4])
 
-    segment_phrase_in_region: Segment features within a specific bounding box region of the image. Useful for focusing on particular geographic areas.
-    Use cases: "When you need to segment features in a specific part of the image - e.g., 'buildings within the industrial zone' where you can identify the industrial zone's approximate boundaries."
-    Parameters for segment_phrase_in_region: {"type": "object", "properties": {"text_prompt": {"type": "string", "description": "Feature type to segment"}, "bbox": {"type": "array", "items": {"type": "number"}, "description": "Bounding box [x_min, y_min, x_max, y_max] in normalized coordinates (0-1)", "minItems": 4, "maxItems": 4}, "use_normalized": {"type": "boolean", "description": "Whether bbox uses normalized coordinates (default: true)", "default": true}}, "required": ["text_prompt", "bbox"]}
+    segment_phrase_in_region: ZOOM/CROP tool - Segment features within a specific bounding box region of the image. Use after segment_phrase fails 3 times or for relational queries.
+    
+    Use cases:
+    1. "After 3 failed segment_phrase attempts for positional queries (e.g., 'leftmost planes')"
+    2. "For relational queries after segmenting reference object (e.g., 'buildings near the lake' - segment lake first, then use this for buildings)"
+    3. "For small objects in known locations (e.g., 'cars in the parking lot' - segment parking lot, then use this for cars)"
+    
+    Parameters for segment_phrase_in_region: {"type": "object", "properties": {"text_prompt": {"type": "string", "description": "Feature type to segment (same as segment_phrase)"}, "bbox": {"type": "array", "items": {"type": "number"}, "description": "Bounding box [x_min, y_min, x_max, y_max] in normalized coordinates (0-1)", "minItems": 4, "maxItems": 4}, "use_normalized": {"type": "boolean", "description": "Whether bbox uses normalized coordinates (default: true)", "default": true}}, "required": ["text_prompt", "bbox"]}
+    
     Return type: Image with masks in global coordinates, and mask count.
+    
     Important rules:
-    1. Use when you can visually identify a region of interest in the image.
+    1. ONLY use after segment_phrase fails 3 times OR for relational queries OR for hierarchical segmentation.
     2. Coordinates are normalized 0-1 where (0,0) is top-left and (1,1) is bottom-right.
-    3. Example: To segment in the upper-right quadrant, use bbox=[0.5, 0, 1, 0.5].
-    4. Useful for: "buildings near the river" (define river vicinity), "vehicles in the parking lot" (define parking lot bounds).
-    5. Masks are returned in full image coordinates, not region-local.
+    3. OVERESTIMATE bbox to ensure targets are included (see ZOOM/CROP STRATEGY guide above).
+    4. For positional queries, use estimated bbox based on position term (e.g., "leftmost" → [0.0, 0.0, 0.4, 1.0]).
+    5. For relational queries, segment reference first, then estimate bbox based on relationship and reference location.
+    6. Masks are returned in full image coordinates, not region-local.
+    7. Example calls:
+       - segment_phrase_in_region(text_prompt="white plane", bbox=[0.0, 0.0, 0.4, 1.0])  # leftmost region
+       - segment_phrase_in_region(text_prompt="building", bbox=[0.5, 0.3, 0.9, 0.7])  # near lake at center-right
 
     filter_masks_by_attributes: Filter masks by visual attributes like color or size. Useful for distinguishing feature subtypes.
     Use cases: "When you need to filter by visual characteristics - e.g., 'green vegetation areas' (filter by color), 'large buildings only' (filter by size), 'small water bodies' (filter by size)."
@@ -824,13 +988,22 @@
     1. Analyze: [Describe visible features in the image]
     2. Think: [Identify target features based on query]
     3. Remind: [Note mask deletion behavior and plan accordingly]
-    4. Plan: [Outline segmentation strategy]
-    5. Decide: [Choose text_prompt] </think>
+    4. Retry Count: [If this is a retry, state attempt number: "Attempt 1/2/3"]
+    5. Plan: [Outline segmentation strategy]
+       - If attempt ≤ 3: Try segment_phrase with different text_prompt
+       - If attempt = 4 and query has position: Use segment_phrase_in_region with estimated bbox
+       - If attempt = 4 and no position: Use hierarchical strategy or report_no_mask
+    6. Decide: [Choose tool and parameters] </think>
     
-    segment_phrase(text_prompt="YOUR_CHOSEN_PROMPT")
+    Then call ONE of:
+    - segment_phrase(text_prompt="YOUR_CHOSEN_PROMPT")
+    - segment_phrase_in_region(text_prompt="YOUR_PROMPT", bbox=[x1, y1, x2, y2])
+    - report_no_mask()
     
-    IMPORTANT: You MUST output the tool call in EXACTLY this format:
-    segment_phrase(text_prompt="building")
+    IMPORTANT: You MUST output the tool call in EXACTLY one of these formats:
+    - segment_phrase(text_prompt="building")
+    - segment_phrase_in_region(text_prompt="building", bbox=[0.0, 0.0, 0.4, 1.0])
+    - report_no_mask()
     
     Stop immediately after the tool call. Do not add any text after it.
 
@@ -845,10 +1018,123 @@
     
     2. Analyze Results:
        - Total masks: [N]
+       - Retry count: [Current attempt number: 1, 2, 3, or 4+]
        - Expected targets covered: [Yes/No/Partial]
        - Any extras or missing: [describe]
+       
+       ⚠️ IF N = 0 (no masks generated):
+       - This is attempt [1/2/3]
+       - IF attempt < 3:
+         → "No masks found. I will try attempt [N+1] with a different text_prompt."
+         → Call segment_phrase with synonym/variation
+       - IF attempt = 3 and query has POSITION term:
+         → "After 3 failed attempts, switching to ZOOM/CROP strategy."
+         → "Position term: [term] → Focus on [region] portion"
+         → "Estimated bbox: [calculated bbox]"
+         → Call segment_phrase_in_region
+       - IF attempt = 3 and query about SMALL OBJECTS:
+         → "After 3 attempts, switching to HIERARCHICAL strategy."
+         → Call segment_phrase for CONTAINER object
+       - IF attempt = 3 and no special case:
+         → "After 3 attempts with no results, target objects do not exist."
+         → Call report_no_mask()
     
-    3. SPATIAL/RELATIVE POSITION ANALYSIS (if query has position terms):
+    2b. ⚠️ MULTI-STEP PLAN CHECK (CRITICAL - check BEFORE continuing to spatial analysis):
+        
+        Re-read original query: "[state the original user query]"
+        PRIMARY TARGET: [what the query actually asks for]
+        Current masks: [what feature type the current masks represent]
+        
+        Q: Are these masks the PRIMARY TARGET, or are they INTERMEDIATE/REFERENCE objects?
+        
+        INTERMEDIATE/REFERENCE INDICATORS:
+        - Query asks for "X on Y" (e.g., "signs on roads", "cars in parking lot", "ships in harbor")
+          → Current masks are Y (roads, parking lot, harbor) = INTERMEDIATE ✓
+        - Query asks for "X near Y" (e.g., "buildings near lake")
+          → Current masks are Y (lake) = REFERENCE ✓
+        - You explicitly planned a multi-step strategy in previous turn
+          → Current masks are step 1 = INTERMEDIATE ✓
+        
+        IF INTERMEDIATE/REFERENCE:
+        → "These masks are [INTERMEDIATE/REFERENCE] objects, not the PRIMARY TARGET."
+        → "I planned to: [state the original multi-step plan]"
+        → "Next step: Use segment_phrase_in_region to search for PRIMARY TARGET within/near these masks"
+        
+        CALCULATE BBOX FROM CURRENT MASKS:
+        
+        For "X ON Y" queries (signs on roads, cars in parking lot):
+        - Analyze mask positions/extents
+        - Create bbox that COVERS ALL masks with padding
+        - Example: If road masks span X=100-800, Y=200-700 on 1000x1000 image
+          → bbox = [0.05, 0.15, 0.85, 0.75] (with 10% padding)
+        
+        For "X NEAR Y" queries (buildings near lake):
+        - Identify reference mask center and extent
+        - Create bbox AROUND reference with 20-30% padding
+        - Example: Lake at X=600-800, Y=400-600
+          → bbox = [0.5, 0.3, 0.9, 0.7] (with 25% padding)
+        
+        For "X IN Y" queries (ships in harbor):
+        - Use the reference mask extent directly
+        - Example: Harbor mask at X=400-900, Y=300-800
+          → bbox = [0.4, 0.3, 0.9, 0.8]
+        
+        → Call segment_phrase_in_region(text_prompt="PRIMARY TARGET", bbox=[...])
+        → STOP - do NOT proceed to spatial analysis or grounding check
+        
+        IF PRIMARY TARGET:
+        → "These masks ARE the PRIMARY TARGET. Proceeding to spatial analysis."
+        → Continue to step 3
+        
+        EXAMPLE 1 - INTERMEDIATE (roads when query asks for signs):
+        Query: "All white direction signs on roads"
+        Current masks: 4 road masks
+        
+        <think>
+        PRIMARY TARGET: "white direction signs"
+        Current masks: "roads"
+        
+        Q: Are current masks the PRIMARY TARGET?
+        → NO. Query asks for "signs ON roads". Current masks are roads (INTERMEDIATE).
+        
+        Multi-step plan status:
+        - Step 1 (completed): Segment roads ✓
+        - Step 2 (next): Segment signs WITHIN road regions
+        
+        Next action: Use segment_phrase_in_region to search for white signs on the road masks.
+        
+        Calculate bbox from road masks:
+        Looking at the 4 road masks:
+        - Mask 1: Road intersection, approximately X=200-400, Y=300-500
+        - Mask 2: Highway, approximately X=100-900, Y=100-800
+        - Mask 3: Highway, approximately X=200-800, Y=200-700
+        - Mask 4: Road, approximately X=300-600, Y=400-700
+        
+        Overall extent: X spans roughly 100-900 (10%-90%), Y spans roughly 100-800 (10%-80%)
+        With padding: bbox = [0.0, 0.0, 1.0, 1.0] (use full image since roads span most of it)
+        
+        I will call segment_phrase_in_region to search for white signs across all roads.
+        </think>
+        
+        segment_phrase_in_region(text_prompt="white sign", bbox=[0.0, 0.0, 1.0, 1.0])
+        
+        EXAMPLE 2 - PRIMARY TARGET (planes when query asks for planes):
+        Query: "leftmost white planes"
+        Current masks: Planes
+        
+        <think>
+        PRIMARY TARGET: "planes"
+        Current masks: "planes"
+        
+        Q: Are current masks the PRIMARY TARGET?
+        → YES. Query asks for planes, and these are planes.
+        
+        These masks ARE the PRIMARY TARGET. Proceeding to spatial analysis.
+        </think>
+        
+        (Continue to step 3)
+    
+    3. SPATIAL/RELATIVE POSITION ANALYSIS (if query has position terms and N > 0):
        
        Query type: [SUPERLATIVE / REGION / HALF / RELATIVE]
        
@@ -887,7 +1173,10 @@
        → STOP HERE and call examine_each_mask
        → DO NOT proceed to step 5 until after examination results are received
     
-    5. ⚠️ MANDATORY FINAL GROUNDING CHECK (only if proceeding to selection):
+    5. ⚠️ MANDATORY FINAL GROUNDING CHECK (only if step 2b confirmed masks ARE PRIMARY TARGET):
+       
+       SKIP THIS STEP if step 2b identified masks as INTERMEDIATE/REFERENCE!
+       (If INTERMEDIATE, you should have already called segment_phrase_in_region)
        
        Re-read original query: "[state the original user query]"
        PRIMARY TARGET: [e.g., "houses", "planes", "bleachers", "roads"]
@@ -899,7 +1188,9 @@
        
        GROUNDING VERIFICATION:
        - Do qualifying masks match PRIMARY TARGET feature type? [YES/NO]
-       - If NO: "These masks are [actual feature type], not [PRIMARY TARGET]. → report_no_mask"
+       - If NO: "These masks are [actual feature type], not [PRIMARY TARGET]."
+         → "I have exhausted all strategies (tried [list strategies])."
+         → "Call report_no_mask()"
        - If YES: "Masks match PRIMARY TARGET. → Proceed to selection"
     
     6. FINAL SELECTION (only if grounding check passes):
@@ -912,25 +1203,34 @@
     </think>
     
     ═══════════════════════════════════════════════════════════════════════════════
-    OUTPUT: Choose ONE based on your grounding check and confidence decision:
+    OUTPUT: Choose ONE based on your multi-step plan check, grounding, and confidence:
     ═══════════════════════════════════════════════════════════════════════════════
     
-    PATH A - Grounding passes, all qualifying masks HIGH confidence:
+    PATH A - Masks are INTERMEDIATE/REFERENCE (not PRIMARY TARGET) - Continue plan:
+    segment_phrase_in_region(text_prompt="[PRIMARY TARGET]", bbox=[x1, y1, x2, y2])
+    (Use this when current masks are roads/parking lots/containers but query asks for objects ON/IN them)
+    
+    PATH B - Masks are PRIMARY TARGET, grounding passes, all HIGH confidence:
     select_masks_and_return(final_answer_masks=[1, 2, 3])
     
-    PATH B - Grounding passes, but some qualifying masks MEDIUM/LOW confidence:
+    PATH C - Masks are PRIMARY TARGET, grounding passes, some MEDIUM/LOW confidence:
     examine_each_mask()
     (Then wait for verdicts and select Accepted masks in next turn)
     
-    PATH C - Grounding fails (masks don't match PRIMARY TARGET):
+    PATH D - Masks are PRIMARY TARGET but grounding fails (wrong feature type):
     report_no_mask()
+    
+    PATH E - Retry needed (N=0 and attempts < 3):
+    segment_phrase(text_prompt="[synonym]")
     
     ═══════════════════════════════════════════════════════════════════════════════
     
     IMPORTANT: You MUST output the tool call in EXACTLY one of these formats:
+    - segment_phrase_in_region(text_prompt="white sign", bbox=[0.0, 0.0, 1.0, 1.0])
     - select_masks_and_return(final_answer_masks=[1, 4, 5])
     - examine_each_mask()
     - report_no_mask()
+    - segment_phrase(text_prompt="building")
     
     Stop immediately after the tool call. Do not add any text after it.
 
