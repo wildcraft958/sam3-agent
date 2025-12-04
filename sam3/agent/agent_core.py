@@ -1230,16 +1230,15 @@ def agent_inference(
                 image_w_zoomed_in_mask_i.save(image_w_zoomed_in_mask_i_path)
                 image_w_mask_i.save(image_w_mask_i_path)
 
+                # Keep vision requests within 2-image limit for providers like OpenAI/vLLM
                 iterative_checking_messages = [
                     {"role": "system", "content": iterative_checking_system_prompt},
                     {
                         "role": "user",
                         "content": [
-                            {"type": "text", "text": f"The raw input image: "},
-                            {"type": "image", "image": img_path},
                             {
                                 "type": "text",
-                                "text": f"The initial user input query is: '{initial_text_prompt}'",
+                                "text": f"The initial user input query is: '{initial_text_prompt}'. The raw image is the background of the mask render below (omitted as a separate attachment to respect the 2-image limit).",
                             },
                             {
                                 "type": "text",
@@ -1248,7 +1247,7 @@ def agent_inference(
                             {"type": "image", "image": image_w_mask_i_path},
                             {
                                 "type": "text",
-                                "text": f"Image with the zoomed-in mask: ",
+                                "text": f"Zoomed-in view of the selected mask: ",
                             },
                             {"type": "image", "image": image_w_zoomed_in_mask_i_path},
                         ],

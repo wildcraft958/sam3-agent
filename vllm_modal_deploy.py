@@ -158,11 +158,11 @@ def vllm_server():
             "--model", MODEL_ID,
             "--trust-remote-code",
             "--dtype", "bfloat16",
-            "--gpu-memory-utilization", "0.85",  # Reduced from 0.95 to avoid OOM
+            "--gpu-memory-utilization", "0.90",  # Reduced from 0.95 to avoid OOM
             "--max-model-len", "32768",  # Reduced from 60K to 32K to save memory (increase if needed)
-            "--limit-mm-per-prompt", '{"image": 4}',  # Increased to 4 for examine_each_mask (needs 3 images: raw, masked, zoomed)
+            "--limit-mm-per-prompt", '{"image": 2}',  # Enforce 2-image cap per prompt (agent stays within this limit)
             "--enforce-eager",  # Disables CUDA graphs to save memory
-            "--max-num-seqs", "2",  # Further reduced batch size for memory efficiency
+            "--max-num-seqs", "1",  # Further reduced batch size for memory efficiency
             "--max-num-batched-tokens", "4096",  # Reduced to save memory
             "--swap-space", "4",  # Enable 4GB CPU swap space for overflow
             "--port", str(vllm_port),
@@ -504,4 +504,3 @@ def download_model_to_volume():
     except Exception as e:
         print(f"✓ Model downloaded and cached in volume")
         print(f"  (Could not list volume contents: {e})")
-
