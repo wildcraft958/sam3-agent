@@ -67,23 +67,31 @@
     SAM3 TEXT PROMPT BEST PRACTICES:
     
     ═══════════════════════════════════════════════════════════════════════════════
-    ALWAYS INCLUDE COLOR WHEN SPECIFIED IN QUERY
+    INCLUDE COLOR ONLY WHEN EXPLICITLY SPECIFIED IN QUERY
     ═══════════════════════════════════════════════════════════════════════════════
     
-    If the user's query mentions a COLOR, you MUST include it in your prompt:
+    CRITICAL RULE: Include color in your prompt ONLY when the user's query explicitly mentions a color.
+    Do NOT add color attributes if the query doesn't mention them.
     
+    When query mentions color - INCLUDE IT:
     - Query: "white planes" → Use: segment_phrase(text_prompt="white plane")
     - Query: "red roofs" → Use: segment_phrase(text_prompt="red roof")
     - Query: "blue water" → Use: segment_phrase(text_prompt="blue water")
     - Query: "green fields" → Use: segment_phrase(text_prompt="green field")
     - Query: "dark vehicles" → Use: segment_phrase(text_prompt="dark vehicle")
     
+    When query does NOT mention color - DO NOT INCLUDE IT:
+    - Query: "planes" → Use: segment_phrase(text_prompt="plane")
+    - Query: "buildings" → Use: segment_phrase(text_prompt="building")
+    - Query: "water bodies" → Use: segment_phrase(text_prompt="water")
+    - Query: "vehicles" → Use: segment_phrase(text_prompt="vehicle")
+    
 
     ═══════════════════════════════════════════════════════════════════════════════
     
     EFFECTIVE PROMPTS (SAM3 works well with these):
     - Single nouns: "building", "road", "water", "tree", "vehicle", "ship", "field"
-    - Noun + color: "white plane", "green field", "blue water", "gray roof", "red car"
+    - Noun + color (ONLY when color is in query): "white plane", "green field", "blue water", "gray roof", "red car"
     - Compound nouns: "parking lot", "solar panel", "swimming pool", "storage tank", "runway"
     
     INEFFECTIVE PROMPTS (avoid these):
@@ -95,16 +103,18 @@
     
     Important rules for using segment_phrase:
     
-    1. ALWAYS INCLUDE COLOR: Every prompt MUST include the color attribute.
+    1. COLOR USAGE - Only when explicitly specified:
        - If user specifies color: Use it exactly ("white plane", "red car")
-       - If user doesn't specify: Look at the image and add the visible color
-       - Examples: "gray building", "blue water", "green field", "white vehicle"
+       - If user doesn't specify: DO NOT add color - use simple noun ("building", "plane", "water")
+       - Examples when color is specified: "gray building", "blue water", "green field", "white vehicle"
+       - Examples when color NOT specified: "building", "water", "field", "vehicle"
     
-    2. START WITH COLOR+NOUN (always):
-       - "white planes in the left" → segment_phrase(text_prompt="white plane")
-       - "red cars" → segment_phrase(text_prompt="red car")
-       - "buildings" (no color given) → Look at image, use "gray building" or "brown building"
-       - "tennis court" → Look at image, use "blue tennis court" or "green tennis court"
+    2. START WITH SIMPLE NOUN OR COLOR+NOUN (only if color is in query):
+       - "white planes in the left" → segment_phrase(text_prompt="white plane")  [color specified]
+       - "red cars" → segment_phrase(text_prompt="red car")  [color specified]
+       - "buildings in the center" → segment_phrase(text_prompt="building")  [no color specified]
+       - "tennis court" → segment_phrase(text_prompt="tennis court")  [no color specified]
+       - "planes" → segment_phrase(text_prompt="plane")  [no color specified]
     
     3. TRY ONLY SYNONYMS (do NOT over-generalize):
         CRITICAL: Only use TRUE SYNONYMS that mean the SAME thing. Do NOT generalize!
@@ -124,21 +134,24 @@
     
     4. SIMPLIFY WITHOUT LOSING MEANING:
        CORRECT simplifications:
-       - "Boeing 747 aircraft" → "white airplane" (simplified + color)
+       - "Boeing 747 aircraft" → "airplane" (if no color in query) OR "white airplane" (if query mentions white)
        - "photovoltaic installation" → "solar panel" (simpler term)
-       - "residential dwelling" → "gray building" (simpler + color)
+       - "residential dwelling" → "building" (if no color in query)
        
        WRONG simplifications:
-       - "airplane" → "white object" ❌ (lost meaning)
+       - "airplane" → "object" ❌ (lost meaning)
        - "tennis court" → "rectangle" ❌ (lost meaning)
+       - Adding color when query doesn't mention it ❌
     
-    5. RETRY STRATEGY with COLOR VARIATIONS:
+    5. RETRY STRATEGY:
        If first prompt fails, try:
-       a) Same noun + different color: "white plane" → "gray plane"
-       b) True synonym + color: "white plane" → "white aircraft" → "white airplane"
-       c) Singular/plural: "white planes" → "white plane"
+       a) True synonym: "plane" → "aircraft" → "airplane"
+       b) Singular/plural: "planes" → "plane"
+       c) If query mentions color, try different color: "white plane" → "gray plane"
+       d) Simpler/broader term: "residential building" → "building"
        
        DO NOT try: generic terms like "object", "area", "thing", "shape"
+       DO NOT add colors if query doesn't mention them
 
     7. NEVER REPEAT: Do not use the exact same text_prompt twice.
     
@@ -246,9 +259,10 @@
         
         Step 1: Segment reference object
         I will first segment the lake to identify its location.
+        Query does not mention lake color, so I will not add color attribute.
         </think>
         
-        segment_phrase(text_prompt="blue lake")
+        segment_phrase(text_prompt="lake")
         
         (After receiving lake mask at position X=600-800, Y=400-600)
         
