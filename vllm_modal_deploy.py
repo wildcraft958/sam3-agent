@@ -77,7 +77,7 @@ image = (
     # )
     # Install remaining dependencies
     .pip_install(
-        "vllm>=0.6.0",
+        "vllm==0.12.0",
         "transformers>=4.40.0",
         "accelerate>=0.30.0",
         "pillow>=10.0.0",
@@ -158,13 +158,15 @@ def vllm_server():
             "--trust-remote-code",
             "--dtype", "bfloat16",
             "--gpu-memory-utilization", "0.95",  # More conservative for 32B model
-            "--max-model-len", "23000",  # Context length (64K) - conservative for A100 80GB
+            "--max-model-len", "60000",  # Context length (64K) - conservative for A100 80GB
             "--limit-mm-per-prompt", '{"image": 4}',  # Increased to 4 for examine_each_mask (needs 3 images: raw, masked, zoomed)
             "--enforce-eager",
             "--max-num-seqs", "4",  # Reduced batch size for memory efficiency
             "--max-num-batched-tokens", "8192",  # Better long-context handling
             "--port", str(vllm_port),
+            "--quantization", "fp8",
             "--host", "0.0.0.0",
+            "--block-size", "16",
         ]
         
         # Add tensor parallelism if multiple GPUs
