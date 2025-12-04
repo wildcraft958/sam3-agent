@@ -1061,7 +1061,7 @@ def agent_inference(
                 print(
                     f"❌ Text prompt '{current_text_prompt}' has been used before. Requesting a different prompt."
                 )
-                duplicate_prompt_message = f"You have previously used '{current_text_prompt}' as your text_prompt to call the segment_phrase tool. You may not use it again. Please call the segment_phrase or segment_phrase_in_region tool again with a different, perhaps more general, or more creative simple noun phrase prompt, while adhering to all the rules stated in the system prompt. You must also never use any of the following text_prompt(s): {str(list(USED_TEXT_PROMPTS))}."
+                duplicate_prompt_message = f"You have previously used '{current_text_prompt}' as your text_prompt to call the segment_phrase tool. You may not use it again. Please call the segment_phrase tool again with a different, perhaps more general, or more creative simple noun phrase prompt, while adhering to all the rules stated in the system prompt. You must also never use any of the following text_prompt(s): {str(list(USED_TEXT_PROMPTS))}."
                 messages.append({
                     "role": "assistant",
                     "content": generated_text if generated_text else None,
@@ -1169,9 +1169,9 @@ def agent_inference(
                         
                         # Check if we should suggest LISAT as alternative
                         if sam3_segmentation_count >= 3 and lisat_attempts == 0:
-                            sam3_output_text_message = f"The segment_phrase_in_region tool did not generate any masks for the text_prompt '{current_text_prompt}' in the specified region. You have now attempted SAM3 segmentation {sam3_segmentation_count} times without success. It's time to try a different approach. Please use the segment_with_lisat tool as an alternative segmentation method. LISAT uses a different model that may succeed where SAM3 has failed. Include relevant attributes from the original query ('{initial_text_prompt}') such as color, size, or location in your prompt to LISAT."
+                            sam3_output_text_message = f"The segment_phrase tool did not generate any masks for the text_prompt '{current_text_prompt}' in the specified region. You have now attempted SAM3 segmentation {sam3_segmentation_count} times without success. It's time to try a different approach. Please use the segment_with_lisat tool as an alternative segmentation method. LISAT uses a different model that may succeed where SAM3 has failed. Include relevant attributes from the original query ('{initial_text_prompt}') such as color, size, or location in your prompt to LISAT."
                         else:
-                            sam3_output_text_message = f"The segment_phrase_in_region tool did not generate any masks for the text_prompt '{current_text_prompt}' in the specified region. Now, please call the segment_phrase or segment_phrase_in_region tool again with a different, perhaps more general, or more creative simple noun phrase text_prompt, while adhering to all the rules stated in the system prompt. Please be reminded that the original user query was '{initial_text_prompt}'."
+                            sam3_output_text_message = f"The segment_phrase tool did not generate any masks for the text_prompt '{current_text_prompt}' in the specified region. Now, please call the segment_phrase tool again with a different, perhaps more general, or more creative simple noun phrase text_prompt, while adhering to all the rules stated in the system prompt. Please be reminded that the original user query was '{initial_text_prompt}'."
                         
                         messages.append({
                             "role": "tool",
@@ -1179,7 +1179,7 @@ def agent_inference(
                             "content": json.dumps({"message": sam3_output_text_message, "num_masks": 0}),
                         })
                     else:
-                        sam3_output_text_message = rf"The segment_phrase_in_region tool generated {num_masks} available masks in the specified region. All {num_masks} available masks are rendered in this image below, now you must analyze the {num_masks} available mask(s) carefully, compare them against the raw input image and the original user query, and determine your next action. Please be reminded that the original user query was '{initial_text_prompt}'."
+                        sam3_output_text_message = rf"The segment_phrase tool generated {num_masks} available masks in the specified region. All {num_masks} available masks are rendered in this image below, now you must analyze the {num_masks} available mask(s) carefully, compare them against the raw input image and the original user query, and determine your next action. Please be reminded that the original user query was '{initial_text_prompt}'."
                         messages.append({
                             "role": "tool",
                             "tool_call_id": tool_call_id,
