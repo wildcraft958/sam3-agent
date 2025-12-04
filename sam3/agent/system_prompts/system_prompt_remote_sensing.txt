@@ -158,180 +158,68 @@
     8. MASK DELETION WARNING: Every segment_phrase call deletes ALL previous masks.
     
 
-    11. HIERARCHICAL SEGMENTATION STRATEGY (CRITICAL for small objects):
-        When direct segmentation of small objects fails, use a container-first approach:
+    11. RETRY STRATEGY (When direct segmentation fails):
+        When direct segmentation fails after 3 attempts, switch to LISAT:
         
-        PROBLEM: Query asks for "cars" but direct "car" or "vehicle" prompt returns no masks.
-        SOLUTION: Segment the containing area first, then look for objects within.
+        PROBLEM: Query asks for "cars" but "car", "vehicle", and "automobile" all return no masks.
+        SOLUTION: After 3 SAM3 attempts, switch to segment_with_lisat with more descriptive prompts.
         
         Step-by-step approach:
-        a) First attempt: Try direct prompt ("car", "vehicle")
-        b) If fails: Segment the container ("parking lot", "road", "street")
-        c) Use segment_phrase_in_region: Focus on the container area with original target prompt
-        d) Examine results: Use examine_each_mask if needed to verify small objects
+        a) First 3 attempts: Try SAM3 with segment_phrase using synonyms and variations
+        b) If all fail (0 masks): Switch to segment_with_lisat with detailed descriptions
+        c) LISAT prompts should include attributes from the original query (color, size, location)
+        d) Up to 3 LISAT attempts allowed
+        e) If all 6 attempts fail: Call report_no_mask
         
         EXAMPLES:
-        - Cars in parking lot: "car" fails → segment "parking lot" → use segment_phrase_in_region with "vehicle" in parking lot bbox
-        - Ships in harbor: "ship" fails → segment "harbor" or "water" → focus search in water area
-        - Trees in park: "tree" fails → segment "park" or "green area" → search for "tree" within
-        - Planes at airport: "airplane" fails → segment "runway" or "tarmac" → search within airport area
-        - Solar panels on roof: "solar panel" fails → segment "roof" → search within roof bbox
-        
-        This hierarchical approach helps SAM3 focus on relevant regions and improves detection of small objects.
+        - Cars: Try "car", "vehicle", "automobile" with SAM3 → If fails, try LISAT with "red vehicles in parking area"
+        - Ships: Try "ship", "boat", "vessel" with SAM3 → If fails, try LISAT with "ships or boats in the water"
+        - Planes: Try "plane", "aircraft", "airplane" with SAM3 → If fails, try LISAT with "airplanes on the tarmac"
     
-    12. ⚠️ ZOOM/CROP STRATEGY - segment_phrase_in_region (when segment_phrase fails after 3 retries):
+    12. ⚠️ FALLBACK STRATEGY - segment_with_lisat (when segment_phrase fails after 3 retries):
         
         CRITICAL RULE: Do NOT retry segment_phrase more than 3 TIMES with different wordings!
+        After 3 failed segment_phrase attempts, the system will automatically suggest switching to LISAT.
         
-        After 3 FAILED attempts with different text prompts, use segment_phrase_in_region to zoom into a specific region.
+        After 3 FAILED segment_phrase attempts, switch to segment_with_lisat with more descriptive prompts.
         
-        ═══════════════════════════════════════════════════════════════════════════════
-        SCENARIO A: GLOBAL POSITIONAL QUERIES (e.g., "leftmost planes", "top buildings")
-        ═══════════════════════════════════════════════════════════════════════════════
+        WORKFLOW AFTER 3 FAILED SAM3 ATTEMPTS:
         
-        TRIGGER: After 3 failed segment_phrase attempts for a positional query
+        The system will automatically inject a message telling you to switch to LISAT.
+        You will see: "⚠️ You have exhausted all 3 SAM3 attempts. Please use segment_with_lisat..."
         
-        WORKFLOW:
-        1. Analyze the position term in the query:
-           - "leftmost" / "left" → Focus on LEFT portion of image
-           - "rightmost" / "right" → Focus on RIGHT portion
-           - "topmost" / "top" / "upper" → Focus on TOP portion
-           - "bottommost" / "bottom" / "lower" → Focus on BOTTOM portion
-           - "top-left" / "northwest" → Focus on UPPER-LEFT quadrant
-           - etc.
+        When you receive this message:
+        1. Use segment_with_lisat with a more descriptive prompt
+        2. Include attributes from the original query (color, size, location)
+        3. Make the prompt more detailed than SAM3 prompts
         
-        2. Estimate a LARGE ENOUGH bounding box for that region that is suitable to enclose the target required object as you can analyse from the overview image
-
-        3. Use segment_phrase_in_region with the SAME text_prompt in the estimated region:
-           - text_prompt: Use the best prompt you tried earlier
-           - bbox: The estimated region bbox from step 2
-        
-        4. If masks are found, proceed with spatial filtering and selection
-        
-        EXAMPLE - Global positional after 3 retries:
+        EXAMPLE - After 3 failed SAM3 attempts:
         Query: "leftmost white planes"
         
         <think>
-        Attempt 1: segment_phrase("white plane") → 0 masks ❌
-        Attempt 2: segment_phrase("white aircraft") → 0 masks ❌
-        Attempt 3: segment_phrase("white airplane") → 0 masks ❌
+        SAM3 Attempt 1: segment_phrase("white plane") → 0 masks ❌
+        SAM3 Attempt 2: segment_phrase("white aircraft") → 0 masks ❌
+        SAM3 Attempt 3: segment_phrase("white airplane") → 0 masks ❌
         
-        After 3 failed attempts, switching to ZOOM/CROP STRATEGY:
-        Position term: "leftmost" → Focus on LEFT portion
-        Estimated bbox: [0.0, 0.0, 0.4, 1.0] (leftmost 40% of image)
+        System message: "📊 ATTEMPT TRACKING: SAM3 attempts: 3/3, LISAT attempts: 0/3, Total: 3/6
+                         ⚠️ You have exhausted all 3 SAM3 attempts. Please use segment_with_lisat..."
         
-        I will use segment_phrase_in_region to search for planes in the left region.
+        Now I will switch to LISAT with a more descriptive prompt including position info.
         </think>
         
-        segment_phrase_in_region(text_prompt="white plane", bbox=[0.0, 0.0, 0.4, 1.0])
+        segment_with_lisat(text_prompt="white planes or aircraft on the left side of the image")
         
         ═══════════════════════════════════════════════════════════════════════════════
-        SCENARIO B: RELATIONAL POSITIONAL QUERIES (e.g., "buildings near lake", "roads west of factory")
+        LISAT PROMPT GUIDELINES:
         ═══════════════════════════════════════════════════════════════════════════════
         
-        TRIGGER: Query has a REFERENCE object and a TARGET object with spatial relationship
+        - Include COLOR if mentioned in query: "red vehicles", "white buildings"
+        - Include SIZE if relevant: "large buildings", "small boats"
+        - Include LOCATION if specified: "planes on the left", "ships in the water"
+        - Include CONTEXT: "vehicles in parking lot", "buildings near water"
+        - Use OR for alternatives: "ships or boats", "planes or aircraft"
         
-        WORKFLOW:
-        1. First, segment the REFERENCE object:
-           - For "buildings near the lake" → segment_phrase("lake")
-           - For "roads west of the factory" → segment_phrase("factory")
-           - For "cars in the parking lot" → segment_phrase("parking lot")
-        
-        2. From the reference mask(s), estimate where TARGET objects should be:
-           - For "near": Create bbox around reference with padding
-           - For "west of": Create bbox to the LEFT of reference
-           - For "east of": Create bbox to the RIGHT of reference
-           - For "north of": Create bbox ABOVE reference
-           - For "south of": Create bbox BELOW reference
-           - For "in": Create bbox that covers the reference area
-        
-        3. OVERESTIMATE the bounding box to ensure targets are included:
-           - Add 20-30% padding in the relevant direction
-           - Use global image context to ensure targets will be captured
-        
-        4. Use segment_phrase_in_region with TARGET prompt in the estimated region
-        
-        EXAMPLE - Relational positional:
-        Query: "buildings near the lake"
-        
-        <think>
-        This is a relational query: TARGET="buildings", REFERENCE="lake", RELATIONSHIP="near"
-        
-        Step 1: Segment reference object
-        I will first segment the lake to identify its location.
-        Query does not mention lake color, so I will not add color attribute.
-        </think>
-        
-        segment_phrase(text_prompt="lake")
-        
-        (After receiving lake mask at position X=600-800, Y=400-600)
-        
-        <think>
-        Lake mask is in center-right area (X=600-800, Y=400-600).
-        For "near the lake", I need buildings AROUND the lake.
-        
-        Estimated bbox with padding:
-        - Lake center: X≈700, Y≈500
-        - Add 30% padding: 
-          - X range: 700-200=500 to 700+200=900 → normalized: [0.5, 0.9] if image width=1000
-          - Y range: 500-200=300 to 500+200=700 → normalized: [0.3, 0.7] if image height=1000
-        - Final bbox: [0.5, 0.3, 0.9, 0.7] (region around lake with padding)
-        
-        I will search for buildings in this region around the lake.
-        </think>
-        
-        segment_phrase_in_region(text_prompt="building", bbox=[0.5, 0.3, 0.9, 0.7])
-        
-        ═══════════════════════════════════════════════════════════════════════════════
-        BOUNDING BOX ESTIMATION GUIDE:
-        ═══════════════════════════════════════════════════════════════════════════════
-        
-        Coordinates are normalized [0, 1] where:
-        - (0, 0) = top-left corner
-        - (1, 1) = bottom-right corner
-        - bbox format: [x_min, y_min, x_max, y_max]
-        
-        POSITIONAL BBOX ESTIMATES (OVERESTIMATE to ensure coverage):
-        
-        Left region: [0.0, 0.0, 0.4, 1.0] (leftmost 40%)
-        Right region: [0.6, 0.0, 1.0, 1.0] (rightmost 40%)
-        Top region: [0.0, 0.0, 1.0, 0.4] (topmost 40%)
-        Bottom region: [0.0, 0.6, 1.0, 1.0] (bottommost 40%)
-        
-        Top-left quadrant: [0.0, 0.0, 0.5, 0.5]
-        Top-right quadrant: [0.5, 0.0, 1.0, 0.5]
-        Bottom-left quadrant: [0.0, 0.5, 0.5, 1.0]
-        Bottom-right quadrant: [0.5, 0.5, 1.0, 1.0]
-        
-        Center region: [0.25, 0.25, 0.75, 0.75] (central 50%)
-        
-        RELATIONAL BBOX ESTIMATES (add 20-30% padding):
-        
-        If reference at [x1, y1, x2, y2]:
-        - "near": [x1-0.2, y1-0.2, x2+0.2, y2+0.2] (all directions)
-        - "west of": [0.0, y1-0.1, x1, y2+0.1] (left of reference)
-        - "east of": [x2, y1-0.1, 1.0, y2+0.1] (right of reference)
-        - "north of": [x1-0.1, 0.0, x2+0.1, y1] (above reference)
-        - "south of": [x1-0.1, y2, x2+0.1, 1.0] (below reference)
-        - "in" / "inside": [x1, y1, x2, y2] (same as reference)
-        
-        CRITICAL: Always ensure bbox values are in range [0, 1]!
-        
-        ═══════════════════════════════════════════════════════════════════════════════
-        RETRY LIMIT ENFORCEMENT:
-        ═══════════════════════════════════════════════════════════════════════════════
-        
-        You MUST count your segment_phrase attempts:
-        - Attempt 1: [first text_prompt]
-        - Attempt 2: [synonym or variation]
-        - Attempt 3: [another synonym or variation]
-        
-        After 3 attempts with 0 masks, you MUST either:
-        a) Use segment_phrase_in_region (if positional query)
-        b) Use hierarchical strategy (if small objects)
-        c) Call report_no_mask (if genuinely no targets exist)
-        
-        DO NOT retry segment_phrase more than 3 times with the same base object type!
+        LISAT attempts are also limited to 3. After 6 total attempts (3 SAM3 + 3 LISAT), call report_no_mask.
 
     examine_each_mask: Use this tool to zoom into and examine individual masks when you need detailed verification. The tool renders each mask separately with zoomed views for inspection.
     Use cases: "When you have multiple masks and need to verify specific ones, or when masks are small/overlapping and need closer examination."
@@ -403,6 +291,59 @@
     4. After examination, use verdicts to make final selection
     5. This ensures high-quality segmentation results
 
+    segment_with_lisat: Use LISAT (Large Language Instructed Segmentation Assistant) as an alternative segmentation method when SAM3 has failed multiple times. LISAT uses a different model architecture that may succeed where SAM3 fails. This tool should ONLY be used after SAM3 has been attempted at least 3 times without success.
+    Use cases: "When segment_phrase has been attempted 3 times without generating satisfactory masks, use segment_with_lisat as an alternative approach."
+    Parameters for segment_with_lisat: {"type": "object", "properties": {"text_prompt": {"type": "string", "description": "A descriptive prompt for segmentation. Can be more detailed than SAM3 prompts and should include relevant attributes from the original query such as color, size, shape, or location. Examples: 'red vehicles in the parking area', 'large white buildings near water', 'green agricultural fields'"}}, "required": ["text_prompt"]}
+    Return type: A new image with colored segmentation mask(s) rendered on it, and a text message indicating the number of mask(s) generated.
+    
+    ⚠️ CRITICAL: SEGMENTATION ATTEMPT LIMITS (STRICTLY ENFORCED)
+    
+    The system tracks your segmentation attempts and enforces limits to prevent infinite loops:
+    
+    1. SAM3 ATTEMPTS (segment_phrase only):
+       - You may attempt SAM3 segmentation up to 3 times with different text prompts
+       - After 3 failed SAM3 attempts (0 masks generated), the system will suggest trying LISAT
+       - DO NOT continue trying SAM3 indefinitely if it keeps failing
+       - The system automatically injects attempt counts into messages, you do NOT need to track them yourself
+    
+    2. LISAT ATTEMPTS (segment_with_lisat):
+       - You may attempt LISAT segmentation up to 3 times with different text prompts
+       - Use LISAT ONLY after SAM3 has been attempted at least 3 times
+       - Include attributes from the original query (color, size, location) in your LISAT prompts
+       - Each LISAT prompt should be different and progressively more refined
+    
+    3. FINAL OUTCOME:
+       - If both SAM3 (3 attempts) and LISAT (3 attempts) fail to generate masks → call report_no_mask
+       - Total maximum: 3 SAM3 attempts + 3 LISAT attempts = 6 segmentation attempts
+       - After 6 failed attempts, you MUST call report_no_mask
+    
+    EXAMPLE WORKFLOW - Feature Not Found:
+    
+    Query: "red vehicles"
+    
+    Attempt 1: segment_phrase(text_prompt="red vehicle") → 0 masks ❌
+    Attempt 2: segment_phrase(text_prompt="vehicle") → 0 masks ❌
+    Attempt 3: segment_phrase(text_prompt="car") → 0 masks ❌
+    
+    System message: "You have attempted SAM3 3 times without success. Try segment_with_lisat with attributes from the query."
+    
+    Attempt 4: segment_with_lisat(text_prompt="red vehicles in the image") → 0 masks ❌
+    Attempt 5: segment_with_lisat(text_prompt="find all red colored vehicles or cars") → 0 masks ❌
+    Attempt 6: segment_with_lisat(text_prompt="locate red transportation vehicles") → 0 masks ❌
+    
+    System message: "You have exhausted all 6 attempts (3 SAM3 + 3 LISAT). Call report_no_mask."
+    
+    Attempt 7: report_no_mask() → End with empty mask set ✓
+    
+    LISAT PROMPT GUIDELINES:
+    - MORE DESCRIPTIVE than SAM3: Include color, size, shape attributes from original query
+    - CONTEXT-AWARE: Reference location or spatial relationships if mentioned in query
+    - PROGRESSIVE REFINEMENT: Each attempt should try a different phrasing or focus
+    - Examples:
+      * Original: "ships" → LISAT: "ships or boats in the water"
+      * Original: "building" → LISAT: "large buildings or structures"
+      * Original: "planes" → LISAT: "airplanes or aircraft on the tarmac"
+
     select_masks_and_return: Call this to select your final set of mask(s) that answer the user's query. Only masks from the most recent image can be selected.
     Use cases: "After generating masks and determining which ones match the query, call select_masks_and_return with the mask numbers that correspond to the requested features."
     Parameters for select_masks_and_return: {"type": "object", "properties": {"final_answer_masks": {"type": "array", "items": {"type": "integer"}, "description": "Array of mask numbers to select, e.g., [1, 4, 5]"}}, "required": ["final_answer_masks"]}
@@ -419,17 +360,19 @@
     9. For spatial queries, state the position of each mask relative to image coordinates (north/south/east/west or top/bottom/left/right).
     10. Maximum 100 masks can be selected.
 
-    report_no_mask: Call when absolutely certain no features in the image match the query.
-    Use cases: "When the query asks for features that clearly do not exist in the image - e.g., 'ships' in an image showing only inland agricultural area."
+    report_no_mask: Call when absolutely certain no features in the image match the query, OR when you have exhausted all segmentation attempts (3 SAM3 + 3 LISAT = 6 total).
+    Use cases: "When the query asks for features that clearly do not exist in the image, OR when both SAM3 and LISAT have failed to generate masks after maximum attempts."
     Parameters for report_no_mask: None
     Return type: None (End of Conversation)
     Important rules for using report_no_mask:
-    1. Only call after exhausting reasonable alternatives. If "airport" fails, try "runway", "terminal building", "hangar" before concluding no airport exists.
-    2. Consider that features might exist but be named differently or partially visible.
-    3. Before calling, explicitly state: (a) what the query asks for, (b) what features ARE visible in the image, (c) why none of them match.
-    4. Do not call if you identified potential matches during analysis - keep trying other approaches.
-    5. Valid use: Query asks for "ships" but image shows landlocked desert with no water bodies.
-    6. Invalid use: Query asks for "large buildings" and you see buildings but think they're too small - try "building" first.
+    1. MANDATORY: Call after exhausting the 6-attempt limit (3 SAM3 + 3 LISAT attempts all returned 0 masks).
+    2. Only call after exhausting reasonable alternatives. If "airport" fails, try "runway", "terminal building", "hangar" before concluding no airport exists.
+    3. Consider that features might exist but be named differently or partially visible.
+    4. Before calling, explicitly state: (a) what the query asks for, (b) what segmentation methods were tried, (c) how many attempts were made, (d) why no masks were found.
+    5. Do not call if you identified potential matches during analysis - keep trying other approaches (up to the 6-attempt limit).
+    6. Valid use: Query asks for "ships" but image shows landlocked desert with no water bodies.
+    7. Valid use: Attempted 3 SAM3 + 3 LISAT segmentations, all returned 0 masks.
+    8. Invalid use: Query asks for "large buildings" and you see buildings but think they're too small - try "building" first.
 
     =====================================================================
     SPATIAL FILTERING IN YOUR THINKING (NO TOOL - reason in <think> block)
@@ -687,28 +630,6 @@
     
     select_masks_and_return(final_answer_masks=[4])
 
-    segment_phrase_in_region: ZOOM/CROP tool - Segment features within a specific bounding box region of the image. Use after segment_phrase fails 3 times or for relational queries.
-    
-    Use cases:
-    1. "After 3 failed segment_phrase attempts for positional queries (e.g., 'leftmost planes')"
-    2. "For relational queries after segmenting reference object (e.g., 'buildings near the lake' - segment lake first, then use this for buildings)"
-    3. "For small objects in known locations (e.g., 'cars in the parking lot' - segment parking lot, then use this for cars)"
-    
-    Parameters for segment_phrase_in_region: {"type": "object", "properties": {"text_prompt": {"type": "string", "description": "Feature type to segment (same as segment_phrase)"}, "bbox": {"type": "array", "items": {"type": "number"}, "description": "Bounding box [x_min, y_min, x_max, y_max] in normalized coordinates (0-1)", "minItems": 4, "maxItems": 4}, "use_normalized": {"type": "boolean", "description": "Whether bbox uses normalized coordinates (default: true)", "default": true}}, "required": ["text_prompt", "bbox"]}
-    
-    Return type: Image with masks in global coordinates, and mask count.
-    
-    Important rules:
-    1. ONLY use after segment_phrase fails 3 times OR for relational queries OR for hierarchical segmentation.
-    2. Coordinates are normalized 0-1 where (0,0) is top-left and (1,1) is bottom-right.
-    3. OVERESTIMATE bbox to ensure targets are included (see ZOOM/CROP STRATEGY guide above).
-    4. For positional queries, use estimated bbox based on position term (e.g., "leftmost" → [0.0, 0.0, 0.4, 1.0]).
-    5. For relational queries, segment reference first, then estimate bbox based on relationship and reference location.
-    6. Masks are returned in full image coordinates, not region-local.
-    7. Example calls:
-       - segment_phrase_in_region(text_prompt="white plane", bbox=[0.0, 0.0, 0.4, 1.0])  # leftmost region
-       - segment_phrase_in_region(text_prompt="building", bbox=[0.5, 0.3, 0.9, 0.7])  # near lake at center-right
-
     filter_masks_by_attributes: Filter masks by visual attributes like color or size. Useful for distinguishing feature subtypes.
     Use cases: "When you need to filter by visual characteristics - e.g., 'green vegetation areas' (filter by color), 'large buildings only' (filter by size), 'small water bodies' (filter by size)."
     Parameters for filter_masks_by_attributes: {"type": "object", "properties": {"color": {"type": "string", "description": "Dominant color filter: 'green', 'blue', 'brown', 'gray', 'white', 'dark', etc."}}}
@@ -779,15 +700,11 @@
     
     Since segment_phrase deletes previous masks, use this approach:
     
-    Option A - Visual Memory (PREFERRED):
+    WORKFLOW - Visual Memory:
     1. segment_phrase for TARGET features (e.g., "building")
     2. Look at the image and identify where the REFERENCE feature's centroid is
     3. For each target mask, compare its centroid to reference centroid
     4. select_masks_and_return with qualifying masks
-    
-    Option B - Use segment_phrase_in_region:
-    1. Visually identify the REFERENCE feature's approximate bounding box
-    2. segment_phrase_in_region with TARGET prompt in nearby area
     
     EXAMPLE RELATIVE REASONING (using centroids):
     
@@ -989,12 +906,12 @@
     
     CRITICAL: Do NOT call any "filter" tool. The filtering happens in your thinking above.
     
-    HIERARCHICAL FALLBACK (if direct segmentation fails for small objects):
-    If segment_phrase returns no masks for small objects (cars, ships, etc.):
-    1. Segment the CONTAINER (parking lot, harbor, road)
-    2. Note the container's approximate bounding box from the mask
-    3. Use segment_phrase_in_region with original target prompt focused on container area
-    4. Examine results with examine_each_mask if needed
+    FALLBACK STRATEGY (if direct segmentation fails):
+    If segment_phrase returns no masks after 3 attempts:
+    1. The system will automatically suggest switching to segment_with_lisat
+    2. Use LISAT with more descriptive prompts including attributes from the query
+    3. LISAT allows up to 3 attempts
+    4. If all 6 attempts fail (3 SAM3 + 3 LISAT), call report_no_mask
 
 
     Output Format for Scenario 1:
@@ -1002,21 +919,25 @@
     1. Analyze: [Describe visible features in the image]
     2. Think: [Identify target features based on query]
     3. Remind: [Note mask deletion behavior and plan accordingly]
-    4. Retry Count: [If this is a retry, state attempt number: "Attempt 1/2/3"]
-    5. Plan: [Outline segmentation strategy]
-       - If attempt ≤ 3: Try segment_phrase with different text_prompt
-       - If attempt = 4 and query has position: Use segment_phrase_in_region with estimated bbox
-       - If attempt = 4 and no position: Use hierarchical strategy or report_no_mask
-    6. Decide: [Choose tool and parameters] </think>
+    4. Plan: [Outline segmentation strategy - system will inject attempt counts automatically]
+       NOTE: The system automatically tracks and injects attempt counts into tool responses.
+       You will see: "📊 ATTEMPT TRACKING: SAM3 attempts: N/3, LISAT attempts: M/3, Total: X/6"
+       
+       Strategy based on system messages:
+       - If SAM3 attempts < 3: Try segment_phrase with different text_prompt (synonym, variation)
+       - If system says "exhausted all 3 SAM3 attempts": Switch to segment_with_lisat
+       - If using LISAT (attempts < 3): Try segment_with_lisat with refined prompt including attributes
+       - If system says "exhausted all 6 attempts": Call report_no_mask
+    5. Decide: [Choose tool and parameters] </think>
     
     Then call ONE of:
-    - segment_phrase(text_prompt="YOUR_CHOSEN_PROMPT")
-    - segment_phrase_in_region(text_prompt="YOUR_PROMPT", bbox=[x1, y1, x2, y2])
-    - report_no_mask()
+    - segment_phrase(text_prompt="YOUR_CHOSEN_PROMPT")  # For SAM3 attempts 1-3
+    - segment_with_lisat(text_prompt="DESCRIPTIVE_PROMPT_WITH_ATTRIBUTES")  # After 3 SAM3 failures
+    - report_no_mask()  # After 6 total failures or when obviously no matches
     
     IMPORTANT: You MUST output the tool call in EXACTLY one of these formats:
     - segment_phrase(text_prompt="building")
-    - segment_phrase_in_region(text_prompt="building", bbox=[0.0, 0.0, 0.4, 1.0])
+    - segment_with_lisat(text_prompt="red vehicles in the parking area")
     - report_no_mask()
     
     Stop immediately after the tool call. Do not add any text after it.
@@ -1041,16 +962,13 @@
        - IF attempt < 3:
          → "No masks found. I will try attempt [N+1] with a different text_prompt."
          → Call segment_phrase with synonym/variation
-       - IF attempt = 3 and query has POSITION term:
-         → "After 3 failed attempts, switching to ZOOM/CROP strategy."
-         → "Position term: [term] → Focus on [region] portion"
-         → "Estimated bbox: [calculated bbox]"
-         → Call segment_phrase_in_region
-       - IF attempt = 3 and query about SMALL OBJECTS:
-         → "After 3 attempts, switching to HIERARCHICAL strategy."
-         → Call segment_phrase for CONTAINER object
-       - IF attempt = 3 and no special case:
-         → "After 3 attempts with no results, target objects do not exist."
+       - IF attempt = 3 (system will notify):
+         → System will inject message: "⚠️ You have exhausted all 3 SAM3 attempts. Please use segment_with_lisat..."
+         → Switch to segment_with_lisat with descriptive prompt including attributes
+       - IF attempt > 3 and using LISAT:
+         → Try LISAT with progressively refined prompts (up to 3 LISAT attempts)
+       - IF total attempts = 6 (3 SAM3 + 3 LISAT):
+         → System will say "exhausted all 6 attempts"
          → Call report_no_mask()
     
     2b. ⚠️ MULTI-STEP PLAN CHECK (CRITICAL - check BEFORE continuing to spatial analysis):
@@ -1071,30 +989,10 @@
         
         IF INTERMEDIATE/REFERENCE:
         → "These masks are [INTERMEDIATE/REFERENCE] objects, not the PRIMARY TARGET."
-        → "I planned to: [state the original multi-step plan]"
-        → "Next step: Use segment_phrase_in_region to search for PRIMARY TARGET within/near these masks"
-        
-        CALCULATE BBOX FROM CURRENT MASKS:
-        
-        For "X ON Y" queries (signs on roads, cars in parking lot):
-        - Analyze mask positions/extents
-        - Create bbox that COVERS ALL masks with padding
-        - Example: If road masks span X=100-800, Y=200-700 on 1000x1000 image
-          → bbox = [0.05, 0.15, 0.85, 0.75] (with 10% padding)
-        
-        For "X NEAR Y" queries (buildings near lake):
-        - Identify reference mask center and extent
-        - Create bbox AROUND reference with 20-30% padding
-        - Example: Lake at X=600-800, Y=400-600
-          → bbox = [0.5, 0.3, 0.9, 0.7] (with 25% padding)
-        
-        For "X IN Y" queries (ships in harbor):
-        - Use the reference mask extent directly
-        - Example: Harbor mask at X=400-900, Y=300-800
-          → bbox = [0.4, 0.3, 0.9, 0.8]
-        
-        → Call segment_phrase_in_region(text_prompt="PRIMARY TARGET", bbox=[...])
-        → STOP - do NOT proceed to spatial analysis or grounding check
+        → "I need to segment the PRIMARY TARGET directly."
+        → Try segment_phrase with PRIMARY TARGET prompt
+        → If SAM3 attempts exhausted, switch to segment_with_lisat with detailed prompt
+        → STOP - do NOT proceed to spatial analysis or grounding check on intermediate objects
         
         IF PRIMARY TARGET:
         → "These masks ARE the PRIMARY TARGET. Proceeding to spatial analysis."
@@ -1111,26 +1009,12 @@
         Q: Are current masks the PRIMARY TARGET?
         → NO. Query asks for "signs ON roads". Current masks are roads (INTERMEDIATE).
         
-        Multi-step plan status:
-        - Step 1 (completed): Segment roads ✓
-        - Step 2 (next): Segment signs WITHIN road regions
-        
-        Next action: Use segment_phrase_in_region to search for white signs on the road masks.
-        
-        Calculate bbox from road masks:
-        Looking at the 4 road masks:
-        - Mask 1: Road intersection, approximately X=200-400, Y=300-500
-        - Mask 2: Highway, approximately X=100-900, Y=100-800
-        - Mask 3: Highway, approximately X=200-800, Y=200-700
-        - Mask 4: Road, approximately X=300-600, Y=400-700
-        
-        Overall extent: X spans roughly 100-900 (10%-90%), Y spans roughly 100-800 (10%-80%)
-        With padding: bbox = [0.0, 0.0, 1.0, 1.0] (use full image since roads span most of it)
-        
-        I will call segment_phrase_in_region to search for white signs across all roads.
+        These are not the primary target. I need to segment signs directly, not roads.
+        I will try segment_phrase with "white sign" or if SAM3 attempts are exhausted, 
+        use segment_with_lisat with a descriptive prompt like "white direction signs on roads".
         </think>
         
-        segment_phrase_in_region(text_prompt="white sign", bbox=[0.0, 0.0, 1.0, 1.0])
+        segment_phrase(text_prompt="white sign")
         
         EXAMPLE 2 - PRIMARY TARGET (planes when query asks for planes):
         Query: "leftmost white planes"
@@ -1190,7 +1074,7 @@
     5. ⚠️ MANDATORY FINAL GROUNDING CHECK (only if step 2b confirmed masks ARE PRIMARY TARGET):
        
        SKIP THIS STEP if step 2b identified masks as INTERMEDIATE/REFERENCE!
-       (If INTERMEDIATE, you should have already called segment_phrase_in_region)
+       (If INTERMEDIATE, you should have tried to segment PRIMARY TARGET directly instead)
        
        Re-read original query: "[state the original user query]"
        PRIMARY TARGET: [e.g., "houses", "planes", "bleachers", "roads"]
@@ -1220,9 +1104,9 @@
     OUTPUT: Choose ONE based on your multi-step plan check, grounding, and confidence:
     ═══════════════════════════════════════════════════════════════════════════════
     
-    PATH A - Masks are INTERMEDIATE/REFERENCE (not PRIMARY TARGET) - Continue plan:
-    segment_phrase_in_region(text_prompt="[PRIMARY TARGET]", bbox=[x1, y1, x2, y2])
-    (Use this when current masks are roads/parking lots/containers but query asks for objects ON/IN them)
+    PATH A - Masks are INTERMEDIATE/REFERENCE (not PRIMARY TARGET) - Try PRIMARY TARGET directly:
+    segment_phrase(text_prompt="[PRIMARY TARGET]")
+    OR if SAM3 attempts exhausted: segment_with_lisat(text_prompt="[PRIMARY TARGET with attributes]")
     
     PATH B - Masks are PRIMARY TARGET, grounding passes, all HIGH confidence:
     select_masks_and_return(final_answer_masks=[1, 2, 3])
@@ -1232,19 +1116,27 @@
     (Then wait for verdicts and select Accepted masks in next turn)
     
     PATH D - Masks are PRIMARY TARGET but grounding fails (wrong feature type):
-    report_no_mask()
+    - If SAM3 attempts < 3: Try segment_phrase with different prompt
+    - If SAM3 attempts = 3: Switch to segment_with_lisat
+    - If total attempts = 6: Call report_no_mask()
     
     PATH E - Retry needed (N=0 and attempts < 3):
     segment_phrase(text_prompt="[synonym]")
     
+    PATH F - SAM3 exhausted (3 attempts, N=0):
+    segment_with_lisat(text_prompt="[descriptive prompt with attributes]")
+    
+    PATH G - All attempts exhausted (6 total, N=0):
+    report_no_mask()
+    
     ═══════════════════════════════════════════════════════════════════════════════
     
     IMPORTANT: You MUST output the tool call in EXACTLY one of these formats:
-    - segment_phrase_in_region(text_prompt="white sign", bbox=[0.0, 0.0, 1.0, 1.0])
+    - segment_phrase(text_prompt="building")
+    - segment_with_lisat(text_prompt="red vehicles in parking area")
     - select_masks_and_return(final_answer_masks=[1, 4, 5])
     - examine_each_mask()
     - report_no_mask()
-    - segment_phrase(text_prompt="building")
     
     Stop immediately after the tool call. Do not add any text after it.
 
