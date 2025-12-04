@@ -1,7 +1,7 @@
 import axios from 'axios';
 
-const API_ENDPOINT = import.meta.env.VITE_API_ENDPOINT || 'https://aryan-don357--sam3-agent-sam3-segment.modal.run';
-const INFER_ENDPOINT = import.meta.env.VITE_INFER_ENDPOINT || 'https://aryan-don357--sam3-agent-sam3-infer.modal.run';
+const API_ENDPOINT = import.meta.env.VITE_API_ENDPOINT || 'https://srinjoy59--sam3-agent-sam3-segment.modal.run';
+const INFER_ENDPOINT = import.meta.env.VITE_INFER_ENDPOINT || 'https://srinjoy59--sam3-agent-sam3-infer.modal.run';
 
 export interface LLMConfig {
   base_url: string;

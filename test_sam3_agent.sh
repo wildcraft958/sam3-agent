@@ -14,8 +14,8 @@
 # Configuration - Update these with your endpoints
 # ============================================================================
 
-SAM3_ENDPOINT="${SAM3_ENDPOINT:-https://aryan-don357--sam3-agent-sam3-segment.modal.run}"
-VLLM_ENDPOINT="${VLLM_ENDPOINT:-https://aryan-don357--qwen3-vl-vllm-server-30b-vllm-server.modal.run/v1}"
+SAM3_ENDPOINT="${SAM3_ENDPOINT:-https://srinjoy59--sam3-agent-sam3-segment.modal.run}"
+VLLM_ENDPOINT="${VLLM_ENDPOINT:-https://srinjoy59--qwen3-vl-vllm-server-30b-vllm-server.modal.run/v1}"
 MODEL_NAME="${MODEL_NAME:-Qwen/Qwen2.5-VL-32B-Instruct}"
 API_KEY="${API_KEY:-dummy}"  # vLLM doesn't require real key
 

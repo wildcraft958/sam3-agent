@@ -112,8 +112,8 @@ frontend/
 
 The frontend connects to Modal endpoints:
 
-- **Full Agent**: `https://aryan-don357--sam3-agent-sam3-segment.modal.run`
-- **Pure SAM3**: `https://aryan-don357--sam3-agent-sam3-infer.modal.run`
+- **Full Agent**: `https://srinjoy59--sam3-agent-sam3-segment.modal.run`
+- **Pure SAM3**: `https://srinjoy59--sam3-agent-sam3-infer.modal.run`
 
 These can be overridden with environment variables.
 
