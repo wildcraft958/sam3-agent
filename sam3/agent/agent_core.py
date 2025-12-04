@@ -10,35 +10,219 @@ from PIL import Image
 from .client_llm import send_generate_request
 from .client_sam3 import call_sam_service
 from .viz import visualize
-from .helpers.spatial_filtering import filter_masks_by_spatial_position
+# from .helpers.spatial_filtering import filter_masks_by_spatial_position  # Disabled - spatial filtering done in LLM thinking
 from .helpers.region_segmentation import segment_in_region, transform_masks_to_global
 from .helpers.attribute_filtering import filter_masks_by_attributes
-from .helpers.relative_spatial import filter_masks_by_relative_position
+# from .helpers.relative_spatial import filter_masks_by_relative_position  # Disabled - relative filtering done in LLM thinking
 from .helpers.pyramidal_tiling import (
     create_pyramidal_tiles,
     transform_mask_coordinates,
     merge_tile_results,
 )
+import re
+
+
+def parse_tool_calls_from_text(text: str) -> list:
+    """
+    Parse tool calls from text response when not using OpenAI function calling API.
+    
+    Supports multiple formats:
+    1. JSON blocks: {"name": "function_name", "arguments": {...}}
+    2. Function call syntax: function_name(arg1="value1", arg2="value2")
+    3. XML-like tags: <function_call>{"name": "...", "arguments": {...}}</function_call>
+    
+    Returns list of tool call dicts in format:
+    [{"id": "...", "function": {"name": "...", "arguments": "..."}}]
+    """
+    tool_calls = []
+    
+    # Known function names (matching active tools in TOOLS list)
+    known_functions = [
+        "segment_phrase", "examine_each_mask", "select_masks_and_return", 
+        "report_no_mask", 
+        # "filter_masks_by_spatial_position",  # Disabled - spatial filtering done in LLM thinking
+        "segment_phrase_in_region", "filter_masks_by_attributes",
+        # "filter_masks_by_relative_position"  # Disabled - relative filtering done in LLM thinking
+        # "segment_phrase_with_tiling"  # Commented out - not currently active
+    ]
+    
+    # Pattern 1: JSON object with name/arguments structure
+    # Match patterns like: {"name": "segment_phrase", "arguments": {"text_prompt": "car"}}
+    json_pattern = r'\{[^{}]*"name"\s*:\s*"([^"]+)"[^{}]*"arguments"\s*:\s*(\{[^{}]*\})[^{}]*\}'
+    for match in re.finditer(json_pattern, text, re.DOTALL):
+        func_name = match.group(1)
+        args_str = match.group(2)
+        if func_name in known_functions:
+            tool_calls.append({
+                "id": f"call_{len(tool_calls)}",
+                "type": "function",  # Required by OpenAI/vLLM format
+                "function": {
+                    "name": func_name,
+                    "arguments": args_str
+                }
+            })
+    
+    if tool_calls:
+        return tool_calls
+    
+    # Pattern 2: Function call syntax like segment_phrase(text_prompt="car")
+    for func_name in known_functions:
+        # Match function_name followed by parentheses with arguments
+        pattern = rf'{func_name}\s*\(\s*([^)]*)\s*\)'
+        for match in re.finditer(pattern, text):
+            args_text = match.group(1).strip()
+            
+            # Parse arguments into dict
+            args_dict = {}
+            if args_text:
+                # Handle keyword arguments like: text_prompt="car", other_arg=123
+                kwarg_pattern = r'(\w+)\s*=\s*(?:"([^"]*)"|\'([^\']*)\'|(\[[^\]]*\])|(\{[^}]*\})|([^,\s]+))'
+                for kwmatch in re.finditer(kwarg_pattern, args_text):
+                    key = kwmatch.group(1)
+                    # Get the first non-None value from the capture groups
+                    value = kwmatch.group(2) or kwmatch.group(3) or kwmatch.group(4) or kwmatch.group(5) or kwmatch.group(6)
+                    if value:
+                        # Try to parse as JSON for arrays/objects/numbers
+                        try:
+                            args_dict[key] = json.loads(value)
+                        except (json.JSONDecodeError, TypeError):
+                            args_dict[key] = value
+            
+            tool_calls.append({
+                "id": f"call_{len(tool_calls)}",
+                "type": "function",  # Required by OpenAI/vLLM format
+                "function": {
+                    "name": func_name,
+                    "arguments": json.dumps(args_dict)
+                }
+            })
+    
+    if tool_calls:
+        return tool_calls
+    
+    # Pattern 3: Look for function names followed by JSON arguments
+    # e.g., segment_phrase {"text_prompt": "car"}
+    for func_name in known_functions:
+        pattern = rf'{func_name}\s*(\{{[^{{}}]*\}})'
+        for match in re.finditer(pattern, text):
+            args_str = match.group(1)
+            try:
+                # Validate it's valid JSON
+                json.loads(args_str)
+                tool_calls.append({
+                    "id": f"call_{len(tool_calls)}",
+                    "type": "function",  # Required by OpenAI/vLLM format
+                    "function": {
+                        "name": func_name,
+                        "arguments": args_str
+                    }
+                })
+            except json.JSONDecodeError:
+                pass
+    
+    if tool_calls:
+        return tool_calls
+    
+    # Pattern 4: Look for simple mentions of functions with text_prompt in quotes nearby
+    # This is a fallback for less structured outputs
+    if "segment_phrase" in text:
+        # Look for text_prompt patterns
+        prompt_patterns = [
+            r'"text_prompt"\s*:\s*"([^"]+)"',
+            r"'text_prompt'\s*:\s*'([^']+)'",
+            r'text_prompt\s*=\s*"([^"]+)"',
+            r"text_prompt\s*=\s*'([^']+)'",
+        ]
+        for pattern in prompt_patterns:
+            match = re.search(pattern, text)
+            if match:
+                text_prompt = match.group(1)
+                tool_calls.append({
+                    "id": "call_0",
+                    "type": "function",  # Required by OpenAI/vLLM format
+                    "function": {
+                        "name": "segment_phrase",
+                        "arguments": json.dumps({"text_prompt": text_prompt})
+                    }
+                })
+                return tool_calls
+    
+    # Pattern 5: Check for other tools without arguments
+    for func_name in ["examine_each_mask", "report_no_mask"]:
+        if func_name in text and func_name not in [tc["function"]["name"] for tc in tool_calls]:
+            # These tools don't require arguments
+            tool_calls.append({
+                "id": f"call_{len(tool_calls)}",
+                "type": "function",  # Required by OpenAI/vLLM format
+                "function": {
+                    "name": func_name,
+                    "arguments": "{}"
+                }
+            })
+            return tool_calls
+    
+    # Pattern 6: select_masks_and_return with final_answer_masks
+    if "select_masks_and_return" in text:
+        # Look for array of integers
+        masks_pattern = r'"final_answer_masks"\s*:\s*\[([^\]]+)\]'
+        match = re.search(masks_pattern, text)
+        if match:
+            masks_str = match.group(1)
+            try:
+                masks = json.loads(f"[{masks_str}]")
+                tool_calls.append({
+                    "id": "call_0",
+                    "type": "function",  # Required by OpenAI/vLLM format
+                    "function": {
+                        "name": "select_masks_and_return",
+                        "arguments": json.dumps({"final_answer_masks": masks})
+                    }
+                })
+                return tool_calls
+            except json.JSONDecodeError:
+                pass
+        
+        # Alternative: look for array directly after function name
+        alt_pattern = r'select_masks_and_return[^[]*\[([^\]]+)\]'
+        match = re.search(alt_pattern, text)
+        if match:
+            masks_str = match.group(1)
+            try:
+                masks = json.loads(f"[{masks_str}]")
+                tool_calls.append({
+                    "id": "call_0",
+                    "type": "function",  # Required by OpenAI/vLLM format
+                    "function": {
+                        "name": "select_masks_and_return",
+                        "arguments": json.dumps({"final_answer_masks": masks})
+                    }
+                })
+                return tool_calls
+            except json.JSONDecodeError:
+                pass
+    
+    return tool_calls
+
 
 # OpenAI function calling format for Qwen3
 TOOLS = [
-    # {
-    #     "type": "function",
-    #     "function": {
-    #         "name": "segment_phrase",
-    #         "description": "Use the experimental Segment Anything 3 model to ground all instances of a simple noun phrase by generating segmentation mask(s) that cover those instances on the raw input image. At the same time, all previously generated mask(s) will be deleted and cannot be referred to in future messages.",
-    #         "parameters": {
-    #             "type": "object",
-    #             "properties": {
-    #                 "text_prompt": {
-    #                     "type": "string",
-    #                     "description": "A short and simple noun phrase, e.g., rope, bird beak, speed monitor, brown handbag, person torso"
-    #                 }
-    #             },
-    #             "required": ["text_prompt"]
-    #         }
-    #     }
-    # },
+    {
+        "type": "function",
+        "function": {
+            "name": "segment_phrase",
+            "description": "Use SAM3 (Segment Anything Model 3) to segment all instances of a feature by generating segmentation mask(s). Works best with simple noun phrases (1-3 words). All previously generated mask(s) will be deleted when called.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text_prompt": {
+                        "type": "string",
+                        "description": "A simple noun phrase (1-3 words). Examples: building, road, water, tree, vehicle, ship, field, roof, pool, runway"
+                    }
+                },
+                "required": ["text_prompt"]
+            }
+        }
+    },
     {
         "type": "function",
         "function": {
@@ -79,24 +263,26 @@ TOOLS = [
             }
         }
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "filter_masks_by_spatial_position",
-            "description": "Filter existing masks by their spatial position in the image. Use this after segment_phrase to select masks based on spatial relationships like 'leftmost', 'rightmost', 'second from right', etc.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "spatial_criteria": {
-                        "type": "string",
-                        "enum": ["leftmost", "rightmost", "topmost", "bottommost", "center", "second_from_left", "second_from_right", "third_from_left", "third_from_right", "left_of_all", "right_of_all", "above_all", "below_all"],
-                        "description": "Spatial position criteria to filter masks"
-                    }
-                },
-                "required": ["spatial_criteria"]
-            }
-        }
-    },
+    # DISABLED: Spatial filtering is now done in LLM thinking process, not as a tool
+    # The LLM reasons about mask positions and directly selects appropriate masks
+    # using select_masks_and_return instead of calling filter_masks_by_spatial_position
+    # {
+    #     "type": "function",
+    #     "function": {
+    #         "name": "filter_masks_by_spatial_position",
+    #         "description": "Filter existing masks by their spatial position in the image.",
+    #         "parameters": {
+    #             "type": "object",
+    #             "properties": {
+    #                 "spatial_criteria": {
+    #                     "type": "string",
+    #                     "description": "Spatial position criteria"
+    #                 }
+    #             },
+    #             "required": ["spatial_criteria"]
+    #         }
+    #     }
+    # },
     {
         "type": "function",
         "function": {
@@ -112,7 +298,7 @@ TOOLS = [
                     "bbox": {
                         "type": "array",
                         "items": {"type": "number"},
-                        "description": "Bounding box [x_min, y_min, x_max, y_max] in normalized coordinates (0-1) or pixel coordinates",
+                        "description": "Bounding box [x_min, y_min, x_max, y_max] in normalized coordinates (0-1)",
                         "minItems": 4,
                         "maxItems": 4
                     },
@@ -138,86 +324,75 @@ TOOLS = [
                         "type": "string",
                         "description": "Filter by dominant color (e.g., 'red', 'blue', 'white', 'black')"
                     },
-                    "min_size_ratio": {
-                        "type": "number",
-                        "description": "Minimum size as ratio of image (0-1)"
-                    },
-                    "max_size_ratio": {
-                        "type": "number",
-                        "description": "Maximum size as ratio of image (0-1)"
-                    },
-                    "aspect_ratio_range": {
-                        "type": "array",
-                        "items": {"type": "number"},
-                        "description": "Min and max aspect ratio [min, max]",
-                        "minItems": 2,
-                        "maxItems": 2
-                    }
+                    # "min_size_ratio": {
+                    #     "type": "number",
+                    #     "description": "Minimum size as ratio of image (0-1)"
+                    # },
+                    # "max_size_ratio": {
+                    #     "type": "number",
+                    #     "description": "Maximum size as ratio of image (0-1)"
+                    # },
+                    # "aspect_ratio_range": {
+                    #     "type": "array",
+                    #     "items": {"type": "number"},
+                    #     "description": "Min and max aspect ratio [min, max]",
+                    #     "minItems": 2,
+                    #     "maxItems": 2
+                    # }
                 }
             }
         }
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "filter_masks_by_relative_position",
-            "description": "Filter masks based on their position relative to other masks. Use when query involves relationships like 'left of', 'above', 'near'.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "relationship": {
-                        "type": "string",
-                        "enum": ["left_of", "right_of", "above", "below", "near", "far_from"],
-                        "description": "Spatial relationship"
-                    },
-                    "reference_mask_indices": {
-                        "type": "array",
-                        "items": {"type": "integer"},
-                        "description": "Reference mask indices to compare against (1-indexed)",
-                        "minItems": 1
-                    },
-                    "distance_threshold": {
-                        "type": "number",
-                        "description": "For 'near'/'far_from': distance threshold as ratio of image diagonal (default: 0.2)",
-                        "default": 0.2
-                    }
-                },
-                "required": ["relationship", "reference_mask_indices"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "segment_phrase_with_tiling",
-            "description": "Segment a phrase using pyramidal tiling for better detection of small objects or handling large images. Splits image into overlapping tiles, segments each, and merges results intelligently.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "text_prompt": {
-                        "type": "string",
-                        "description": "A short and simple noun phrase"
-                    },
-                    "tile_size": {
-                        "type": "integer",
-                        "description": "Size of each tile (default: 1024)",
-                        "default": 1024
-                    },
-                    "overlap_ratio": {
-                        "type": "number",
-                        "description": "Overlap ratio between tiles (0.0-0.5, default: 0.2)",
-                        "default": 0.2
-                    },
-                    "min_tile_size": {
-                        "type": "integer",
-                        "description": "Minimum tile size for recursive splitting (default: 512)",
-                        "default": 512
-                    }
-                },
-                "required": ["text_prompt"]
-            }
-        }
-    }
+    # DISABLED: Relative position filtering is now done in LLM thinking process
+    # The LLM reasons about mask positions relative to other objects/masks
+    # and directly selects appropriate masks using select_masks_and_return
+    # {
+    #     "type": "function",
+    #     "function": {
+    #         "name": "filter_masks_by_relative_position",
+    #         "description": "Filter masks based on their position relative to other masks.",
+    #         "parameters": {
+    #             "type": "object",
+    #             "properties": {
+    #                 "relationship": {"type": "string", "description": "Spatial relationship"},
+    #                 "reference_mask_indices": {"type": "array", "items": {"type": "integer"}}
+    #             },
+    #             "required": ["relationship", "reference_mask_indices"]
+    #         }
+    #     }
+    # },
+    # {
+    #     "type": "function",
+    #     "function": {
+    #         "name": "segment_phrase_with_tiling",
+    #         "description": "Segment a phrase using pyramidal tiling for better detection of small objects or handling large images. Splits image into overlapping tiles, segments each, and merges results intelligently.",
+    #         "parameters": {
+    #             "type": "object",
+    #             "properties": {
+    #                 "text_prompt": {
+    #                     "type": "string",
+    #                     "description": "A short and simple noun phrase"
+    #                 },
+    #                 "tile_size": {
+    #                     "type": "integer",
+    #                     "description": "Size of each tile (default: 1024)",
+    #                     "default": 1024
+    #                 },
+    #                 "overlap_ratio": {
+    #                     "type": "number",
+    #                     "description": "Overlap ratio between tiles (0.0-0.5, default: 0.2)",
+    #                     "default": 0.2
+    #                 },
+    #                 "min_tile_size": {
+    #                     "type": "integer",
+    #                     "description": "Minimum tile size for recursive splitting (default: 512)",
+    #                     "default": 512
+    #                 }
+    #             },
+    #             "required": ["text_prompt"]
+    #         }
+    #     }
+    # }
 ]
 
 
@@ -364,10 +539,10 @@ def agent_inference(
     os.makedirs(debug_save_dir, exist_ok=True)
     current_dir = os.path.dirname(os.path.abspath(__file__))
     MLLM_SYSTEM_PROMPT_PATH = os.path.join(
-        current_dir, "system_prompts/system_prompt.txt"
+        current_dir, "system_prompts/system_prompt_remote_sensing.txt"
     )
     ITERATIVE_CHECKING_SYSTEM_PROMPT_PATH = os.path.join(
-        current_dir, "system_prompts/system_prompt_iterative_checking.txt"
+        current_dir, "system_prompts/system_prompt_iterative_checking_remote_sensing.txt"
     )
     # init variables
     PATH_TO_LATEST_OUTPUT_JSON = ""
@@ -471,13 +646,20 @@ def agent_inference(
             break
             
         elif isinstance(generated_response, str):
-            # Plain text response (shouldn't happen with tools, but handle gracefully)
+            # Text response - parse tool calls from text
             generated_text = generated_response
-            print("⚠️ Warning: Received plain text response instead of tool calls")
+            print(f"📝 Received text response, parsing for tool calls...")
             print(f"   Response length: {len(generated_text)}")
-            print(f"   Response preview: {generated_text[:200]}")
-            print(f"   This may indicate the model is not using tools or the API format changed")
-            break
+            
+            # Parse tool calls from text response
+            tool_calls_list = parse_tool_calls_from_text(generated_text)
+            
+            if tool_calls_list:
+                print(f"✅ Parsed {len(tool_calls_list)} tool call(s) from text")
+            else:
+                print(f"⚠️ No tool calls found in text response")
+                print(f"   Response preview: {generated_text[:500]}")
+                break
             
         else:
             # Unexpected response type
@@ -767,8 +949,7 @@ def agent_inference(
                     sam3_outputs["output_image_path"] = sam3_output_image_path
                     json.dump(sam3_outputs, open(PATH_TO_LATEST_OUTPUT_JSON, "w"), indent=4)
                     
-                    # Visualize
-                    from .viz import visualize
+                    # Visualize (using globally imported visualize)
                     viz_image = visualize(sam3_outputs)
                     viz_image.save(sam3_output_image_path)
                     
@@ -1197,90 +1378,11 @@ def agent_inference(
                 )
             json.dump(updated_outputs, open(PATH_TO_LATEST_OUTPUT_JSON, "w"), indent=4)
 
-        elif tool_call["name"] == "filter_masks_by_spatial_position":
-            print("🔍 Calling filter_masks_by_spatial_position tool...")
-            if not os.path.exists(PATH_TO_LATEST_OUTPUT_JSON):
-                raise FileNotFoundError(
-                    f"SAM3 output file not found: {PATH_TO_LATEST_OUTPUT_JSON}"
-                )
-            current_outputs = json.load(open(PATH_TO_LATEST_OUTPUT_JSON, "r"))
-            
-            assert list(tool_call["parameters"].keys()) == ["spatial_criteria"]
-            spatial_criteria = tool_call["parameters"]["spatial_criteria"]
-            
-            # Validate spatial criteria
-            valid_criteria = [
-                "leftmost", "rightmost", "topmost", "bottommost", "center",
-                "second_from_left", "second_from_right", "third_from_left", "third_from_right",
-                "left_of_all", "right_of_all", "above_all", "below_all"
-            ]
-            if spatial_criteria not in valid_criteria:
-                raise ValueError(f"Invalid spatial_criteria: {spatial_criteria}. Must be one of {valid_criteria}")
-            
-            # Apply spatial filtering
-            filtered_outputs = filter_masks_by_spatial_position(current_outputs, spatial_criteria)
-            num_kept = len(filtered_outputs["pred_masks"])
-            filter_desc = filtered_outputs.get("spatial_filter_description", "")
-            
-            # Save updated outputs
-            image_w_filtered_masks = visualize(filtered_outputs)
-            image_w_filtered_masks_path = os.path.join(
-                sam_output_dir, rf"{LATEST_SAM3_TEXT_PROMPT}.png"
-            ).replace(
-                ".png",
-                f"_spatial_filter_{spatial_criteria}.png".replace("/", "_"),
-            )
-            image_w_filtered_masks.save(image_w_filtered_masks_path)
-            
-            # Update PATH_TO_LATEST_OUTPUT_JSON
-            base_path = PATH_TO_LATEST_OUTPUT_JSON
-            if "masks_" in base_path:
-                base_path = base_path.split("masks_")[0] + ".json"
-            if num_kept == 0:
-                PATH_TO_LATEST_OUTPUT_JSON = base_path.replace(
-                    ".json", "masks_none.json"
-                )
-            else:
-                kept_indices = list(range(num_kept))
-                PATH_TO_LATEST_OUTPUT_JSON = base_path.replace(
-                    ".json", f"masks_{'_'.join(map(str, kept_indices))}.json"
-                )
-            json.dump(filtered_outputs, open(PATH_TO_LATEST_OUTPUT_JSON, "w"), indent=4)
-            
-            # Append assistant message with tool call
-            messages.append({
-                "role": "assistant",
-                "content": generated_text if generated_text else None,
-                "tool_calls": [tool_call_data],
-            })
-            
-            if num_kept == 0:
-                tool_result_message = f"The original user query was: '{initial_text_prompt}'. The filter_masks_by_spatial_position tool filtered all masks out. {filter_desc} Now, please call the segment_phrase tool again with a different text_prompt, or try a different spatial criteria."
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call_id,
-                    "content": json.dumps({"message": tool_result_message, "num_masks": 0}),
-                })
-            else:
-                tool_result_message = f"The original user query was: '{initial_text_prompt}'. After calling the filter_masks_by_spatial_position tool with criteria '{spatial_criteria}', the number of available masks is now {num_kept}. {filter_desc} All {num_kept} available masks are rendered in this image below, now you must analyze the {num_kept} available mask(s) carefully, compare them against the raw input image and the original user query, and determine your next action."
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call_id,
-                    "content": json.dumps({
-                        "message": tool_result_message,
-                        "num_masks": num_kept,
-                        "output_image_path": image_w_filtered_masks_path,
-                        "spatial_criteria": spatial_criteria,
-                    }),
-                })
-                # For vision models: Add user message with image so model can visually analyze masks
-                messages.append({
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": "Please analyze the spatially filtered masks shown in the image below."},
-                        {"type": "image", "image": image_w_filtered_masks_path},
-                    ],
-                })
+        # DISABLED: filter_masks_by_spatial_position - spatial filtering now done in LLM thinking
+        # The LLM reasons about mask positions based on their visual location in the image
+        # and directly calls select_masks_and_return with the appropriate mask indices.
+        # elif tool_call["name"] == "filter_masks_by_spatial_position":
+        #     ... (tool handling code removed - see git history if needed)
 
         elif tool_call["name"] == "filter_masks_by_attributes":
             print("🔍 Calling filter_masks_by_attributes tool...")
@@ -1383,106 +1485,11 @@ def agent_inference(
                     ],
                 })
 
-        elif tool_call["name"] == "filter_masks_by_relative_position":
-            print("🔍 Calling filter_masks_by_relative_position tool...")
-            if not os.path.exists(PATH_TO_LATEST_OUTPUT_JSON):
-                raise FileNotFoundError(
-                    f"SAM3 output file not found: {PATH_TO_LATEST_OUTPUT_JSON}"
-                )
-            current_outputs = json.load(open(PATH_TO_LATEST_OUTPUT_JSON, "r"))
-            
-            assert "relationship" in tool_call["parameters"] and "reference_mask_indices" in tool_call["parameters"], \
-                f"Expected ['relationship', 'reference_mask_indices'], got {list(tool_call['parameters'].keys())}"
-            
-            relationship = tool_call["parameters"]["relationship"]
-            reference_mask_indices = tool_call["parameters"]["reference_mask_indices"]
-            distance_threshold = tool_call["parameters"].get("distance_threshold", 0.2)
-            
-            # Validate relationship
-            valid_relationships = ["left_of", "right_of", "above", "below", "near", "far_from"]
-            if relationship not in valid_relationships:
-                raise ValueError(f"Invalid relationship: {relationship}. Must be one of {valid_relationships}")
-            
-            # Validate reference_mask_indices
-            if not isinstance(reference_mask_indices, list) or len(reference_mask_indices) == 0:
-                raise ValueError(f"reference_mask_indices must be a non-empty list, got {reference_mask_indices}")
-            if not all(isinstance(idx, int) and idx > 0 for idx in reference_mask_indices):
-                raise ValueError(f"reference_mask_indices must be positive integers (1-indexed), got {reference_mask_indices}")
-            
-            # Validate distance_threshold
-            if distance_threshold < 0 or distance_threshold > 1:
-                raise ValueError(f"distance_threshold must be in [0, 1], got {distance_threshold}")
-            
-            # Apply relative spatial filtering
-            filtered_outputs = filter_masks_by_relative_position(
-                current_outputs,
-                relationship,
-                reference_mask_indices,
-                distance_threshold,
-            )
-            num_kept = len(filtered_outputs["pred_masks"])
-            filter_desc = filtered_outputs.get("relative_spatial_filter_description", "")
-            
-            # Save updated outputs
-            image_w_filtered_masks = visualize(filtered_outputs)
-            image_w_filtered_masks_path = os.path.join(
-                sam_output_dir, rf"{LATEST_SAM3_TEXT_PROMPT}.png"
-            ).replace(
-                ".png",
-                f"_relative_filter_{relationship}.png".replace("/", "_"),
-            )
-            image_w_filtered_masks.save(image_w_filtered_masks_path)
-            
-            # Update PATH_TO_LATEST_OUTPUT_JSON
-            base_path = PATH_TO_LATEST_OUTPUT_JSON
-            if "masks_" in base_path:
-                base_path = base_path.split("masks_")[0] + ".json"
-            if num_kept == 0:
-                PATH_TO_LATEST_OUTPUT_JSON = base_path.replace(
-                    ".json", "masks_none.json"
-                )
-            else:
-                kept_indices = list(range(num_kept))
-                PATH_TO_LATEST_OUTPUT_JSON = base_path.replace(
-                    ".json", f"masks_{'_'.join(map(str, kept_indices))}.json"
-                )
-            json.dump(filtered_outputs, open(PATH_TO_LATEST_OUTPUT_JSON, "w"), indent=4)
-            
-            # Append assistant message with tool call
-            messages.append({
-                "role": "assistant",
-                "content": generated_text if generated_text else None,
-                "tool_calls": [tool_call_data],
-            })
-            
-            if num_kept == 0:
-                tool_result_message = f"The original user query was: '{initial_text_prompt}'. The filter_masks_by_relative_position tool filtered all masks out. {filter_desc} Now, please call the segment_phrase tool again with a different text_prompt, or try different reference masks or relationship."
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call_id,
-                    "content": json.dumps({"message": tool_result_message, "num_masks": 0}),
-                })
-            else:
-                tool_result_message = f"The original user query was: '{initial_text_prompt}'. After calling the filter_masks_by_relative_position tool with relationship '{relationship}' relative to reference mask(s) {reference_mask_indices}, the number of available masks is now {num_kept}. {filter_desc} All {num_kept} available masks are rendered in this image below, now you must analyze the {num_kept} available mask(s) carefully, compare them against the raw input image and the original user query, and determine your next action."
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call_id,
-                    "content": json.dumps({
-                        "message": tool_result_message,
-                        "num_masks": num_kept,
-                        "output_image_path": image_w_filtered_masks_path,
-                        "relationship": relationship,
-                        "reference_mask_indices": reference_mask_indices,
-                    }),
-                })
-                # For vision models: Add user message with image so model can visually analyze masks
-                messages.append({
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": "Please analyze the relative-position-filtered masks shown in the image below."},
-                        {"type": "image", "image": image_w_filtered_masks_path},
-                    ],
-                })
+        # DISABLED: filter_masks_by_relative_position - relative filtering now done in LLM thinking
+        # The LLM reasons about mask positions relative to other objects/features
+        # and directly calls select_masks_and_return with the appropriate mask indices.
+        # elif tool_call["name"] == "filter_masks_by_relative_position":
+        #     ... (tool handling code removed - see git history if needed)
 
         elif tool_call["name"] == "select_masks_and_return":
             print("🔍 Calling select_masks_and_return tool...")

@@ -35,21 +35,21 @@ import modal
 # Modal app + image
 # ------------------------------------------------------------------------------
 
-app = modal.App("qwen3-vl-vllm-server")
+app = modal.App("qwen3-vl-vllm-server-30B")
 
 # Create volume for model weights (~64GB for 32B model in bfloat16)
 # This will cache the model weights to avoid re-downloading on each deployment
-MODEL_VOLUME = modal.Volume.from_name("qwen3-vl-32b-thinking-weights", create_if_missing=True)
+MODEL_VOLUME = modal.Volume.from_name("qwen3-vl-30b-instruct-weights", create_if_missing=True)
 
 # Model configuration
-MODEL_ID = "Qwen/Qwen3-VL-32B-Thinking"
+MODEL_ID = "Qwen/Qwen3-VL-30B-A3B-Instruct"
 HF_CACHE_DIR = "/root/.cache/huggingface"  # Standard HuggingFace cache location
 
 # GPU Configuration
 # Available GPUs in Modal: "B200", "H200", "H100", "A100", "L40S", "A10", "L4", "T4"
 # For 32B model: A100 80GB single GPU recommended (can use tensor parallelism if OOM)
 # Note: B200 and H200 may not be available in all regions. If unavailable, use H100 or A100.
-GPU_TYPE = "A100"  # A100 80GB recommended for 32B model
+GPU_TYPE = "A100-80GB"  # A100 80GB recommended for 32B model
 NUM_GPUS = 1  # Single GPU initially (can add tensor parallelism if OOM)
 
 # Build GPU string for Modal
@@ -72,9 +72,9 @@ image = (
         "torch>=2.1.0",
     )
     # Install flash-attn after torch (requires torch to be installed first)
-    .pip_install(
-        "flash-attn>=2.5.0",  # Flash attention for faster inference
-    )
+    # .pip_install(
+    #     "flash-attn>=2.5.0",  # Flash attention for faster inference
+    # )
     # Install remaining dependencies
     .pip_install(
         "vllm>=0.6.0",
@@ -157,17 +157,14 @@ def vllm_server():
             "--model", MODEL_ID,
             "--trust-remote-code",
             "--dtype", "bfloat16",
-            "--gpu-memory-utilization", "0.85",  # More conservative for 32B model
-            "--max-model-len", "65536",  # Context length (64K) - conservative for A100 80GB
+            "--gpu-memory-utilization", "0.95",  # More conservative for 32B model
+            "--max-model-len", "20000",  # Context length (64K) - conservative for A100 80GB
             "--limit-mm-per-prompt", '{"image": 2}',  # JSON format required for vLLM CLI
             "--enforce-eager",
             "--max-num-seqs", "4",  # Reduced batch size for memory efficiency
             "--max-num-batched-tokens", "8192",  # Better long-context handling
             "--port", str(vllm_port),
             "--host", "0.0.0.0",
-            # Enable automatic tool calling with Hermes parser for Qwen3
-            "--enable-auto-tool-choice",
-            "--tool-call-parser", "hermes",
         ]
         
         # Add tensor parallelism if multiple GPUs
@@ -176,13 +173,13 @@ def vllm_server():
             print(f"✓ Tensor parallelism enabled: {NUM_GPUS} GPUs")
         
         # Enable flash attention (installed in image by default)
-        try:
-            import flash_attn
-            vllm_cmd.append("--enable-flash-attn")
-            print("✓ Flash attention enabled (default)")
-        except ImportError:
-            print("⚠ Flash attention not available despite being in image - using default attention")
-            print("   This may indicate an installation issue with flash-attn")
+        # try:
+        #     # import flash_attn
+        #     vllm_cmd.append("--enable-flash-attn")
+        #     print("✓ Flash attention enabled (default)")
+        # except ImportError:
+        #     print("⚠ Flash attention not available despite being in image - using default attention")
+        #     print("   This may indicate an installation issue with flash-attn")
         
         print(f"📋 vLLM command: {' '.join(vllm_cmd)}")
         
@@ -433,7 +430,7 @@ def vllm_server():
 
 @app.function(
     image=image,
-    gpu="A100",  # Use A100 for download (or any available GPU - doesn't need to match server GPU)
+    gpu="A100-80GB",  # Use A100 for download (or any available GPU - doesn't need to match server GPU)
     volumes={HF_CACHE_DIR: MODEL_VOLUME},
     secrets=[modal.Secret.from_name("huggingface-secret")],
     timeout=7200,  # 2 hours for 32B model download (larger model requires more time)
