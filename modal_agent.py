@@ -48,8 +48,8 @@ import re
 import io
 from functools import partial
 from pathlib import Path
-from typing import Dict, Any, List, Optional, Tuple
-from pydantic import BaseModel, Field, ValidationError
+from typing import Dict, Any, List, Optional, Tuple, Literal, Union
+from pydantic import BaseModel, Field, ValidationError, ConfigDict
 
 import modal
 
@@ -57,7 +57,7 @@ import modal
 # Modal app + image
 # ------------------------------------------------------------------------------
 
-app = modal.App("sam3-agent-pyramidal")
+app = modal.App("sam3-agent-pyramidal-v2")
 
 REPO_ROOT = Path(__file__).resolve().parent
 LOCAL_SAM3_DIR = REPO_ROOT / "sam3"
@@ -225,111 +225,105 @@ class VerificationResponse(BaseModel):
 
 class ImageUrl(BaseModel):
     """Image URL for multimodal messages"""
+    model_config = ConfigDict(json_schema_extra={
+        "example": {
+            "url": "https://example.com/image.jpg",
+            "detail": "auto"
+        }
+    })
+    
     url: str = Field(..., description="URL of the image or base64 data URI (data:image/jpeg;base64,...)")
     detail: Optional[str] = Field("auto", description="Image detail level: 'low', 'high', or 'auto'")
-
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "url": "https://example.com/image.jpg",
-                "detail": "auto"
-            }
-        }
 
 
 class ContentPartText(BaseModel):
     """Text content part for multimodal messages"""
-    type: str = Field("text", const=True, description="Content type, must be 'text'")
-    text: str = Field(..., description="Text content")
-
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "type": "text",
-                "text": "What is in this image?"
-            }
+    model_config = ConfigDict(json_schema_extra={
+        "example": {
+            "type": "text",
+            "text": "What is in this image?"
         }
+    })
+    
+    type: Literal["text"] = Field("text", description="Content type, must be 'text'")
+    text: str = Field(..., description="Text content")
 
 
 class ContentPartImage(BaseModel):
     """Image content part for multimodal messages"""
-    type: str = Field("image_url", const=True, description="Content type, must be 'image_url'")
-    image_url: ImageUrl = Field(..., description="Image URL object")
-
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "type": "image_url",
-                "image_url": {
-                    "url": "https://example.com/image.jpg",
-                    "detail": "auto"
-                }
+    model_config = ConfigDict(json_schema_extra={
+        "example": {
+            "type": "image_url",
+            "image_url": {
+                "url": "https://example.com/image.jpg",
+                "detail": "auto"
             }
         }
+    })
+    
+    type: Literal["image_url"] = Field("image_url", description="Content type, must be 'image_url'")
+    image_url: ImageUrl = Field(..., description="Image URL object")
 
 
 class FunctionDefinition(BaseModel):
     """Function definition for tool calling"""
+    model_config = ConfigDict(json_schema_extra={
+        "example": {
+            "name": "get_weather",
+            "description": "Get current weather for a location",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "location": {"type": "string", "description": "City name"},
+                    "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}
+                },
+                "required": ["location"]
+            }
+        }
+    })
+    
     name: str = Field(..., description="Function name")
     description: Optional[str] = Field(None, description="Function description")
     parameters: Optional[Dict[str, Any]] = Field(None, description="Function parameters (JSON Schema)")
 
-    class Config:
-        json_schema_extra = {
-            "example": {
+
+class Tool(BaseModel):
+    """Tool definition for function calling"""
+    model_config = ConfigDict(json_schema_extra={
+        "example": {
+            "type": "function",
+            "function": {
                 "name": "get_weather",
-                "description": "Get current weather for a location",
+                "description": "Get current weather",
                 "parameters": {
                     "type": "object",
-                    "properties": {
-                        "location": {"type": "string", "description": "City name"},
-                        "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}
-                    },
+                    "properties": {"location": {"type": "string"}},
                     "required": ["location"]
                 }
             }
         }
-
-
-class Tool(BaseModel):
-    """Tool definition for function calling"""
+    })
+    
     type: str = Field("function", description="Tool type, currently only 'function' is supported")
     function: FunctionDefinition = Field(..., description="Function definition")
-
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "type": "function",
-                "function": {
-                    "name": "get_weather",
-                    "description": "Get current weather",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {"location": {"type": "string"}},
-                        "required": ["location"]
-                    }
-                }
-            }
-        }
 
 
 class ToolCall(BaseModel):
     """Tool call made by the assistant"""
+    model_config = ConfigDict(json_schema_extra={
+        "example": {
+            "id": "call_abc123",
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "arguments": '{"location": "San Francisco"}'
+            }
+        }
+    })
+    
     id: str = Field(..., description="Unique identifier for the tool call")
     type: str = Field("function", description="Type of tool call")
     function: Dict[str, Any] = Field(..., description="Function call details with 'name' and 'arguments'")
-
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "id": "call_abc123",
-                "type": "function",
-                "function": {
-                    "name": "get_weather",
-                    "arguments": '{"location": "San Francisco"}'
-                }
-            }
-        }
 
 
 class ChatMessage(BaseModel):
@@ -342,10 +336,36 @@ class ChatMessage(BaseModel):
     - assistant: Assistant responses (can include tool calls)
     - tool: Tool/function results
     """
+    model_config = ConfigDict(json_schema_extra={
+        "examples": [
+            {
+                "role": "user",
+                "content": "What is the capital of France?"
+            },
+            {
+                "role": "user", 
+                "content": [
+                    {"type": "text", "text": "What is in this image?"},
+                    {"type": "image_url", "image_url": {"url": "https://example.com/image.jpg"}}
+                ]
+            },
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_123",
+                        "type": "function",
+                        "function": {"name": "get_weather", "arguments": '{"location": "Paris"}'}
+                    }
+                ]
+            }
+        ]
+    })
+    
     role: str = Field(
         ..., 
-        description="Message role: 'system', 'user', 'assistant', or 'tool'",
-        example="user"
+        description="Message role: 'system', 'user', 'assistant', or 'tool'"
     )
     content: Optional[Any] = Field(
         None,
@@ -355,34 +375,6 @@ class ChatMessage(BaseModel):
     tool_calls: Optional[List[ToolCall]] = Field(None, description="Tool calls made by the assistant")
     tool_call_id: Optional[str] = Field(None, description="Tool call ID (required for 'tool' role messages)")
 
-    class Config:
-        json_schema_extra = {
-            "examples": [
-                {
-                    "role": "user",
-                    "content": "What is the capital of France?"
-                },
-                {
-                    "role": "user", 
-                    "content": [
-                        {"type": "text", "text": "What is in this image?"},
-                        {"type": "image_url", "image_url": {"url": "https://example.com/image.jpg"}}
-                    ]
-                },
-                {
-                    "role": "assistant",
-                    "content": None,
-                    "tool_calls": [
-                        {
-                            "id": "call_123",
-                            "type": "function",
-                            "function": {"name": "get_weather", "arguments": '{"location": "Paris"}'}
-                        }
-                    ]
-                }
-            ]
-        }
-
 
 class ChatCompletionRequest(BaseModel):
     """
@@ -391,10 +383,24 @@ class ChatCompletionRequest(BaseModel):
     Use this to send messages to the LLM and receive completions.
     Supports text, multimodal (images), and tool/function calling.
     """
+    model_config = ConfigDict(
+        extra="allow",  # Allow additional fields for provider compatibility
+        json_schema_extra={
+            "example": {
+                "model": "gpt-4o",
+                "messages": [
+                    {"role": "system", "content": "You are a helpful assistant."},
+                    {"role": "user", "content": "What is the capital of France?"}
+                ],
+                "temperature": 0.7,
+                "max_tokens": 1000
+            }
+        }
+    )
+    
     model: str = Field(
         ..., 
-        description="Model identifier to use for completion",
-        example="gpt-4o"
+        description="Model identifier to use for completion"
     )
     messages: List[ChatMessage] = Field(
         ..., 
@@ -470,23 +476,20 @@ class ChatCompletionRequest(BaseModel):
         description="Random seed for deterministic generation"
     )
 
-    class Config:
-        extra = "allow"  # Allow additional fields for provider compatibility
-        json_schema_extra = {
-            "example": {
-                "model": "gpt-4o",
-                "messages": [
-                    {"role": "system", "content": "You are a helpful assistant."},
-                    {"role": "user", "content": "What is the capital of France?"}
-                ],
-                "temperature": 0.7,
-                "max_tokens": 1000
-            }
-        }
-
 
 class ChatChoice(BaseModel):
     """A single completion choice in the response"""
+    model_config = ConfigDict(json_schema_extra={
+        "example": {
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": "The capital of France is Paris."
+            },
+            "finish_reason": "stop"
+        }
+    })
+    
     index: int = Field(..., description="Choice index (0-based)")
     message: ChatMessage = Field(..., description="Generated message")
     finish_reason: Optional[str] = Field(
@@ -495,33 +498,20 @@ class ChatChoice(BaseModel):
     )
     logprobs: Optional[Dict[str, Any]] = Field(None, description="Log probabilities (if requested)")
 
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": "The capital of France is Paris."
-                },
-                "finish_reason": "stop"
-            }
-        }
-
 
 class TokenUsage(BaseModel):
     """Token usage statistics for the completion"""
+    model_config = ConfigDict(json_schema_extra={
+        "example": {
+            "prompt_tokens": 25,
+            "completion_tokens": 10,
+            "total_tokens": 35
+        }
+    })
+    
     prompt_tokens: int = Field(..., description="Tokens in the prompt")
     completion_tokens: int = Field(..., description="Tokens in the completion")
     total_tokens: int = Field(..., description="Total tokens (prompt + completion)")
-
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "prompt_tokens": 25,
-                "completion_tokens": 10,
-                "total_tokens": 35
-            }
-        }
 
 
 class ChatCompletionResponse(BaseModel):
@@ -530,38 +520,37 @@ class ChatCompletionResponse(BaseModel):
     
     Contains the generated message(s), token usage, and metadata.
     """
-    id: str = Field(..., description="Unique completion identifier", example="chatcmpl-abc123")
+    model_config = ConfigDict(json_schema_extra={
+        "example": {
+            "id": "chatcmpl-abc123",
+            "object": "chat.completion",
+            "created": 1677652288,
+            "model": "gpt-4o",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": "The capital of France is Paris."
+                    },
+                    "finish_reason": "stop"
+                }
+            ],
+            "usage": {
+                "prompt_tokens": 25,
+                "completion_tokens": 10,
+                "total_tokens": 35
+            }
+        }
+    })
+    
+    id: str = Field(..., description="Unique completion identifier")
     object: str = Field("chat.completion", description="Object type (always 'chat.completion')")
     created: int = Field(..., description="Unix timestamp of creation")
     model: str = Field(..., description="Model used for completion")
     choices: List[ChatChoice] = Field(..., description="List of completion choices")
     usage: Optional[TokenUsage] = Field(None, description="Token usage statistics")
     system_fingerprint: Optional[str] = Field(None, description="System fingerprint for reproducibility")
-
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "id": "chatcmpl-abc123",
-                "object": "chat.completion",
-                "created": 1677652288,
-                "model": "gpt-4o",
-                "choices": [
-                    {
-                        "index": 0,
-                        "message": {
-                            "role": "assistant",
-                            "content": "The capital of France is Paris."
-                        },
-                        "finish_reason": "stop"
-                    }
-                ],
-                "usage": {
-                    "prompt_tokens": 25,
-                    "completion_tokens": 10,
-                    "total_tokens": 35
-                }
-            }
-        }
 
 
 class ChatCompletionChunk(BaseModel):
@@ -570,6 +559,22 @@ class ChatCompletionChunk(BaseModel):
     
     Sent when stream=true. Contains partial content.
     """
+    model_config = ConfigDict(json_schema_extra={
+        "example": {
+            "id": "chatcmpl-abc123",
+            "object": "chat.completion.chunk",
+            "created": 1677652288,
+            "model": "gpt-4o",
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {"content": "The"},
+                    "finish_reason": None
+                }
+            ]
+        }
+    })
+    
     id: str = Field(..., description="Completion identifier (same across chunks)")
     object: str = Field("chat.completion.chunk", description="Object type")
     created: int = Field(..., description="Unix timestamp of creation")
@@ -577,28 +582,20 @@ class ChatCompletionChunk(BaseModel):
     choices: List[Dict[str, Any]] = Field(..., description="Delta choices with partial content")
     system_fingerprint: Optional[str] = Field(None, description="System fingerprint")
 
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "id": "chatcmpl-abc123",
-                "object": "chat.completion.chunk",
-                "created": 1677652288,
-                "model": "gpt-4o",
-                "choices": [
-                    {
-                        "index": 0,
-                        "delta": {"content": "The"},
-                        "finish_reason": None
-                    }
-                ]
-            }
-        }
-
 
 class APIError(BaseModel):
     """API error response"""
+    model_config = ConfigDict(json_schema_extra={
+        "example": {
+            "message": "Invalid API key provided",
+            "type": "invalid_request_error",
+            "param": None,
+            "code": "invalid_api_key"
+        }
+    })
+    
     message: str = Field(..., description="Error message")
-    type: str = Field(..., description="Error type", example="invalid_request_error")
+    type: str = Field(..., description="Error type")
     param: Optional[str] = Field(None, description="Parameter that caused the error")
     code: Optional[str] = Field(None, description="Error code")
 
@@ -609,19 +606,18 @@ class ErrorResponse(BaseModel):
     
     Returned when an API request fails.
     """
-    error: APIError = Field(..., description="Error details")
-
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "error": {
-                    "message": "Invalid API key provided",
-                    "type": "authentication_error",
-                    "param": None,
-                    "code": "invalid_api_key"
-                }
+    model_config = ConfigDict(json_schema_extra={
+        "example": {
+            "error": {
+                "message": "Invalid API key provided",
+                "type": "authentication_error",
+                "param": None,
+                "code": "invalid_api_key"
             }
         }
+    })
+    
+    error: APIError = Field(..., description="Error details")
 
 
 # ------------------------------------------------------------------------------
