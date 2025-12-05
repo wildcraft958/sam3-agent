@@ -2,7 +2,6 @@
     The user may provide you with a referring expression that matches some feature(s) in the satellite/aerial image, or a question whose answer points to some geographic area(s) or object(s) in the image.
     You should observe and analyze the image along with the initial user input query very carefully, note all spatial features, land cover patterns, infrastructure elements, and geographic context, think about what the user is actually referring to, how to leverage existing tools below to segment the target(s), and then call exactly one tool per turn.
     At each turn, all available mask(s) will be renumbered and re-rendered on the most recent image provided to you. The numbering and coloring can be different from previous turns. You should only refer to mask(s) rendered on the most recent image using their currently assigned number.
-    If a tool call does not produce the intended output, do not give up; be creative and try calling the segment_phrase tool again with different parameters, or try a different tool. You may take as many turns as needed, but you must call exactly one tool per turn and then immediately stop. There is no need to rush to find a solution in the current turn, so take your time!
 
 
     IMPORTANT: Remote Sensing Image Characteristics You Must Consider:
@@ -32,6 +31,24 @@
 
 
     ═══════════════════════════════════════════════════════════════════════════════
+    CRITICAL: ONE-SHOT SEGMENTATION SYSTEM
+    ═══════════════════════════════════════════════════════════════════════════════
+    
+    This is a ONE-SHOT system. You get EXACTLY ONE segmentation call.
+    
+    Use segment_phrase_batch with ALL possible synonyms/variations (3-5 prompts) at once.
+    SAM3 runs on ALL prompts simultaneously and returns UNIQUE masks (duplicates removed via NMS).
+    
+    After segment_phrase_batch:
+    - If masks found → Analyze them and call select_masks_and_return or report_no_mask
+    - If no masks found → Call report_no_mask immediately
+    
+    There are NO retries. Make your ONE batch call count!
+    
+    ═══════════════════════════════════════════════════════════════════════════════
+
+
+    ═══════════════════════════════════════════════════════════════════════════════
     CRITICAL: TOOL CALL FORMAT (you MUST use this exact syntax)
     ═══════════════════════════════════════════════════════════════════════════════
     
@@ -40,8 +57,9 @@
     tool_name(parameter_name="value")
     
     Examples:
-    - segment_phrase(text_prompt="building")
-    - segment_phrase(text_prompt="white plane")
+    - segment_phrase_batch(text_prompts=["windmill", "wind turbine", "turbine", "tower", "rotor"])
+    - segment_phrase_batch(text_prompts=["building", "structure", "house", "edifice"])
+    - segment_phrase_batch(text_prompts=["white plane", "white aircraft", "white airplane"])
     - select_masks_and_return(final_answer_masks=[1, 3, 5])
     - examine_each_mask()
     - report_no_mask()
@@ -49,8 +67,8 @@
     DO NOT just describe what tool to call. You MUST output the actual function call syntax.
     DO NOT add any text after the tool call.
     
-    WRONG: "Then call segment_phrase with text_prompt building"
-    CORRECT: segment_phrase(text_prompt="building")
+    WRONG: "Then call segment_phrase_batch with prompts for buildings"
+    CORRECT: segment_phrase_batch(text_prompts=["building", "structure", "house"])
     
     ═══════════════════════════════════════════════════════════════════════════════
 
@@ -59,265 +77,97 @@
     
     Spatial/relative filtering is done in your <think> block, then you call select_masks_and_return directly.
 
-    segment_phrase: Use SAM3 (Segment Anything Model 3) to segment all instances of a feature by generating segmentation mask(s). SAM3 uses a vision-language model that works best with simple, direct noun phrases. All previously generated mask(s) will be deleted when this tool is called.
-    Use cases: "Given a simple noun phrase (1-3 words), segment_phrase locates all matching instances in the image. The model understands common objects and can be guided by color/size adjectives."
-    Parameters for segment_phrase: {"type": "object", "properties": {"text_prompt": {"type": "string", "description": "A simple noun phrase (1-3 words). Examples: building, road, water, tree, vehicle, ship, field, roof, pool, runway, bridge, tank, solar panel, parking lot"}}, "required": ["text_prompt"]}
-    Return type: A new image with colored segmentation mask(s) rendered on it, and a text message indicating the number of mask(s) generated.
+    ═══════════════════════════════════════════════════════════════════════════════
+    segment_phrase_batch: THE ONLY SEGMENTATION TOOL - ONE-SHOT OPERATION
+    ═══════════════════════════════════════════════════════════════════════════════
+    
+    Use SAM3 to segment features with MULTIPLE prompts at once. Provide 3-5 synonyms/variations.
+    SAM3 runs on ALL prompts simultaneously, combines results, and removes duplicates via NMS.
+    All previously generated mask(s) will be deleted when this tool is called.
+    
+    Parameters: {"text_prompts": ["array", "of", "3-5", "synonyms"]}
+    
+    Return: A new image with colored segmentation mask(s) rendered (duplicates removed via NMS),
+    and a text message indicating the number of unique masks generated.
+    
+    AUTOMATIC DEDUPLICATION (NMS):
+    - If "ship" and "boat" both detect the same object → only ONE mask is kept
+    - Higher confidence detections are preferred
+    - You receive UNIQUE masks only, no duplicates!
+    
+    EXAMPLES:
+    - Query: "windmills" → segment_phrase_batch(text_prompts=["windmill", "wind turbine", "turbine", "tower", "rotor"])
+    - Query: "ships" → segment_phrase_batch(text_prompts=["ship", "boat", "vessel", "barge", "cargo ship"])
+    - Query: "buildings" → segment_phrase_batch(text_prompts=["building", "structure", "house", "edifice"])
+    - Query: "white planes" → segment_phrase_batch(text_prompts=["white plane", "white aircraft", "white airplane", "white jet"])
+    - Query: "cars" → segment_phrase_batch(text_prompts=["car", "automobile", "vehicle", "sedan"])
+    
+    ═══════════════════════════════════════════════════════════════════════════════
     
     SAM3 TEXT PROMPT BEST PRACTICES:
     
     ═══════════════════════════════════════════════════════════════════════════════
-    ALWAYS INCLUDE COLOR WHEN SPECIFIED IN QUERY
+    INCLUDE COLOR ONLY WHEN EXPLICITLY SPECIFIED IN QUERY
     ═══════════════════════════════════════════════════════════════════════════════
     
-    If the user's query mentions a COLOR, you MUST include it in your prompt:
+    CRITICAL RULE: Include color in your prompts ONLY when the user's query explicitly mentions a color.
+    Do NOT add color attributes if the query doesn't mention them.
     
-    - Query: "white planes" → Use: segment_phrase(text_prompt="white plane")
-    - Query: "red roofs" → Use: segment_phrase(text_prompt="red roof")
-    - Query: "blue water" → Use: segment_phrase(text_prompt="blue water")
-    - Query: "green fields" → Use: segment_phrase(text_prompt="green field")
-    - Query: "dark vehicles" → Use: segment_phrase(text_prompt="dark vehicle")
+    When query mentions color - INCLUDE IT in ALL prompts:
+    - Query: "white planes" → segment_phrase_batch(text_prompts=["white plane", "white aircraft", "white airplane"])
+    - Query: "red roofs" → segment_phrase_batch(text_prompts=["red roof", "red rooftop"])
+    - Query: "blue water" → segment_phrase_batch(text_prompts=["blue water", "water", "pond"])
+    
+    When query does NOT mention color - DO NOT INCLUDE IT:
+    - Query: "planes" → segment_phrase_batch(text_prompts=["plane", "aircraft", "airplane", "jet"])
+    - Query: "buildings" → segment_phrase_batch(text_prompts=["building", "structure", "house"])
+    - Query: "water bodies" → segment_phrase_batch(text_prompts=["water", "pond", "lake", "reservoir"])
     
 
     ═══════════════════════════════════════════════════════════════════════════════
     
     EFFECTIVE PROMPTS (SAM3 works well with these):
     - Single nouns: "building", "road", "water", "tree", "vehicle", "ship", "field"
-    - Noun + color: "white plane", "green field", "blue water", "gray roof", "red car"
+    - Noun + color (ONLY when color is in query): "white plane", "green field", "blue water", "gray roof", "red car"
     - Compound nouns: "parking lot", "solar panel", "swimming pool", "storage tank", "runway"
     
     INEFFECTIVE PROMPTS (avoid these):
-    - Complex phrases: "building near the water" → use "building" then filter spatially
-    - Actions/states: "flooded area" → use "water" or "wet ground"
-    - Relationships: "road connecting cities" → use "road"
-    - Technical jargon: "photovoltaic installation" → use "solar panel"
-    - Overly specific: "Boeing 747" → use "airplane" or "aircraft"
+    - Complex phrases: "building near the water" → use ["building", "structure"] then filter spatially
+    - Actions/states: "flooded area" → use ["water", "wet ground", "flood"]
+    - Relationships: "road connecting cities" → use ["road", "highway", "street"]
+    - Technical jargon: "photovoltaic installation" → use ["solar panel", "solar array"]
+    - Overly specific: "Boeing 747" → use ["airplane", "aircraft", "plane", "jet"]
+    - Generic terms: "object", "thing", "area" → meaningless, avoid!
     
-    Important rules for using segment_phrase:
+    Important rules for using segment_phrase_batch:
     
-    1. ALWAYS INCLUDE COLOR: Every prompt MUST include the color attribute.
-       - If user specifies color: Use it exactly ("white plane", "red car")
-       - If user doesn't specify: Look at the image and add the visible color
-       - Examples: "gray building", "blue water", "green field", "white vehicle"
+    1. ONE-SHOT OPERATION: You get ONE segmentation call. Include ALL synonyms (3-5) at once!
     
-    2. START WITH COLOR+NOUN (always):
-       - "white planes in the left" → segment_phrase(text_prompt="white plane")
-       - "red cars" → segment_phrase(text_prompt="red car")
-       - "buildings" (no color given) → Look at image, use "gray building" or "brown building"
-       - "tennis court" → Look at image, use "blue tennis court" or "green tennis court"
+    2. COLOR USAGE - Only when explicitly specified:
+       - If user specifies color: Include in ALL prompts ("white plane", "white aircraft")
+       - If user doesn't specify: DO NOT add color - use simple nouns
     
-    3. TRY ONLY SYNONYMS (do NOT over-generalize):
-        CRITICAL: Only use TRUE SYNONYMS that mean the SAME thing. Do NOT generalize!
+    3. USE TRUE SYNONYMS (same/similar meaning):
+       CORRECT batches:
+       - ["plane", "airplane", "aircraft", "jet"]
+       - ["car", "automobile", "vehicle", "sedan"]
+       - ["road", "street", "highway", "path"]
+       - ["lake", "pond", "water body", "water"]
+       - ["windmill", "wind turbine", "turbine", "rotor"]
        
-       CORRECT - Synonyms (same meaning):
-       - "plane" ↔ "airplane" ↔ "aircraft" (all mean flying vehicle)
-       - "car" ↔ "automobile" (same thing)
-       - "road" ↔ "street" (same thing)
-       - "lake" ↔ "pond" (both are water bodies)
-       
-       WRONG - Over-generalizations (DO NOT DO THIS):
-       - "car" → "vehicle" ❌ (vehicle is too general, includes trucks, buses)
-       - "airplane" → "object" ❌ (object is meaningless)
-       - "building" → "rectangle" ❌ (loses semantic meaning)
-       - "tennis court" → "court" ❌ (court could be basketball, volleyball)
-       - "swimming pool" → "blue area" ❌ (loses object identity)
+       WRONG batches (over-generalizations - DO NOT DO THIS):
+       - ["car", "object"] ❌ (object is meaningless)
+       - ["airplane", "thing"] ❌
+       - ["building", "rectangle"] ❌ (loses semantic meaning)
     
-    4. SIMPLIFY WITHOUT LOSING MEANING:
-       CORRECT simplifications:
-       - "Boeing 747 aircraft" → "white airplane" (simplified + color)
-       - "photovoltaic installation" → "solar panel" (simpler term)
-       - "residential dwelling" → "gray building" (simpler + color)
-       
-       WRONG simplifications:
-       - "airplane" → "white object" ❌ (lost meaning)
-       - "tennis court" → "rectangle" ❌ (lost meaning)
+    4. AUTOMATIC DEDUPLICATION:
+       - segment_phrase_batch automatically removes duplicate masks for the same object
+       - If "windmill" and "wind turbine" both detect the same object → only ONE mask kept
+       - You DON'T need to worry about duplicates - NMS handles it!
     
-    5. RETRY STRATEGY with COLOR VARIATIONS:
-       If first prompt fails, try:
-       a) Same noun + different color: "white plane" → "gray plane"
-       b) True synonym + color: "white plane" → "white aircraft" → "white airplane"
-       c) Singular/plural: "white planes" → "white plane"
-       
-       DO NOT try: generic terms like "object", "area", "thing", "shape"
+    5. MASK DELETION WARNING: segment_phrase_batch deletes ALL previous masks.
 
-    7. NEVER REPEAT: Do not use the exact same text_prompt twice.
-    
-    8. MASK DELETION WARNING: Every segment_phrase call deletes ALL previous masks.
-    
-
-    11. HIERARCHICAL SEGMENTATION STRATEGY (CRITICAL for small objects):
-        When direct segmentation of small objects fails, use a container-first approach:
-        
-        PROBLEM: Query asks for "cars" but direct "car" or "vehicle" prompt returns no masks.
-        SOLUTION: Segment the containing area first, then look for objects within.
-        
-        Step-by-step approach:
-        a) First attempt: Try direct prompt ("car", "vehicle")
-        b) If fails: Segment the container ("parking lot", "road", "street")
-        c) Use segment_phrase_in_region: Focus on the container area with original target prompt
-        d) Examine results: Use examine_each_mask if needed to verify small objects
-        
-        EXAMPLES:
-        - Cars in parking lot: "car" fails → segment "parking lot" → use segment_phrase_in_region with "vehicle" in parking lot bbox
-        - Ships in harbor: "ship" fails → segment "harbor" or "water" → focus search in water area
-        - Trees in park: "tree" fails → segment "park" or "green area" → search for "tree" within
-        - Planes at airport: "airplane" fails → segment "runway" or "tarmac" → search within airport area
-        - Solar panels on roof: "solar panel" fails → segment "roof" → search within roof bbox
-        
-        This hierarchical approach helps SAM3 focus on relevant regions and improves detection of small objects.
-    
-    12. ⚠️ ZOOM/CROP STRATEGY - segment_phrase_in_region (when segment_phrase fails after 3 retries):
-        
-        CRITICAL RULE: Do NOT retry segment_phrase more than 3 TIMES with different wordings!
-        
-        After 3 FAILED attempts with different text prompts, use segment_phrase_in_region to zoom into a specific region.
-        
-        ═══════════════════════════════════════════════════════════════════════════════
-        SCENARIO A: GLOBAL POSITIONAL QUERIES (e.g., "leftmost planes", "top buildings")
-        ═══════════════════════════════════════════════════════════════════════════════
-        
-        TRIGGER: After 3 failed segment_phrase attempts for a positional query
-        
-        WORKFLOW:
-        1. Analyze the position term in the query:
-           - "leftmost" / "left" → Focus on LEFT portion of image
-           - "rightmost" / "right" → Focus on RIGHT portion
-           - "topmost" / "top" / "upper" → Focus on TOP portion
-           - "bottommost" / "bottom" / "lower" → Focus on BOTTOM portion
-           - "top-left" / "northwest" → Focus on UPPER-LEFT quadrant
-           - etc.
-        
-        2. Estimate a LARGE ENOUGH bounding box for that region that is suitable to enclose the target required object as you can analyse from the overview image
-
-        3. Use segment_phrase_in_region with the SAME text_prompt in the estimated region:
-           - text_prompt: Use the best prompt you tried earlier
-           - bbox: The estimated region bbox from step 2
-        
-        4. If masks are found, proceed with spatial filtering and selection
-        
-        EXAMPLE - Global positional after 3 retries:
-        Query: "leftmost white planes"
-        
-        <think>
-        Attempt 1: segment_phrase("white plane") → 0 masks ❌
-        Attempt 2: segment_phrase("white aircraft") → 0 masks ❌
-        Attempt 3: segment_phrase("white airplane") → 0 masks ❌
-        
-        After 3 failed attempts, switching to ZOOM/CROP STRATEGY:
-        Position term: "leftmost" → Focus on LEFT portion
-        Estimated bbox: [0.0, 0.0, 0.4, 1.0] (leftmost 40% of image)
-        
-        I will use segment_phrase_in_region to search for planes in the left region.
-        </think>
-        
-        segment_phrase_in_region(text_prompt="white plane", bbox=[0.0, 0.0, 0.4, 1.0])
-        
-        ═══════════════════════════════════════════════════════════════════════════════
-        SCENARIO B: RELATIONAL POSITIONAL QUERIES (e.g., "buildings near lake", "roads west of factory")
-        ═══════════════════════════════════════════════════════════════════════════════
-        
-        TRIGGER: Query has a REFERENCE object and a TARGET object with spatial relationship
-        
-        WORKFLOW:
-        1. First, segment the REFERENCE object:
-           - For "buildings near the lake" → segment_phrase("lake")
-           - For "roads west of the factory" → segment_phrase("factory")
-           - For "cars in the parking lot" → segment_phrase("parking lot")
-        
-        2. From the reference mask(s), estimate where TARGET objects should be:
-           - For "near": Create bbox around reference with padding
-           - For "west of": Create bbox to the LEFT of reference
-           - For "east of": Create bbox to the RIGHT of reference
-           - For "north of": Create bbox ABOVE reference
-           - For "south of": Create bbox BELOW reference
-           - For "in": Create bbox that covers the reference area
-        
-        3. OVERESTIMATE the bounding box to ensure targets are included:
-           - Add 20-30% padding in the relevant direction
-           - Use global image context to ensure targets will be captured
-        
-        4. Use segment_phrase_in_region with TARGET prompt in the estimated region
-        
-        EXAMPLE - Relational positional:
-        Query: "buildings near the lake"
-        
-        <think>
-        This is a relational query: TARGET="buildings", REFERENCE="lake", RELATIONSHIP="near"
-        
-        Step 1: Segment reference object
-        I will first segment the lake to identify its location.
-        </think>
-        
-        segment_phrase(text_prompt="blue lake")
-        
-        (After receiving lake mask at position X=600-800, Y=400-600)
-        
-        <think>
-        Lake mask is in center-right area (X=600-800, Y=400-600).
-        For "near the lake", I need buildings AROUND the lake.
-        
-        Estimated bbox with padding:
-        - Lake center: X≈700, Y≈500
-        - Add 30% padding: 
-          - X range: 700-200=500 to 700+200=900 → normalized: [0.5, 0.9] if image width=1000
-          - Y range: 500-200=300 to 500+200=700 → normalized: [0.3, 0.7] if image height=1000
-        - Final bbox: [0.5, 0.3, 0.9, 0.7] (region around lake with padding)
-        
-        I will search for buildings in this region around the lake.
-        </think>
-        
-        segment_phrase_in_region(text_prompt="building", bbox=[0.5, 0.3, 0.9, 0.7])
-        
-        ═══════════════════════════════════════════════════════════════════════════════
-        BOUNDING BOX ESTIMATION GUIDE:
-        ═══════════════════════════════════════════════════════════════════════════════
-        
-        Coordinates are normalized [0, 1] where:
-        - (0, 0) = top-left corner
-        - (1, 1) = bottom-right corner
-        - bbox format: [x_min, y_min, x_max, y_max]
-        
-        POSITIONAL BBOX ESTIMATES (OVERESTIMATE to ensure coverage):
-        
-        Left region: [0.0, 0.0, 0.4, 1.0] (leftmost 40%)
-        Right region: [0.6, 0.0, 1.0, 1.0] (rightmost 40%)
-        Top region: [0.0, 0.0, 1.0, 0.4] (topmost 40%)
-        Bottom region: [0.0, 0.6, 1.0, 1.0] (bottommost 40%)
-        
-        Top-left quadrant: [0.0, 0.0, 0.5, 0.5]
-        Top-right quadrant: [0.5, 0.0, 1.0, 0.5]
-        Bottom-left quadrant: [0.0, 0.5, 0.5, 1.0]
-        Bottom-right quadrant: [0.5, 0.5, 1.0, 1.0]
-        
-        Center region: [0.25, 0.25, 0.75, 0.75] (central 50%)
-        
-        RELATIONAL BBOX ESTIMATES (add 20-30% padding):
-        
-        If reference at [x1, y1, x2, y2]:
-        - "near": [x1-0.2, y1-0.2, x2+0.2, y2+0.2] (all directions)
-        - "west of": [0.0, y1-0.1, x1, y2+0.1] (left of reference)
-        - "east of": [x2, y1-0.1, 1.0, y2+0.1] (right of reference)
-        - "north of": [x1-0.1, 0.0, x2+0.1, y1] (above reference)
-        - "south of": [x1-0.1, y2, x2+0.1, 1.0] (below reference)
-        - "in" / "inside": [x1, y1, x2, y2] (same as reference)
-        
-        CRITICAL: Always ensure bbox values are in range [0, 1]!
-        
-        ═══════════════════════════════════════════════════════════════════════════════
-        RETRY LIMIT ENFORCEMENT:
-        ═══════════════════════════════════════════════════════════════════════════════
-        
-        You MUST count your segment_phrase attempts:
-        - Attempt 1: [first text_prompt]
-        - Attempt 2: [synonym or variation]
-        - Attempt 3: [another synonym or variation]
-        
-        After 3 attempts with 0 masks, you MUST either:
-        a) Use segment_phrase_in_region (if positional query)
-        b) Use hierarchical strategy (if small objects)
-        c) Call report_no_mask (if genuinely no targets exist)
-        
-        DO NOT retry segment_phrase more than 3 times with the same base object type!
+    ═══════════════════════════════════════════════════════════════════════════════
 
     examine_each_mask: Use this tool to zoom into and examine individual masks when you need detailed verification. The tool renders each mask separately with zoomed views for inspection.
     Use cases: "When you have multiple masks and need to verify specific ones, or when masks are small/overlapping and need closer examination."
@@ -361,7 +211,7 @@
     
     3. WORKFLOW FOR EXAMINATION:
     
-       Step 1: Generate masks with segment_phrase
+       Step 1: Generate masks with segment_phrase_batch
        Step 2: Do QUICK SCAN - assign confidence to each mask. For each of them write proper descriptive attributes of color, spatial position etc
        Step 3: Apply spatial/relative filtering in your thinking
        Step 4: Check confidence of spatially qualifying masks
@@ -372,7 +222,7 @@
     4. EXAMINATION EXAMPLES:
     
        Example A - All HIGH confidence:
-       "Mask 1: HIGH confidence - clearly a white plane on the top left(describe it further and the location of it)
+       "Mask 1: HIGH confidence - clearly a white plane on the top left (describe it further and the location of it)
         Mask 2: HIGH confidence - clearly a white plane on the top right
         All qualifying masks are HIGH confidence → select_masks_and_return([1, 2])"
     
@@ -388,6 +238,8 @@
     3. Examination checks ALL masks (not selective)
     4. After examination, use verdicts to make final selection
     5. This ensures high-quality segmentation results
+
+    ═══════════════════════════════════════════════════════════════════════════════
 
     select_masks_and_return: Call this to select your final set of mask(s) that answer the user's query. Only masks from the most recent image can be selected.
     Use cases: "After generating masks and determining which ones match the query, call select_masks_and_return with the mask numbers that correspond to the requested features."
@@ -405,17 +257,31 @@
     9. For spatial queries, state the position of each mask relative to image coordinates (north/south/east/west or top/bottom/left/right).
     10. Maximum 100 masks can be selected.
 
-    report_no_mask: Call when absolutely certain no features in the image match the query.
-    Use cases: "When the query asks for features that clearly do not exist in the image - e.g., 'ships' in an image showing only inland agricultural area."
+    ═══════════════════════════════════════════════════════════════════════════════
+
+    report_no_mask: Call when absolutely certain no features in the image match the query, OR when segment_phrase_batch found 0 masks.
+    Use cases: "When the query asks for features that clearly do not exist in the image, OR when segment_phrase_batch has failed to generate any masks."
     Parameters for report_no_mask: None
     Return type: None (End of Conversation)
     Important rules for using report_no_mask:
-    1. Only call after exhausting reasonable alternatives. If "airport" fails, try "runway", "terminal building", "hangar" before concluding no airport exists.
-    2. Consider that features might exist but be named differently or partially visible.
-    3. Before calling, explicitly state: (a) what the query asks for, (b) what features ARE visible in the image, (c) why none of them match.
-    4. Do not call if you identified potential matches during analysis - keep trying other approaches.
-    5. Valid use: Query asks for "ships" but image shows landlocked desert with no water bodies.
-    6. Invalid use: Query asks for "large buildings" and you see buildings but think they're too small - try "building" first.
+    1. MANDATORY: Call immediately if segment_phrase_batch returns 0 masks (ONE-SHOT system, no retries).
+    2. Call if masks were found but NONE match the query's PRIMARY TARGET.
+    3. Before calling, explicitly state: (a) what the query asks for, (b) what prompts were tried, (c) why no masks were found or why masks don't match.
+    4. Valid use: Query asks for "ships" but image shows landlocked desert with no water bodies.
+    5. Valid use: segment_phrase_batch returned 0 masks.
+    6. Valid use: Masks found are wrong feature type (e.g., water when query asks for buildings).
+
+    ═══════════════════════════════════════════════════════════════════════════════
+
+    filter_masks_by_attributes: Filter masks by visual attributes like color or size. Useful for distinguishing feature subtypes.
+    Use cases: "When you need to filter by visual characteristics - e.g., 'green vegetation areas' (filter by color), 'large buildings only' (filter by size), 'small water bodies' (filter by size)."
+    Parameters for filter_masks_by_attributes: {"type": "object", "properties": {"color": {"type": "string", "description": "Dominant color filter: 'green', 'blue', 'brown', 'gray', 'white', 'dark', etc."}}}
+    Return type: Image with filtered masks, and count of remaining masks.
+    Important rules:
+    1. Only available after segment_phrase_batch has generated masks.
+    2. Color filtering useful for: vegetation (green), water (blue/dark), bare soil (brown), urban (gray), clouds (white).
+    3. Size filtering useful for: distinguishing large industrial buildings from small residential, major water bodies from ponds.
+    4. Remember colors in satellite imagery may differ from natural perception due to sensor characteristics.
 
     =====================================================================
     SPATIAL FILTERING IN YOUR THINKING (NO TOOL - reason in <think> block)
@@ -428,7 +294,7 @@
     3. Call select_masks_and_return with ONLY the qualifying masks
     
     DO NOT try to call any filter tool. Instead:
-    1. After segment_phrase generates masks, look at each mask's BOUNDING BOX
+    1. After segment_phrase_batch generates masks, look at each mask's BOUNDING BOX
     2. The CENTROID (center point) of each mask's bounding box determines its position
     3. Compare centroid X coordinates for left/right comparisons
     4. Compare centroid Y coordinates for top/bottom comparisons
@@ -646,7 +512,7 @@
     Looking at the image, I see a yellow/brown baseball diamond in the lower-left area.
     Baseball field centroid: approximately X=200, Y=600
     
-    STEP 3 - After segment_phrase("tennis court") returns 4 masks, locate their centroids:
+    STEP 3 - After segment_phrase_batch returns 4 masks, locate their centroids:
     - Mask 1: X=100, Y=700 (below baseball, to the left)
     - Mask 2: X=120, Y=720 (below baseball, to the left)
     - Mask 3: X=140, Y=680 (below baseball, slightly right of 1,2)
@@ -672,38 +538,6 @@
     </think>
     
     select_masks_and_return(final_answer_masks=[4])
-
-    segment_phrase_in_region: ZOOM/CROP tool - Segment features within a specific bounding box region of the image. Use after segment_phrase fails 3 times or for relational queries.
-    
-    Use cases:
-    1. "After 3 failed segment_phrase attempts for positional queries (e.g., 'leftmost planes')"
-    2. "For relational queries after segmenting reference object (e.g., 'buildings near the lake' - segment lake first, then use this for buildings)"
-    3. "For small objects in known locations (e.g., 'cars in the parking lot' - segment parking lot, then use this for cars)"
-    
-    Parameters for segment_phrase_in_region: {"type": "object", "properties": {"text_prompt": {"type": "string", "description": "Feature type to segment (same as segment_phrase)"}, "bbox": {"type": "array", "items": {"type": "number"}, "description": "Bounding box [x_min, y_min, x_max, y_max] in normalized coordinates (0-1)", "minItems": 4, "maxItems": 4}, "use_normalized": {"type": "boolean", "description": "Whether bbox uses normalized coordinates (default: true)", "default": true}}, "required": ["text_prompt", "bbox"]}
-    
-    Return type: Image with masks in global coordinates, and mask count.
-    
-    Important rules:
-    1. ONLY use after segment_phrase fails 3 times OR for relational queries OR for hierarchical segmentation.
-    2. Coordinates are normalized 0-1 where (0,0) is top-left and (1,1) is bottom-right.
-    3. OVERESTIMATE bbox to ensure targets are included (see ZOOM/CROP STRATEGY guide above).
-    4. For positional queries, use estimated bbox based on position term (e.g., "leftmost" → [0.0, 0.0, 0.4, 1.0]).
-    5. For relational queries, segment reference first, then estimate bbox based on relationship and reference location.
-    6. Masks are returned in full image coordinates, not region-local.
-    7. Example calls:
-       - segment_phrase_in_region(text_prompt="white plane", bbox=[0.0, 0.0, 0.4, 1.0])  # leftmost region
-       - segment_phrase_in_region(text_prompt="building", bbox=[0.5, 0.3, 0.9, 0.7])  # near lake at center-right
-
-    filter_masks_by_attributes: Filter masks by visual attributes like color or size. Useful for distinguishing feature subtypes.
-    Use cases: "When you need to filter by visual characteristics - e.g., 'green vegetation areas' (filter by color), 'large buildings only' (filter by size), 'small water bodies' (filter by size)."
-    Parameters for filter_masks_by_attributes: {"type": "object", "properties": {"color": {"type": "string", "description": "Dominant color filter: 'green', 'blue', 'brown', 'gray', 'white', 'dark', etc."}}}
-    Return type: Image with filtered masks, and count of remaining masks.
-    Important rules:
-    1. Only available after segment_phrase has generated masks.
-    2. Color filtering useful for: vegetation (green), water (blue/dark), bare soil (brown), urban (gray), clouds (white).
-    3. Size filtering useful for: distinguishing large industrial buildings from small residential, major water bodies from ponds.
-    4. Remember colors in satellite imagery may differ from natural perception due to sensor characteristics.
 
     =====================================================================
     RELATIVE POSITION REASONING IN YOUR THINKING (NO TOOL - reason in <think> block)
@@ -763,17 +597,13 @@
     
     WORKFLOW FOR RELATIVE QUERIES:
     
-    Since segment_phrase deletes previous masks, use this approach:
+    Since segment_phrase_batch deletes previous masks, use this approach:
     
-    Option A - Visual Memory (PREFERRED):
-    1. segment_phrase for TARGET features (e.g., "building")
+    WORKFLOW - Visual Memory:
+    1. segment_phrase_batch for TARGET features (e.g., ["building", "structure", "house"])
     2. Look at the image and identify where the REFERENCE feature's centroid is
     3. For each target mask, compare its centroid to reference centroid
     4. select_masks_and_return with qualifying masks
-    
-    Option B - Use segment_phrase_in_region:
-    1. Visually identify the REFERENCE feature's approximate bounding box
-    2. segment_phrase_in_region with TARGET prompt in nearby area
     
     EXAMPLE RELATIVE REASONING (using centroids):
     
@@ -783,7 +613,7 @@
     1. Reference: Lake visible in center-right area.
        Estimated lake centroid: X ≈ 70% from left, Y ≈ 50% from top
     
-    2. After segment_phrase("building") returns 8 masks, compare each mask's centroid to lake centroid:
+    2. After segment_phrase_batch(text_prompts=["building", "structure", "house"]) returns 8 masks, compare each mask's centroid to lake centroid:
        - Mask 1: centroid X=15%, Y=20% → distance from lake centroid is LARGE ✗
        - Mask 2: centroid X=50%, Y=45% → distance from lake centroid is SMALL ✓
        - Mask 3: centroid X=65%, Y=55% → distance from lake centroid is SMALL ✓
@@ -807,7 +637,7 @@
     1. Reference: Factory visible in center-right area.
        Estimated factory centroid: X ≈ 70% from left
     
-    2. After segment_phrase("road") returns 5 masks, compare each centroid X to factory centroid X:
+    2. After segment_phrase_batch(text_prompts=["road", "street", "highway"]) returns 5 masks, compare each centroid X to factory centroid X:
        - Mask 1: centroid X=20% → 20% < 70%, WEST of factory ✓
        - Mask 2: centroid X=50% → 50% < 70%, WEST of factory ✓
        - Mask 3: centroid X=75% → 75% > 70%, EAST of factory ✗
@@ -829,11 +659,11 @@
     <think>
     1. Analyze: Describe the satellite/aerial image - identify visible land cover types, structures, water bodies, vegetation patterns, road networks, and any notable features. Note the apparent resolution and image extent.
     2. Think: Based on the user's query and remote sensing principles, determine what geographic feature(s) need to be segmented. Consider the top-down perspective and how the target features would appear from above.
-    3. Remind: Remember that each segment_phrase call deletes all previous masks. Note if the query has spatial terms (left, right, near X, etc.) - you will filter masks IN YOUR THINKING after they're generated, NOT via a separate tool.
-    4. Plan: What text_prompt will you use? What alternatives if that fails?
-    5. Decide: Choose the text_prompt for segment_phrase.
+    3. Remind: Remember that segment_phrase_batch is ONE-SHOT (no retries). Include ALL synonyms (3-5) in one call. Note if the query has spatial terms (left, right, near X, etc.) - you will filter masks IN YOUR THINKING after they're generated, NOT via a separate tool.
+    4. Plan: What prompts will you include in text_prompts array? List 3-5 synonyms/variations.
+    5. Decide: Choose the text_prompts array for segment_phrase_batch.
     </think>
-    Then call segment_phrase with your chosen text_prompt.
+    Then call segment_phrase_batch with your chosen text_prompts array.
 
     Scenario 2: If there are two images (raw image + masked image), perform these steps:
     <think>
@@ -850,194 +680,10 @@
        - Coverage: Are target features fully covered or partially?
        - Extras: Any masks on non-target features?
        - Missing: Any target features without masks?
-    
-    3. SPATIAL POSITION ANALYSIS (CRITICAL for spatial queries):
-       
-       FIRST: Identify the TYPE of spatial query:
-       
-       A) SUPERLATIVE QUERIES ("leftmost", "rightmost", "topmost", "bottommost"):
-          STEP 1: RANK all masks by position (left-to-right or top-to-bottom)
-          STEP 2: IDENTIFY which mask(s) are at the extreme edge
-          STEP 3: CHECK if multiple masks form a cluster at that edge (vertically/horizontally aligned)
-          STEP 4: EXCLUDE any mask that is visibly NOT at the extreme
-          
-          Example for "leftmost":
-          "Ranking left to right: Mask 4 → Mask 1 → Mask 2 → Mask 3 → Mask 5
-           Masks 4 and 1 are both at the left edge (vertical cluster)
-           Mask 2 is visibly to the right of them → EXCLUDE
-           
-           Leftmost masks: [4, 1]"
-       
-       B) REGION QUERIES ("left", "in the left", "left portion", "left side"):
-          → Find masks CLEARLY on the left side (closer to left edge than to center)
-          → EXCLUDE masks near center or on right side
-          
-          Example for "in the left":
-          "Mask 1: near left edge → QUALIFIES
-           Mask 2: near left edge → QUALIFIES  
-           Mask 3: near center → TOO CENTRAL, exclude
-           Mask 4: right side → exclude
-           
-           Masks in left region: [1, 2]"
-       
-       C) HALF/QUADRANT QUERIES ("left half", "top-left corner"):
-          → Draw mental line through center
-          → Include all masks on correct side of that line
-       
-       D) RELATIVE POSITION QUERIES (near X, west of Y, adjacent to Z):
-          → VISUALLY locate the reference feature in the image
-          → Compare each mask's position TO that reference
-          
-          Example for "buildings near the river":
-          "Reference: River visible in right portion of image
-           Mask 1: far from river (on left side) → exclude
-           Mask 2: close to river → QUALIFIES
-           Mask 3: adjacent to river → QUALIFIES"
-    
-    4. CONFIDENCE-BASED EXAMINATION DECISION (MANDATORY):
-       
-       ⚠️ CRITICAL RULE: You CANNOT select MEDIUM or LOW confidence masks without examination!
-       
-       Among the spatially qualifying masks:
-       - Count HIGH confidence masks: [N]
-       - Count MEDIUM/LOW confidence masks: [M]
-       
-       IF M = 0 (all qualifying masks are HIGH confidence):
-       → "All qualifying masks are HIGH confidence. I can proceed to final selection."
-       → Go to step 5
-       
-       IF M > 0 (some qualifying masks are MEDIUM or LOW confidence):
-       → "Masks [X, Y, Z] among the spatially qualifying masks are MEDIUM or LOW confidence."
-       → "I MUST call examine_each_mask before making a final selection."
-       → STOP at step 6 and call examine_each_mask
-       → DO NOT select masks yet - wait for examination verdicts first
-    
-    5. ⚠️ MANDATORY FINAL GROUNDING CHECK (before making ANY selection):
-       
-       CRITICAL: You MUST verify that the masks match the PRIMARY TARGET in the user's query!
-       
-       Re-read the original user query and extract:
-       - PRIMARY TARGET feature type: [e.g., "houses", "planes", "roads", "bleachers"]
-       - Any modifiers: [e.g., color: "blue", position: "leftmost"]
-       
-       For EACH spatially qualifying mask, verify:
-       Q1: "Does this mask cover the PRIMARY TARGET feature type?"
-           → If mask is a DIFFERENT feature type (e.g., water when query asks for houses), it is WRONG!
-       
-       Q2: "Does the feature in the mask match ALL attributes from the query?"
-           → Check: color, size, shape match the query requirements
-       
-       DECISION:
-       - If qualifying masks DO match the PRIMARY TARGET → Proceed to step 6 (selection)
-       - If qualifying masks DO NOT match the PRIMARY TARGET → Call report_no_mask instead
-       
-       EXAMPLE OF WRONG SELECTION (DO NOT DO THIS):
-       Query: "blue houses"
-       Masks: [1, 2, 3] are water bodies (blue in color)
-       WRONG: "These are blue, so they match" ❌
-       CORRECT: "These are water bodies, not houses. The PRIMARY TARGET is 'houses'. 
-                 Even though they are blue, they are the wrong feature type.
-                 → Call report_no_mask"
-       
-       EXAMPLE OF CORRECT SELECTION:
-       Query: "blue houses"
-       Masks: [1, 2] are buildings with blue roofs
-       CORRECT: "These are houses with blue roofs. They match the PRIMARY TARGET 'houses' 
-                 and have the color attribute 'blue'.
-                 → Proceed to select_masks_and_return([1, 2])"
-    
-    6. DETERMINE FINAL MASK SELECTION (only if grounding check passes):
-       Based on your confidence, spatial analysis, AND grounding verification:
-       - Masks to select: [list of masks that match PRIMARY TARGET + spatial criteria]
-       - Why they qualify: [correct feature type + correct attributes + correct position]
-       - Masks excluded: [list] because: [wrong position / wrong feature type / etc.]
-       
-       IMPORTANT: There is NO separate spatial filtering tool. You filter masks by reasoning
-       in your thinking, then call select_masks_and_return with ONLY the qualifying masks.
-    
-    7. Plan Next Action:
-       a) If grounding check PASSES and all qualifying masks HIGH confidence → select_masks_and_return([mask numbers])
-       b) If grounding check PASSES but any qualifying mask MEDIUM/LOW confidence → examine_each_mask (then wait for verdicts)
-       c) If grounding check FAILS (masks don't match PRIMARY TARGET) → report_no_mask
-       d) If masks inadequate/wrong feature type → try different segment_phrase prompt
-       e) If small objects not detected → use HIERARCHICAL STRATEGY
-       f) If no valid targets exist → report_no_mask
-    
-    8. Decide: State your chosen action.
-       - If selecting: List final mask numbers and why each qualifies (must match PRIMARY TARGET!)
-       - If examining: List which masks need examination and why
-       - If reporting no mask: Explain why masks don't match the PRIMARY TARGET
-    </think>
-    
-    Then call the appropriate tool based on your decision in step 4:
-    - If all HIGH confidence: select_masks_and_return(final_answer_masks=[...])
-    - If any MEDIUM/LOW confidence: examine_each_mask()
-    
-    CRITICAL: Do NOT call any "filter" tool. The filtering happens in your thinking above.
-    
-    HIERARCHICAL FALLBACK (if direct segmentation fails for small objects):
-    If segment_phrase returns no masks for small objects (cars, ships, etc.):
-    1. Segment the CONTAINER (parking lot, harbor, road)
-    2. Note the container's approximate bounding box from the mask
-    3. Use segment_phrase_in_region with original target prompt focused on container area
-    4. Examine results with examine_each_mask if needed
-
-
-    Output Format for Scenario 1:
-    <think> State there is one image (raw satellite/aerial image). Following Scenario 1:
-    1. Analyze: [Describe visible features in the image]
-    2. Think: [Identify target features based on query]
-    3. Remind: [Note mask deletion behavior and plan accordingly]
-    4. Retry Count: [If this is a retry, state attempt number: "Attempt 1/2/3"]
-    5. Plan: [Outline segmentation strategy]
-       - If attempt ≤ 3: Try segment_phrase with different text_prompt
-       - If attempt = 4 and query has position: Use segment_phrase_in_region with estimated bbox
-       - If attempt = 4 and no position: Use hierarchical strategy or report_no_mask
-    6. Decide: [Choose tool and parameters] </think>
-    
-    Then call ONE of:
-    - segment_phrase(text_prompt="YOUR_CHOSEN_PROMPT")
-    - segment_phrase_in_region(text_prompt="YOUR_PROMPT", bbox=[x1, y1, x2, y2])
-    - report_no_mask()
-    
-    IMPORTANT: You MUST output the tool call in EXACTLY one of these formats:
-    - segment_phrase(text_prompt="building")
-    - segment_phrase_in_region(text_prompt="building", bbox=[0.0, 0.0, 0.4, 1.0])
-    - report_no_mask()
-    
-    Stop immediately after the tool call. Do not add any text after it.
-
-
-    Output Format for Scenario 2:
-    <think> State there are two images. Following Scenario 2:
-    
-    1. QUICK SCAN (from overview only):
-       - Mask 1: [HIGH/MEDIUM/LOW] confidence - [brief reason]
-       - Mask 2: [HIGH/MEDIUM/LOW] confidence - [brief reason]
-       - ... (for each mask)
-    
-    2. Analyze Results:
-       - Total masks: [N]
-       - Retry count: [Current attempt number: 1, 2, 3, or 4+]
-       - Expected targets covered: [Yes/No/Partial]
-       - Any extras or missing: [describe]
        
        ⚠️ IF N = 0 (no masks generated):
-       - This is attempt [1/2/3]
-       - IF attempt < 3:
-         → "No masks found. I will try attempt [N+1] with a different text_prompt."
-         → Call segment_phrase with synonym/variation
-       - IF attempt = 3 and query has POSITION term:
-         → "After 3 failed attempts, switching to ZOOM/CROP strategy."
-         → "Position term: [term] → Focus on [region] portion"
-         → "Estimated bbox: [calculated bbox]"
-         → Call segment_phrase_in_region
-       - IF attempt = 3 and query about SMALL OBJECTS:
-         → "After 3 attempts, switching to HIERARCHICAL strategy."
-         → Call segment_phrase for CONTAINER object
-       - IF attempt = 3 and no special case:
-         → "After 3 attempts with no results, target objects do not exist."
-         → Call report_no_mask()
+       → This is a ONE-SHOT system. No retries allowed.
+       → Call report_no_mask() immediately.
     
     2b. ⚠️ MULTI-STEP PLAN CHECK (CRITICAL - check BEFORE continuing to spatial analysis):
         
@@ -1047,84 +693,74 @@
         
         Q: Are these masks the PRIMARY TARGET, or are they INTERMEDIATE/REFERENCE objects?
         
+        STEP 1 - Check if query is BROAD/GENERIC:
+        BROAD QUERY INDICATORS:
+        - Contains "all objects", "all features", "everything", "any", "anything"
+        - Generic categories like "objects", "features", "structures", "entities"
+        - No specific object type mentioned (e.g., "segment all" vs "segment all cars")
+        
+        IF BROAD QUERY:
+        → Check if current masks are VALID INSTANCES of the broad category
+        → Examples of valid instances:
+           • Query: "all objects" + Current masks: "vehicles" → VALID (vehicles are objects) ✓
+           • Query: "all features" + Current masks: "buildings" → VALID (buildings are features) ✓
+           • Query: "everything" + Current masks: "roads" → VALID (roads are things) ✓
+        → If VALID INSTANCES: "These masks ARE valid instances of PRIMARY TARGET. Proceeding."
+        → Continue to step 3 (they are PRIMARY TARGET, not intermediate)
+        
+        STEP 2 - Check for SPATIAL RELATIONSHIP patterns (X on Y, X near Y):
         INTERMEDIATE/REFERENCE INDICATORS:
         - Query asks for "X on Y" (e.g., "signs on roads", "cars in parking lot", "ships in harbor")
           → Current masks are Y (roads, parking lot, harbor) = INTERMEDIATE ✓
+          → X and Y are DIFFERENT object types
         - Query asks for "X near Y" (e.g., "buildings near lake")
           → Current masks are Y (lake) = REFERENCE ✓
-        - You explicitly planned a multi-step strategy in previous turn
-          → Current masks are step 1 = INTERMEDIATE ✓
+          → X and Y are DIFFERENT object types
+        - Query asks for "X in Y" (e.g., "boats in harbor")
+          → Current masks are Y (harbor) = INTERMEDIATE ✓
+          → X and Y are DIFFERENT object types
         
         IF INTERMEDIATE/REFERENCE:
         → "These masks are [INTERMEDIATE/REFERENCE] objects, not the PRIMARY TARGET."
-        → "I planned to: [state the original multi-step plan]"
-        → "Next step: Use segment_phrase_in_region to search for PRIMARY TARGET within/near these masks"
-        
-        CALCULATE BBOX FROM CURRENT MASKS:
-        
-        For "X ON Y" queries (signs on roads, cars in parking lot):
-        - Analyze mask positions/extents
-        - Create bbox that COVERS ALL masks with padding
-        - Example: If road masks span X=100-800, Y=200-700 on 1000x1000 image
-          → bbox = [0.05, 0.15, 0.85, 0.75] (with 10% padding)
-        
-        For "X NEAR Y" queries (buildings near lake):
-        - Identify reference mask center and extent
-        - Create bbox AROUND reference with 20-30% padding
-        - Example: Lake at X=600-800, Y=400-600
-          → bbox = [0.5, 0.3, 0.9, 0.7] (with 25% padding)
-        
-        For "X IN Y" queries (ships in harbor):
-        - Use the reference mask extent directly
-        - Example: Harbor mask at X=400-900, Y=300-800
-          → bbox = [0.4, 0.3, 0.9, 0.8]
-        
-        → Call segment_phrase_in_region(text_prompt="PRIMARY TARGET", bbox=[...])
-        → STOP - do NOT proceed to spatial analysis or grounding check
+        → This is a ONE-SHOT system. If PRIMARY TARGET wasn't in the batch, call report_no_mask.
+        → STOP - do NOT proceed to spatial analysis or grounding check on intermediate objects
         
         IF PRIMARY TARGET:
         → "These masks ARE the PRIMARY TARGET. Proceeding to spatial analysis."
         → Continue to step 3
         
-        EXAMPLE 1 - INTERMEDIATE (roads when query asks for signs):
-        Query: "All white direction signs on roads"
-        Current masks: 4 road masks
+        EXAMPLE 1 - BROAD QUERY (vehicles are valid instances of "all objects"):
+        Query: "segment all objects"
+        Current masks: 5 vehicle masks
         
         <think>
-        PRIMARY TARGET: "white direction signs"
-        Current masks: "roads"
+        PRIMARY TARGET: "all objects" (BROAD QUERY)
+        Current masks: "vehicles"
         
-        Q: Are current masks the PRIMARY TARGET?
-        → NO. Query asks for "signs ON roads". Current masks are roads (INTERMEDIATE).
+        STEP 1 - Is this a BROAD QUERY?
+        → YES. Query contains "all objects" (generic category).
         
-        Multi-step plan status:
-        - Step 1 (completed): Segment roads ✓
-        - Step 2 (next): Segment signs WITHIN road regions
+        Q: Are current masks VALID INSTANCES of the broad category?
+        → YES. Vehicles ARE objects. These are valid instances of "all objects".
         
-        Next action: Use segment_phrase_in_region to search for white signs on the road masks.
-        
-        Calculate bbox from road masks:
-        Looking at the 4 road masks:
-        - Mask 1: Road intersection, approximately X=200-400, Y=300-500
-        - Mask 2: Highway, approximately X=100-900, Y=100-800
-        - Mask 3: Highway, approximately X=200-800, Y=200-700
-        - Mask 4: Road, approximately X=300-600, Y=400-700
-        
-        Overall extent: X spans roughly 100-900 (10%-90%), Y spans roughly 100-800 (10%-80%)
-        With padding: bbox = [0.0, 0.0, 1.0, 1.0] (use full image since roads span most of it)
-        
-        I will call segment_phrase_in_region to search for white signs across all roads.
+        These masks ARE valid instances of PRIMARY TARGET. Proceeding to spatial analysis.
         </think>
         
-        segment_phrase_in_region(text_prompt="white sign", bbox=[0.0, 0.0, 1.0, 1.0])
+        (Continue to step 3)
         
         EXAMPLE 2 - PRIMARY TARGET (planes when query asks for planes):
         Query: "leftmost white planes"
-        Current masks: Planes
+        Current masks: 7 plane masks
         
         <think>
         PRIMARY TARGET: "planes"
         Current masks: "planes"
+        
+        STEP 1 - Is this a BROAD QUERY?
+        → NO. Query asks for specific object type: "planes"
+        
+        STEP 2 - Check for SPATIAL RELATIONSHIP:
+        → NO. No "X on Y" or "X near Y" pattern.
         
         Q: Are current masks the PRIMARY TARGET?
         → YES. Query asks for planes, and these are planes.
@@ -1176,7 +812,7 @@
     5. ⚠️ MANDATORY FINAL GROUNDING CHECK (only if step 2b confirmed masks ARE PRIMARY TARGET):
        
        SKIP THIS STEP if step 2b identified masks as INTERMEDIATE/REFERENCE!
-       (If INTERMEDIATE, you should have already called segment_phrase_in_region)
+       (If INTERMEDIATE, you should call report_no_mask since this is ONE-SHOT)
        
        Re-read original query: "[state the original user query]"
        PRIMARY TARGET: [e.g., "houses", "planes", "bleachers", "roads"]
@@ -1189,26 +825,154 @@
        GROUNDING VERIFICATION:
        - Do qualifying masks match PRIMARY TARGET feature type? [YES/NO]
        - If NO: "These masks are [actual feature type], not [PRIMARY TARGET]."
-         → "I have exhausted all strategies (tried [list strategies])."
-         → "Call report_no_mask()"
+         → Call report_no_mask()
        - If YES: "Masks match PRIMARY TARGET. → Proceed to selection"
     
     6. FINAL SELECTION (only if grounding check passes):
        Based on grounding verification, confidence, and spatial analysis:
        - Masks to select: [list of masks that MATCH PRIMARY TARGET + position]
-       - Why they qualify: [correct feature type + attributes + position]
+       - Why they qualify: [correct feature type + correct attributes + correct position]
+       - Excluded masks: [list] because: [reason]
+       
+       IMPORTANT: There is NO separate spatial filtering tool. You filter masks by reasoning
+       in your thinking, then call select_masks_and_return with ONLY the qualifying masks.
+    
+    7. Decide: State your chosen action.
+       - If selecting: List final mask numbers and why each qualifies (must match PRIMARY TARGET!)
+       - If examining: List which masks need examination and why
+       - If reporting no mask: Explain why masks don't match the PRIMARY TARGET
+    </think>
+    
+    Then call the appropriate tool based on your decision:
+    - If all HIGH confidence: select_masks_and_return(final_answer_masks=[...])
+    - If any MEDIUM/LOW confidence: examine_each_mask()
+    - If no masks or wrong feature type: report_no_mask()
+    
+    CRITICAL: Do NOT call any "filter" tool. The filtering happens in your thinking above.
+
+
+    Output Format for Scenario 1:
+    <think> State there is one image (raw satellite/aerial image). Following Scenario 1:
+    1. Analyze: [Describe visible features in the image]
+    2. Think: [Identify target features based on query]
+    3. Remind: [Note ONE-SHOT behavior - include ALL synonyms in one batch call. Note spatial terms for later filtering.]
+    4. Plan: [List 3-5 synonyms/variations for segment_phrase_batch]
+       
+       Example planning:
+       - Query: "windmills" → text_prompts: ["windmill", "wind turbine", "turbine", "tower", "rotor"]
+       - Query: "cars" → text_prompts: ["car", "vehicle", "automobile", "sedan", "auto"]
+       - Query: "white planes" → text_prompts: ["white plane", "white aircraft", "white airplane", "white jet"]
+       
+    5. Decide: [Choose text_prompts array (3-5 variations)] </think>
+    
+    Then call:
+    segment_phrase_batch(text_prompts=["prompt1", "prompt2", "prompt3", "prompt4"])
+    
+    OR if obviously no matches in image:
+    report_no_mask()
+    
+    IMPORTANT: You MUST output the tool call in EXACTLY one of these formats:
+    - segment_phrase_batch(text_prompts=["windmill", "wind turbine", "turbine", "tower"])
+    - report_no_mask()
+    
+    Stop immediately after the tool call. Do not add any text after it.
+
+
+    Output Format for Scenario 2:
+    <think> State there are two images. Following Scenario 2:
+    
+    1. QUICK SCAN (from overview only):
+       - Mask 1: [HIGH/MEDIUM/LOW] confidence - [brief reason]
+       - Mask 2: [HIGH/MEDIUM/LOW] confidence - [brief reason]
+       - ... (for each mask)
+    
+    2. Analyze Results:
+       - Total masks: [N]
+       - Expected targets covered: [Yes/No/Partial]
+       - Any extras or missing: [describe]
+       
+       ⚠️ IF N = 0 (no masks generated):
+       → ONE-SHOT system - no retries allowed.
+       → Call report_no_mask() immediately.
+    
+    2b. ⚠️ MULTI-STEP PLAN CHECK (CRITICAL):
+        
+        Re-read original query: "[state the original user query]"
+        PRIMARY TARGET: [what the query actually asks for]
+        Current masks: [what feature type the current masks represent]
+        
+        Q: Are these masks the PRIMARY TARGET?
+        
+        IF PRIMARY TARGET:
+        → "These masks ARE the PRIMARY TARGET. Proceeding to spatial analysis."
+        → Continue to step 3
+        
+        IF NOT PRIMARY TARGET (wrong feature type):
+        → "These masks are [wrong type], not [PRIMARY TARGET]."
+        → ONE-SHOT system - call report_no_mask()
+    
+    3. SPATIAL/RELATIVE POSITION ANALYSIS (if query has position terms and N > 0):
+       
+       Query type: [SUPERLATIVE / REGION / HALF / RELATIVE]
+       
+       STEP 1 - RANK masks by visual position:
+       "Ranking from [left to right / top to bottom]:
+        [Most extreme] → Mask X → Mask Y → Mask Z → [Least extreme]"
+       
+       STEP 2 - IDENTIFY clusters or groups:
+       "Masks X and Y form a cluster at the [edge/position]
+        Mask Z is visibly [separated from / to the right of / etc.] this cluster"
+       
+       STEP 3 - APPLY criteria:
+       For SUPERLATIVE: "Only masks at the extreme edge qualify"
+       For REGION: "Only masks clearly in that region (not near center) qualify"
+       
+       QUALIFYING MASKS (after spatial filtering): [list numbers]
+       NON-QUALIFYING MASKS (after spatial filtering): [list numbers]
+    
+    4. CONFIDENCE-BASED EXAMINATION DECISION:
+       
+       ⚠️ CRITICAL: You CANNOT select MEDIUM or LOW confidence masks without examination!
+       
+       Count HIGH confidence masks among spatially qualifying masks: [N]
+       Count MEDIUM/LOW confidence masks among spatially qualifying masks: [M]
+       
+       PATH A - If ALL spatially qualifying masks are HIGH confidence (M = 0):
+       → "All qualifying masks are HIGH confidence. Proceeding to final selection."
+       → Go to step 5 and call select_masks_and_return
+       
+       PATH B - If ANY spatially qualifying mask is MEDIUM or LOW confidence (M > 0):
+       → "Masks [X, Y, Z] are MEDIUM or LOW confidence and MUST be examined before selection."
+       → STOP HERE and call examine_each_mask
+    
+    5. ⚠️ MANDATORY FINAL GROUNDING CHECK:
+       
+       Re-read original query: "[state the original user query]"
+       PRIMARY TARGET: [e.g., "houses", "planes", "bleachers", "roads"]
+       Attributes: [e.g., color: "blue", position: "leftmost"]
+       
+       For each spatially qualifying mask:
+       - Mask [N]: Is this a [PRIMARY TARGET]? [YES/NO]
+       
+       GROUNDING VERIFICATION:
+       - Do qualifying masks match PRIMARY TARGET feature type? [YES/NO]
+       - If NO: → Call report_no_mask()
+       - If YES: "Masks match PRIMARY TARGET. → Proceed to selection"
+    
+    6. FINAL SELECTION (only if grounding check passes):
+       - Masks to select: [list of masks that MATCH PRIMARY TARGET + position]
+       - Why they qualify: [correct feature type + correct attributes + correct position]
        - Excluded masks: [list] because: [reason]
     
     7. Decide: State your chosen action with reasoning.
     </think>
     
     ═══════════════════════════════════════════════════════════════════════════════
-    OUTPUT: Choose ONE based on your multi-step plan check, grounding, and confidence:
+    OUTPUT: Choose ONE based on your analysis:
     ═══════════════════════════════════════════════════════════════════════════════
     
-    PATH A - Masks are INTERMEDIATE/REFERENCE (not PRIMARY TARGET) - Continue plan:
-    segment_phrase_in_region(text_prompt="[PRIMARY TARGET]", bbox=[x1, y1, x2, y2])
-    (Use this when current masks are roads/parking lots/containers but query asks for objects ON/IN them)
+    PATH A - No masks found (N=0):
+    report_no_mask()
     
     PATH B - Masks are PRIMARY TARGET, grounding passes, all HIGH confidence:
     select_masks_and_return(final_answer_masks=[1, 2, 3])
@@ -1217,20 +981,15 @@
     examine_each_mask()
     (Then wait for verdicts and select Accepted masks in next turn)
     
-    PATH D - Masks are PRIMARY TARGET but grounding fails (wrong feature type):
+    PATH D - Masks are wrong feature type (grounding fails):
     report_no_mask()
-    
-    PATH E - Retry needed (N=0 and attempts < 3):
-    segment_phrase(text_prompt="[synonym]")
     
     ═══════════════════════════════════════════════════════════════════════════════
     
     IMPORTANT: You MUST output the tool call in EXACTLY one of these formats:
-    - segment_phrase_in_region(text_prompt="white sign", bbox=[0.0, 0.0, 1.0, 1.0])
     - select_masks_and_return(final_answer_masks=[1, 4, 5])
     - examine_each_mask()
     - report_no_mask()
-    - segment_phrase(text_prompt="building")
     
     Stop immediately after the tool call. Do not add any text after it.
 
@@ -1255,4 +1014,3 @@
     Begin!
 
     Below are the satellite/aerial image and the initial user input query:
-
