@@ -1,7 +1,7 @@
 import axios from 'axios';
 
-const API_ENDPOINT = import.meta.env.VITE_API_ENDPOINT || 'https://aryan-don357--sam3-agent-sam3-segment.modal.run';
-const INFER_ENDPOINT = import.meta.env.VITE_INFER_ENDPOINT || 'https://aryan-don357--sam3-agent-sam3-infer.modal.run';
+const API_ENDPOINT = import.meta.env.VITE_API_ENDPOINT || 'https://srinjoy59--sam3-agent-pyramidal-sam3-segment.modal.run';
+const COUNT_ENDPOINT = import.meta.env.VITE_COUNT_ENDPOINT || 'https://srinjoy59--sam3-agent-pyramidal-sam3-count.modal.run';
 
 export interface LLMConfig {
   base_url: string;
@@ -20,8 +20,8 @@ export interface SegmentRequest {
   confidence_threshold?: number;
 }
 
-export interface InferRequest {
-  text_prompt: string;
+export interface CountRequest {
+  prompt: string;
   image_b64?: string;
   image_url?: string;
   confidence_threshold?: number;
@@ -60,16 +60,23 @@ export interface SegmentResponse {
   traceback?: string;
 }
 
-export interface InferResponse {
+export interface CountResponse {
   status: 'success' | 'error';
+  count?: number;
+  object_type?: string;
+  confidence_summary?: {
+    high: number;
+    medium: number;
+    low: number;
+  };
+  detections?: Array<{
+    box: number[];
+    mask_rle: { counts: string | number[]; size: number[] };
+    score: number;
+    scale: number;
+  }>;
   orig_img_h?: number;
   orig_img_w?: number;
-  pred_boxes?: number[][];
-  pred_masks?: Array<{
-    counts: string | number[];
-    size: number[];
-  }>;
-  pred_scores?: number[];
   message?: string;
   traceback?: string;
 }
@@ -115,12 +122,12 @@ export async function segmentImage(
   }
 }
 
-export async function inferImage(
-  request: InferRequest,
+export async function countImage(
+  request: CountRequest,
   signal?: AbortSignal
-): Promise<InferResponse> {
+): Promise<CountResponse> {
   try {
-    const response = await axios.post<InferResponse>(INFER_ENDPOINT, request, {
+    const response = await axios.post<CountResponse>(COUNT_ENDPOINT, request, {
       headers: {
         'Content-Type': 'application/json',
       },

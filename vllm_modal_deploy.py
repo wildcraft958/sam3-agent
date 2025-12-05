@@ -141,7 +141,18 @@ def vllm_server():
     os.environ["HF_HUB_CACHE"] = str(model_cache_path)
     
     # Create FastAPI app for proxy
+    from fastapi.middleware.cors import CORSMiddleware
     app = fastapi.FastAPI(title="Qwen3-VL vLLM Server")
+    
+    # Add CORS middleware to allow frontend access
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],  # Allow all origins for API access
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    
     http_client = httpx.AsyncClient(timeout=300.0)
     
     vllm_process = None

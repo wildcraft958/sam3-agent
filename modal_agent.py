@@ -54,7 +54,7 @@ import modal
 # Modal app + image
 # ------------------------------------------------------------------------------
 
-app = modal.App("sam3-agent")
+app = modal.App("sam3-agent-pyramidal")
 
 REPO_ROOT = Path(__file__).resolve().parent
 LOCAL_SAM3_DIR = REPO_ROOT / "sam3"
@@ -1176,100 +1176,10 @@ class SAM3Model:
 
 
 # ------------------------------------------------------------------------------
-# HTTP endpoint: /sam3/infer (SAM3-only inference, no LLM/agent)
+# HTTP endpoints
 # ------------------------------------------------------------------------------
 
 from modal import fastapi_endpoint  # lightweight JSON endpoint decorator
-
-
-@app.function(timeout=900, image=image)
-@fastapi_endpoint(method="POST")
-def sam3_infer(body: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    HTTP endpoint for Pyramidal SAM3 inference (no LLM/agent logic):
-    
-    POST /sam3/infer
-    JSON body:
-    {
-      "text_prompt": "...",
-      "image_b64": "...",   # or "image_url": "https://..."
-      "confidence_threshold": 0.5,  # Optional: confidence threshold (0.0-1.0)
-      "pyramidal_config": {         # Optional: pyramidal configuration
-        "tile_size": 512,
-        "overlap_ratio": 0.15,
-        "scales": [1.0, 0.5],
-        "batch_size": 16,
-        "iou_threshold": 0.5
-      }
-    }
-    
-    Returns:
-    {
-      "orig_img_h": int,
-      "orig_img_w": int,
-      "pred_boxes": [[x, y, w, h], ...],  # normalized [0, 1]
-      "pred_masks": ["rle_dict", ...],
-      "pred_scores": [float, ...],
-      "pyramidal_stats": {...}
-    }
-    """
-    # Basic validation
-    if "text_prompt" not in body:
-        return {"status": "error", "message": "Missing 'text_prompt' in request body."}
-    
-    text_prompt = body["text_prompt"]
-    confidence_threshold = body.get("confidence_threshold")
-    pyramidal_config = body.get("pyramidal_config")
-    
-    # Get image bytes from either image_b64 or image_url
-    if "image_b64" in body:
-        try:
-            image_bytes = base64.b64decode(body["image_b64"])
-            print(f"✓ Decoded image from base64 ({len(image_bytes)} bytes)")
-        except Exception as e:
-            return {"status": "error", "message": f"Invalid base64 in 'image_b64': {e}."}
-    elif "image_url" in body:
-        import requests
-        try:
-            print(f"📥 Downloading image from URL: {body['image_url']}")
-            resp = requests.get(body["image_url"], timeout=30)
-            resp.raise_for_status()
-            image_bytes = resp.content
-            print(f"✓ Downloaded image ({len(image_bytes)} bytes)")
-        except Exception as e:
-            return {
-                "status": "error",
-                "message": f"Failed to download 'image_url': {e}",
-            }
-    else:
-        return {
-            "status": "error",
-            "message": "Provide either 'image_b64' or 'image_url' in the request body.",
-        }
-    
-    # Call the GPU-backed pyramidal SAM3 inference
-    try:
-        print(f"📞 Calling sam3_infer_only (pyramidal) with prompt: '{text_prompt}'")
-        result = SAM3Model().sam3_infer_only.remote(
-            image_bytes=image_bytes,
-            text_prompt=text_prompt,
-            confidence_threshold=confidence_threshold,
-            pyramidal_config=pyramidal_config,
-        )
-        print(f"✓ sam3_infer_only returned {len(result.get('pred_boxes', []))} predictions")
-        return result
-        
-    except Exception as e:
-        import traceback
-        error_msg = str(e)
-        traceback_str = traceback.format_exc()
-        print(f"❌ Error in sam3_infer: {error_msg}")
-        print(traceback_str)
-        return {
-            "status": "error",
-            "message": error_msg,
-            "traceback": traceback_str,
-        }
 
 
 # ------------------------------------------------------------------------------

@@ -54,6 +54,21 @@ def visualize(
                 # Old format: string counts, reconstruct size from orig_img_h/w
                 rle_masks.append({"size": (orig_h, orig_w), "counts": rle})
         binary_masks = [mask_utils.decode(rle) for rle in rle_masks]
+        
+        # Resize masks to match original image dimensions if needed (pyramidal processing fix)
+        resized_binary_masks = []
+        for mask in binary_masks:
+            if mask.shape[0] != orig_h or mask.shape[1] != orig_w:
+                # Resize mask to match original image dimensions
+                resized_mask = cv2.resize(
+                    mask.astype(np.float32),
+                    (orig_w, orig_h),  # cv2.resize uses (width, height)
+                    interpolation=cv2.INTER_NEAREST
+                )
+                resized_binary_masks.append((resized_mask > 0.5).astype(np.uint8))
+            else:
+                resized_binary_masks.append(mask)
+        binary_masks = resized_binary_masks
 
         img_bgr = cv2.imread(img_path)
         if img_bgr is None:
@@ -118,6 +133,15 @@ def visualize(
             # Old format: string counts, reconstruct size
             rle_i = {"size": (orig_h, orig_w), "counts": mask_data}
         bin_i = mask_utils.decode(rle_i)
+        
+        # Resize mask if needed (pyramidal processing fix)
+        if bin_i.shape[0] != orig_h or bin_i.shape[1] != orig_w:
+            bin_i = cv2.resize(
+                bin_i.astype(np.float32),
+                (orig_w, orig_h),
+                interpolation=cv2.INTER_NEAREST
+            )
+            bin_i = (bin_i > 0.5).astype(np.uint8)
 
         img_bgr_i = cv2.imread(img_path)
         if img_bgr_i is None:
