@@ -1240,72 +1240,81 @@ Output ONLY the alternative keyword (2-3 words max), nothing else:"""
             confidence_threshold: Optional confidence threshold (0.0-1.0)
             pyramidal_config: Optional pyramidal configuration dict
         """
-        # Set confidence threshold
+        # Validate confidence threshold before proceeding
         if confidence_threshold is not None:
             if not 0.0 <= confidence_threshold <= 1.0:
                 return {
                     "status": "error",
                     "message": f"confidence_threshold must be between 0.0 and 1.0, got {confidence_threshold}"
                 }
-            self.processor.confidence_threshold = confidence_threshold
-            print(f"✓ Using confidence threshold: {confidence_threshold}")
         
-        # Set default pyramidal config
-        config = {
-            "tile_size": 512,
-            "overlap_ratio": 0.15,
-            "scales": [1.0, 0.5],
-            "batch_size": 16,
-            "iou_threshold": 0.5,
-        }
-        if pyramidal_config:
-            config.update(pyramidal_config)
-        
-        # Run pyramidal inference
-        result = self._sam3_pyramidal_infer_impl(
-            image_bytes=image_bytes,
-            text_prompt=text_prompt,
-            tile_size=config["tile_size"],
-            overlap_ratio=config["overlap_ratio"],
-            scales=config["scales"],
-            iou_threshold=config["iou_threshold"],
-            confidence_threshold=self.processor.confidence_threshold,
-            batch_size=config["batch_size"],
-        )
-        
-        if result["status"] != "success":
-            return result
-        
-        # Convert to expected output format (normalized boxes in xywh)
-        orig_w = result["orig_img_w"]
-        orig_h = result["orig_img_h"]
-        detections = result["detections"]
-        
-        pred_boxes = []
-        pred_masks = []
-        pred_scores = []
-        
-        for det in detections:
-            box = det["box"]  # [x1, y1, x2, y2] in pixels
-            x1, y1, x2, y2 = box
-            # Normalize to [0, 1] and convert to xywh (center x, center y, width, height)
-            cx = ((x1 + x2) / 2) / orig_w
-            cy = ((y1 + y2) / 2) / orig_h
-            w = (x2 - x1) / orig_w
-            h = (y2 - y1) / orig_h
-            pred_boxes.append([cx, cy, w, h])
-            pred_masks.append(det["mask_rle"])
-            pred_scores.append(det["score"])
-        
-        return {
-            "status": "success",
-            "orig_img_h": orig_h,
-            "orig_img_w": orig_w,
-            "pred_boxes": pred_boxes,
-            "pred_masks": pred_masks,
-            "pred_scores": pred_scores,
-            "pyramidal_stats": result.get("pyramidal_stats", {}),
-        }
+        # Save original threshold and restore in finally block
+        original_threshold = self.processor.confidence_threshold
+        try:
+            # Set confidence threshold if provided
+            if confidence_threshold is not None:
+                self.processor.confidence_threshold = confidence_threshold
+                print(f"✓ Using confidence threshold: {confidence_threshold}")
+            
+            # Set default pyramidal config
+            config = {
+                "tile_size": 512,
+                "overlap_ratio": 0.15,
+                "scales": [1.0, 0.5],
+                "batch_size": 16,
+                "iou_threshold": 0.5,
+            }
+            if pyramidal_config:
+                config.update(pyramidal_config)
+            
+            # Run pyramidal inference
+            result = self._sam3_pyramidal_infer_impl(
+                image_bytes=image_bytes,
+                text_prompt=text_prompt,
+                tile_size=config["tile_size"],
+                overlap_ratio=config["overlap_ratio"],
+                scales=config["scales"],
+                iou_threshold=config["iou_threshold"],
+                confidence_threshold=self.processor.confidence_threshold,
+                batch_size=config["batch_size"],
+            )
+            
+            if result["status"] != "success":
+                return result
+            
+            # Convert to expected output format (normalized boxes in xywh)
+            orig_w = result["orig_img_w"]
+            orig_h = result["orig_img_h"]
+            detections = result["detections"]
+            
+            pred_boxes = []
+            pred_masks = []
+            pred_scores = []
+            
+            for det in detections:
+                box = det["box"]  # [x1, y1, x2, y2] in pixels
+                x1, y1, x2, y2 = box
+                # Normalize to [0, 1] and convert to xywh (center x, center y, width, height)
+                cx = ((x1 + x2) / 2) / orig_w
+                cy = ((y1 + y2) / 2) / orig_h
+                w = (x2 - x1) / orig_w
+                h = (y2 - y1) / orig_h
+                pred_boxes.append([cx, cy, w, h])
+                pred_masks.append(det["mask_rle"])
+                pred_scores.append(det["score"])
+            
+            return {
+                "status": "success",
+                "orig_img_h": orig_h,
+                "orig_img_w": orig_w,
+                "pred_boxes": pred_boxes,
+                "pred_masks": pred_masks,
+                "pred_scores": pred_scores,
+                "pyramidal_stats": result.get("pyramidal_stats", {}),
+            }
+        finally:
+            # Always restore original threshold
+            self.processor.confidence_threshold = original_threshold
 
     # --------------------------------------------------------------------------
     # Pyramidal Tiling Helper Methods
@@ -1602,6 +1611,10 @@ Output ONLY the alternative keyword (2-3 words max), nothing else:"""
         # Set defaults
         scales = sorted(scales or [1.0, 0.5], reverse=True)
         
+        # Validate scales to prevent division by zero
+        if any(s <= 0 for s in scales):
+            return {"status": "error", "message": "scales must contain positive values only (> 0)"}
+        
         # Set processor confidence threshold
         # NOTE: We set a LOWER threshold in processor to get more candidates,
         # then filter by confidence_threshold in the detection loop.
@@ -1733,7 +1746,7 @@ Output ONLY the alternative keyword (2-3 words max), nothing else:"""
                                     )
                                     
                                     # Encode mask as RLE at GLOBAL resolution
-                                    mask_rle = rle_encode(torch.tensor(mask_binary_global).unsqueeze(0))[0]
+                                    mask_rle = rle_encode(torch.tensor(mask_binary_global, dtype=torch.bool).unsqueeze(0))[0]
                                     
                                     # Validate mask-to-box alignment: RLE size must match original image
                                     if mask_rle.get("size") != [orig_h, orig_w]:
@@ -2183,7 +2196,6 @@ Output ONLY the alternative keyword (2-3 words max), nothing else:"""
                 continue
         
         # Calculate coverage percentage
-        total_image_area_m2 = total_image_pixels * (gsd ** 2)
         coverage_percentage = (total_pixel_area / total_image_pixels * 100) if total_image_pixels > 0 else 0
         total_real_area_m2 = total_pixel_area * (gsd ** 2)
         
@@ -2481,138 +2493,147 @@ Now analyze the image and query."""
         except Exception as e:
             return {"status": "error", "message": f"Invalid llm_config: {str(e)}"}
 
-        # Set confidence threshold if provided
+        # Validate confidence threshold before proceeding
         if confidence_threshold is not None:
             if not 0.0 <= confidence_threshold <= 1.0:
                 return {
                     "status": "error",
                     "message": f"confidence_threshold must be between 0.0 and 1.0, got {confidence_threshold}"
                 }
-            self.processor.confidence_threshold = confidence_threshold
-            print(f"✓ Using confidence threshold: {confidence_threshold}")
 
-        # Cap max_tokens to 4096 to allow longer reasoning outputs for 32B Thinking model
-        requested_max_tokens = llm_config["max_tokens"]
-        safe_max_tokens = min(requested_max_tokens, 4096)
-        
-        send_generate_request = partial(
-            send_generate_request_orig,
-            server_url=llm_config["base_url"],
-            model=llm_config["model"],
-            api_key=llm_config["api_key"],
-            max_tokens=safe_max_tokens,
-        )
+        # Save original threshold and restore in finally block
+        original_threshold = self.processor.confidence_threshold
+        try:
+            # Set confidence threshold if provided
+            if confidence_threshold is not None:
+                self.processor.confidence_threshold = confidence_threshold
+                print(f"✓ Using confidence threshold: {confidence_threshold}")
 
-        # Use pyramidal batch SAM3 instead of raw SAM3
-        call_sam_service = partial(
-            self.call_sam_service_pyramidal,
-            pyramidal_config={
-                "tile_size": 512,
-                "overlap_ratio": 0.15,
-                "scales": [1.0, 0.5],
-                "batch_size": 16,
-                "iou_threshold": 0.5,
-            },
-        )
+            # Cap max_tokens to 4096 to allow longer reasoning outputs for 32B Thinking model
+            requested_max_tokens = llm_config["max_tokens"]
+            safe_max_tokens = min(requested_max_tokens, 4096)
+            
+            send_generate_request = partial(
+                send_generate_request_orig,
+                server_url=llm_config["base_url"],
+                model=llm_config["model"],
+                api_key=llm_config["api_key"],
+                max_tokens=safe_max_tokens,
+            )
 
-        with tempfile.TemporaryDirectory() as temp_dir:
-            image_path = os.path.join(temp_dir, "input_image.jpg")
-            with open(image_path, "wb") as f:
-                f.write(image_bytes)
+            # Use pyramidal batch SAM3 instead of raw SAM3
+            call_sam_service = partial(
+                self.call_sam_service_pyramidal,
+                pyramidal_config={
+                    "tile_size": 512,
+                    "overlap_ratio": 0.15,
+                    "scales": [1.0, 0.5],
+                    "batch_size": 16,
+                    "iou_threshold": 0.5,
+                },
+            )
 
-            output_dir = os.path.join(temp_dir, "output")
-            os.makedirs(output_dir, exist_ok=True)
+            with tempfile.TemporaryDirectory() as temp_dir:
+                image_path = os.path.join(temp_dir, "input_image.jpg")
+                with open(image_path, "wb") as f:
+                    f.write(image_bytes)
 
-            try:
-                # Call agent_inference directly to get data from return values
-                from sam3.agent.agent_core import agent_inference
-                
-                agent_history, final_output_dict, rendered_final_output = agent_inference(
-                    image_path,
-                    prompt,
-                    send_generate_request=send_generate_request,
-                    call_sam_service=call_sam_service,
-                    debug=debug,
-                    output_dir=output_dir,
-                    max_generations=10,  # Limit LLM API calls to 7
-                )
+                output_dir = os.path.join(temp_dir, "output")
+                os.makedirs(output_dir, exist_ok=True)
 
-                if not final_output_dict:
+                try:
+                    # Call agent_inference directly to get data from return values
+                    from sam3.agent.agent_core import agent_inference
+                    
+                    agent_history, final_output_dict, rendered_final_output = agent_inference(
+                        image_path,
+                        prompt,
+                        send_generate_request=send_generate_request,
+                        call_sam_service=call_sam_service,
+                        debug=debug,
+                        output_dir=output_dir,
+                        max_generations=10,  # Limit LLM API calls to 7
+                    )
+
+                    if not final_output_dict:
+                        return {
+                            "status": "error",
+                            "message": "No output generated by SAM3.",
+                        }
+
+                    # Debug visualization image - convert PIL Image to base64
+                    debug_image_b64 = None
+                    if debug and rendered_final_output:
+                        import io
+                        buffer = io.BytesIO()
+                        rendered_final_output.save(buffer, format="PNG")
+                        debug_image_b64 = base64.b64encode(buffer.getvalue()).decode("ascii")
+
+                    # Extract data from final_output_dict (which contains the SAM3 results)
+                    # The final_output_dict should have pred_boxes, pred_masks, pred_scores, etc.
+                    raw_json = final_output_dict.copy()
+                    
+                    # Remove file paths that aren't needed in response
+                    raw_json.pop("original_image_path", None)
+                    raw_json.pop("output_image_path", None)
+                    raw_json.pop("text_prompt", None)
+                    raw_json.pop("image_path", None)
+
+                    # Try to normalize "regions" field if present, otherwise construct from pred_boxes/pred_masks
+                    regions = (
+                        raw_json.get("regions")
+                        or raw_json.get("objects")
+                        or raw_json.get("instances")
+                        or []
+                    )
+                    
+                    # If no regions found, construct from pred_boxes and pred_masks
+                    if not regions and "pred_boxes" in raw_json and "pred_masks" in raw_json:
+                        pred_boxes = raw_json.get("pred_boxes", [])
+                        pred_masks = raw_json.get("pred_masks", [])
+                        pred_scores = raw_json.get("pred_scores", [])
+                        regions = [
+                            {
+                                "bbox": box,
+                                "mask": mask,
+                                "score": pred_scores[i] if i < len(pred_scores) else None,
+                            }
+                            for i, (box, mask) in enumerate(zip(pred_boxes, pred_masks))
+                        ]
+
+                    summary = (
+                        f"SAM3 returned {len(regions)} regions for prompt: {prompt}"
+                    )
+
                     return {
-                        "status": "error",
-                        "message": "No output generated by SAM3.",
+                        "status": "success",
+                        "summary": summary,
+                        "regions": regions,
+                        "debug_image_b64": debug_image_b64,
+                        "raw_sam3_json": raw_json,
+                        "agent_history": agent_history,  # Include agent history for debugging
+                        "llm_config": {
+                            "name": llm_config["name"],
+                            "model": llm_config["model"],
+                            "base_url": llm_config["base_url"],
+                        },
                     }
 
-                # Debug visualization image - convert PIL Image to base64
-                debug_image_b64 = None
-                if debug and rendered_final_output:
-                    import io
-                    buffer = io.BytesIO()
-                    rendered_final_output.save(buffer, format="PNG")
-                    debug_image_b64 = base64.b64encode(buffer.getvalue()).decode("ascii")
+                except Exception as e:
+                    import traceback
 
-                # Extract data from final_output_dict (which contains the SAM3 results)
-                # The final_output_dict should have pred_boxes, pred_masks, pred_scores, etc.
-                raw_json = final_output_dict.copy()
-                
-                # Remove file paths that aren't needed in response
-                raw_json.pop("original_image_path", None)
-                raw_json.pop("output_image_path", None)
-                raw_json.pop("text_prompt", None)
-                raw_json.pop("image_path", None)
-
-                # Try to normalize "regions" field if present, otherwise construct from pred_boxes/pred_masks
-                regions = (
-                    raw_json.get("regions")
-                    or raw_json.get("objects")
-                    or raw_json.get("instances")
-                    or []
-                )
-                
-                # If no regions found, construct from pred_boxes and pred_masks
-                if not regions and "pred_boxes" in raw_json and "pred_masks" in raw_json:
-                    pred_boxes = raw_json.get("pred_boxes", [])
-                    pred_masks = raw_json.get("pred_masks", [])
-                    pred_scores = raw_json.get("pred_scores", [])
-                    regions = [
-                        {
-                            "bbox": box,
-                            "mask": mask,
-                            "score": pred_scores[i] if i < len(pred_scores) else None,
-                        }
-                        for i, (box, mask) in enumerate(zip(pred_boxes, pred_masks))
-                    ]
-
-                summary = (
-                    f"SAM3 returned {len(regions)} regions for prompt: {prompt}"
-                )
-
-                return {
-                    "status": "success",
-                    "summary": summary,
-                    "regions": regions,
-                    "debug_image_b64": debug_image_b64,
-                    "raw_sam3_json": raw_json,
-                    "agent_history": agent_history,  # Include agent history for debugging
-                    "llm_config": {
-                        "name": llm_config["name"],
-                        "model": llm_config["model"],
-                        "base_url": llm_config["base_url"],
-                    },
-                }
-
-            except Exception as e:
-                import traceback
-
-                return {
-                    "status": "error",
-                    "message": str(e),
-                    "traceback": traceback.format_exc(),
-                    "llm_config": {
-                        "name": llm_config.get("name", "unknown"),
-                        "model": llm_config.get("model", "unknown"),
-                    },
-                }
+                    return {
+                        "status": "error",
+                        "message": str(e),
+                        "traceback": traceback.format_exc(),
+                        "llm_config": {
+                            "name": llm_config.get("name", "unknown"),
+                            "model": llm_config.get("model", "unknown"),
+                        },
+                    }
+        finally:
+            # Always restore original threshold
+            self.processor.confidence_threshold = original_threshold
 
 
 # ------------------------------------------------------------------------------
