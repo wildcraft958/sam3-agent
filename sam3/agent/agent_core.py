@@ -3,6 +3,7 @@
 import copy
 import json
 import os
+import time
 
 import cv2
 from PIL import Image
@@ -556,6 +557,12 @@ def agent_inference(
         debug: Whether to enable debug mode
         max_generations: Maximum number of send_generate_request calls allowed (default: 100)
     """
+    # Validate input image path
+    if not os.path.exists(img_path):
+        raise FileNotFoundError(f"Input image not found: {img_path}")
+    if not os.path.isfile(img_path):
+        raise ValueError(f"Image path is not a file: {img_path}")
+    
     # setup dir
     sam_output_dir = os.path.join(output_dir, "sam_out")
     error_save_dir = os.path.join(output_dir, "none_out")
@@ -620,7 +627,21 @@ def agent_inference(
             f"Exceeded maximum number of allowed generation requests ({max_generations})"
         )
     generation_count += 1
-    generated_response = send_generate_request(messages, tools=TOOLS)
+    
+    # Retry logic for LLM calls with exponential backoff
+    max_retries = 3
+    generated_response = None
+    for attempt in range(max_retries):
+        generated_response = send_generate_request(messages, tools=TOOLS)
+        if generated_response is not None:
+            break
+        if attempt < max_retries - 1:
+            wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
+            print(f"⚠️ Attempt {attempt + 1}/{max_retries}: LLM returned None, retrying in {wait_time}s...")
+            time.sleep(wait_time)
+        else:
+            print(f"❌ All {max_retries} attempts failed: LLM returned None")
+    
     print(f"\n>>> MLLM Response [start]\n{generated_response}\n<<< MLLM Response [end]\n")
     
     # Handle structured tool calls or plain text response
@@ -751,14 +772,28 @@ def agent_inference(
             if not isinstance(function_arguments, dict):
                 print(f"⚠️ Warning: Parsed arguments is not a dict, got {type(function_arguments)}")
                 print(f"   Arguments: {function_arguments}")
+                print(f"   Function: {function_name}")
+                print(f"   Tool call ID: {tool_call_id}")
+                print(f"   Full generated response type: {type(generated_response)}")
+                if isinstance(generated_response, dict):
+                    print(f"   Generated response keys: {list(generated_response.keys())}")
                 # Try to wrap it in a dict or use empty dict
                 function_arguments = {"value": function_arguments} if function_arguments else {}
         except json.JSONDecodeError as e:
             print(f"❌ Error: Invalid JSON in tool call arguments")
-            print(f"   Arguments string: {function_arguments_str[:200]}")
+            print(f"   Function: {function_name}")
+            print(f"   Tool call ID: {tool_call_id}")
+            print(f"   Arguments string (full): {function_arguments_str}")
             print(f"   JSON error: {e}")
-            print(f"   Tool call: {function_name}")
-            raise ValueError(f"Invalid JSON in tool call arguments for '{function_name}': {function_arguments_str[:100]}..., error: {e}")
+            print(f"   Error position: line {e.lineno}, column {e.colno}" if hasattr(e, 'lineno') else "")
+            print(f"   Full generated response type: {type(generated_response)}")
+            if isinstance(generated_response, dict):
+                print(f"   Generated response keys: {list(generated_response.keys())}")
+                print(f"   Generated response preview: {str(generated_response)[:500]}")
+            elif isinstance(generated_response, str):
+                print(f"   Generated response preview: {generated_response[:500]}")
+            print(f"   Generated text: {generated_text[:500] if generated_text else 'None'}")
+            raise ValueError(f"Invalid JSON in tool call arguments for '{function_name}': {function_arguments_str[:200]}..., error: {e}")
         
         # Build tool_call dict in expected format
         tool_call = {
@@ -1616,7 +1651,21 @@ def agent_inference(
         print("\n\n")
         print("-" * 30 + f" Round {str(generation_count + 1)}" + "-" * 30)
         print("\n\n")
-        generated_response = send_generate_request(messages, tools=TOOLS)
+        
+        # Retry logic for LLM calls with exponential backoff
+        max_retries = 3
+        generated_response = None
+        for attempt in range(max_retries):
+            generated_response = send_generate_request(messages, tools=TOOLS)
+            if generated_response is not None:
+                break
+            if attempt < max_retries - 1:
+                wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
+                print(f"⚠️ Attempt {attempt + 1}/{max_retries}: LLM returned None, retrying in {wait_time}s...")
+                time.sleep(wait_time)
+            else:
+                print(f"❌ All {max_retries} attempts failed: LLM returned None")
+        
         print(f"\n>>> MLLM Response [start]\n{generated_response}\n<<< MLLM Response [end]\n")
 
     print("\n\n>>> SAM 3 Agent execution ended.\n\n")

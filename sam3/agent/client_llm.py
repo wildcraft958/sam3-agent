@@ -122,6 +122,18 @@ def send_generate_request(
         print(f"   Server URL: {server_url}")
         print(f"   Messages: {len(processed_messages)} messages")
         
+        # Log message structure for debugging
+        message_types = {}
+        for msg in processed_messages:
+            role = msg.get("role", "unknown")
+            if "content" in msg:
+                if isinstance(msg["content"], list):
+                    content_types = [c.get("type", "unknown") for c in msg["content"] if isinstance(c, dict)]
+                    message_types[role] = content_types
+                else:
+                    message_types[role] = type(msg["content"]).__name__
+        print(f"   Message structure: {message_types}")
+        
         # Prepare request parameters
         # NOTE: We intentionally DO NOT pass tools to the API request
         # because the OpenAI SDK automatically adds tool_choice="auto" when tools are present,
@@ -134,7 +146,8 @@ def send_generate_request(
             "n": 1,
         }
         
-        response = client.chat.completions.create(**request_params)
+        # Add timeout to prevent hanging requests (2 minutes default)
+        response = client.chat.completions.create(**request_params, timeout=120.0)
 
         # Extract the response
         if response.choices and len(response.choices) > 0:
@@ -144,16 +157,46 @@ def send_generate_request(
             content = message.content
             if content is None:
                 print(f"⚠️ Warning: Response content is None")
-                print(f"   Full response: {response}")
+                print(f"   Model: {model}")
+                print(f"   Server URL: {server_url}")
+                print(f"   Request params: model={request_params['model']}, max_tokens={request_params['max_tokens']}, n={request_params['n']}")
+                print(f"   Message count: {len(processed_messages)}")
+                print(f"   Full response object type: {type(response)}")
+                print(f"   Response object attributes: {dir(response) if hasattr(response, '__dict__') else 'N/A'}")
+                print(f"   Message object type: {type(message)}")
+                print(f"   Message attributes: {dir(message) if hasattr(message, '__dict__') else 'N/A'}")
+                print(f"   Finish reason: {response.choices[0].finish_reason if response.choices else 'N/A'}")
+                if hasattr(message, 'tool_calls') and message.tool_calls:
+                    print(f"   Tool calls present: {len(message.tool_calls)} tool call(s)")
+                    print(f"   Tool calls: {message.tool_calls}")
+                    print(f"   Note: Content may be None when tool_calls are present")
+                else:
+                    print(f"   No tool_calls attribute or tool_calls is empty")
             return content
         else:
             print(f"❌ Unexpected response format: {response}")
+            print(f"   Model: {model}")
+            print(f"   Server URL: {server_url}")
+            print(f"   Request params: model={request_params['model']}, max_tokens={request_params['max_tokens']}, n={request_params['n']}")
+            print(f"   Message count: {len(processed_messages)}")
+            print(f"   Response type: {type(response)}")
+            print(f"   Response keys/attributes: {dir(response) if hasattr(response, '__dict__') else 'N/A'}")
+            if hasattr(response, 'choices'):
+                print(f"   Choices: {response.choices}")
+                print(f"   Choices length: {len(response.choices) if response.choices else 0}")
+            else:
+                print(f"   Response has no 'choices' attribute")
             return None
 
     except Exception as e:
         import traceback
         print(f"❌ Request failed: {e}")
-        print(f"   Traceback: {traceback.format_exc()}")
+        print(f"   Model: {model}")
+        print(f"   Server URL: {server_url}")
+        print(f"   Message count: {len(processed_messages)}")
+        print(f"   Request params: model={request_params.get('model', 'N/A')}, max_tokens={request_params.get('max_tokens', 'N/A')}")
+        print(f"   Exception type: {type(e).__name__}")
+        print(f"   Full traceback: {traceback.format_exc()}")
         # Re-raise to see the actual error in logs
         raise
 

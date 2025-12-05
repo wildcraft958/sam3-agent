@@ -97,7 +97,7 @@ response = requests.post(
         "prompt": "segment all cars",
         "image_b64": image_b64,
         "llm_config": {
-            "base_url": "https://aryan-don357--qwen3-vl-vllm-server-30b-vllm-server.modal.run/",
+            "base_url": "https://srinjoy59--qwen3-vl-vllm-server-30b-vllm-server.modal.run/",
             "model": "Qwen/Qwen3-VL-30B-A3B-Instruct",
             "api_key": "",
             "name": "custom-llm",

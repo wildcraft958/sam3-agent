@@ -44,9 +44,12 @@ import sys
 import json
 import base64
 import tempfile
+import re
+import io
 from functools import partial
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
+from pydantic import BaseModel, Field, ValidationError
 
 import modal
 
@@ -88,12 +91,133 @@ image = (
         "scipy",
         "fastapi",  # Required for fastapi_endpoint decorator
         "requests",  # For downloading images from URLs
+        "pydantic",  # For VLM response validation
     )
     .env({"PYTHONPATH": "/root/sam3"})
     # use repo-relative paths so deploy works regardless of cwd
     .add_local_dir(str(LOCAL_SAM3_DIR), remote_path="/root/sam3/sam3")
     .add_local_dir(str(LOCAL_ASSETS_DIR), remote_path="/root/sam3/assets")
 )
+
+# ------------------------------------------------------------------------------
+# VLM Interface for Qwen3-VL
+# ------------------------------------------------------------------------------
+
+class VLMInterface:
+    """
+    Interface for Qwen3-VL via vLLM API.
+    
+    Wraps vLLM API calls with image support for prompt refinement,
+    detection verification, and rephrasing.
+    """
+    
+    def __init__(self, base_url: str, model: str, api_key: str = "", timeout: int = 120):
+        self.base_url = base_url.rstrip('/')
+        self.endpoint = f"{self.base_url}/chat/completions"
+        self.model = model
+        self.api_key = api_key
+        self.timeout = timeout
+    
+    @staticmethod
+    def encode_image_to_base64(image) -> str:
+        """Encode PIL Image to base64 string"""
+        from PIL import Image as PILImage
+        buffered = io.BytesIO()
+        if isinstance(image, PILImage.Image):
+            image.save(buffered, format="JPEG")
+        else:
+            # Assume it's already bytes
+            buffered.write(image)
+        return base64.b64encode(buffered.getvalue()).decode('utf-8')
+    
+    def query(self, image, prompt: str, max_tokens: int = 512, temperature: float = 0.7) -> Optional[str]:
+        """
+        Query the vLLM API with an image and text prompt.
+        
+        Args:
+            image: PIL Image or image bytes
+            prompt: Text prompt/question
+            max_tokens: Maximum response length
+            temperature: Sampling temperature (0-1)
+            
+        Returns:
+            Generated text response or None on error
+        """
+        import requests
+        from PIL import Image
+        
+        # Handle image input
+        if isinstance(image, bytes):
+            image_base64 = base64.b64encode(image).decode('utf-8')
+        else:
+            image_base64 = self.encode_image_to_base64(image)
+        
+        # OpenAI-compatible message format
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}
+                    }
+                ]
+            }
+        ]
+        
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "max_tokens": min(max_tokens, 8192),  # Server caps at 8192
+            "temperature": temperature
+        }
+        
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        
+        try:
+            response = requests.post(
+                self.endpoint,
+                json=payload,
+                headers=headers,
+                timeout=self.timeout
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                return result["choices"][0]["message"]["content"]
+            else:
+                print(f"❌ vLLM API Error: {response.status_code}")
+                print(f"Response: {response.text[:500]}")
+                return None
+        
+        except requests.exceptions.Timeout:
+            print(f"❌ Request timeout after {self.timeout}s")
+            return None
+        except Exception as e:
+            print(f"❌ API Exception: {e}")
+            return None
+
+
+# ------------------------------------------------------------------------------
+# Pydantic models for VLM response validation
+# ------------------------------------------------------------------------------
+
+class KeywordExtractionResponse(BaseModel):
+    """Pydantic model for keyword extraction VLM responses"""
+    keywords: List[str] = Field(..., min_length=1, max_length=4, description="List of 1-4 keywords for segmentation")
+    primary_object: str = Field(..., description="Primary object type")
+    reasoning: Optional[str] = Field(None, description="Optional reasoning for keyword selection")
+
+
+class VerificationResponse(BaseModel):
+    """Pydantic model for detection verification VLM responses"""
+    is_valid: bool = Field(..., description="Whether the detection is valid")
+    confidence: float = Field(..., ge=0.0, le=1.0, description="Confidence score between 0 and 1")
+    reasoning: Optional[str] = Field(None, description="Optional reasoning for validation")
+
 
 # ------------------------------------------------------------------------------
 # LLM configuration helpers
@@ -189,6 +313,299 @@ class SAM3Model:
         # Use lower confidence threshold (0.25) to get more results, can be adjusted per request
         self.processor = Sam3Processor(self.model, confidence_threshold=0.4)
         print(f"SAM3 model loaded successfully with confidence threshold: {self.processor.confidence_threshold}")
+
+    # --------------------------------------------------------------------------
+    # VLM Helper Methods
+    # --------------------------------------------------------------------------
+
+    def _refine_prompt_with_vlm(self, image_bytes: bytes, user_query: str, vlm: VLMInterface) -> str:
+        """
+        Convert user query to SAM3-friendly visual prompt using VLM.
+        
+        Args:
+            image_bytes: Raw image bytes
+            user_query: Natural language query from user
+            vlm: VLMInterface instance
+            
+        Returns:
+            Visual prompt string (1-3 words) for SAM3 segmentation
+        """
+        from PIL import Image
+        import io
+        
+        image = Image.open(io.BytesIO(image_bytes)).convert('RGB')
+        
+        REFINEMENT_TEMPLATE = """You are a visual descriptor for object segmentation on satellite images. You ONLY describe what objects look like, you NEVER count or answer questions. NEVER INCLUDE NUMBERS IN ANY FORM.
+
+YOUR TASK:
+Extract the OBJECT NAME from the user query and describe it for visual detection.
+- Output: 1-3 words maximum
+- Format: [object name] or [attribute + object name]
+- Use singular form
+- Focus on visual characteristics: color, shape, size
+
+USER QUERY: "{query}"
+
+OUTPUT ONLY the visual descriptor (1-3 words), nothing else. No explanation, no JSON, just the descriptor.
+
+Examples:
+- "How many planes on the tarmac?" → "white plane"
+- "Count the storage tanks" → "circular tank"
+- "How many buildings?" → "building"
+- "Find all red cars" → "red car"
+
+Now extract the visual descriptor:"""
+        
+        prompt = REFINEMENT_TEMPLATE.format(query=user_query)
+        
+        try:
+            response = vlm.query(image, prompt, max_tokens=64, temperature=0.3)
+            
+            if response is None:
+                print("⚠ VLM returned None for prompt refinement, using fallback")
+                print(f"   Original query: {user_query}")
+                return user_query.strip().lower().split()[0] if user_query.strip() else "object"
+            
+            # Extract the visual prompt (first line, strip whitespace)
+            visual_prompt = response.strip().split('\n')[0].strip()
+            # Remove quotes if present
+            visual_prompt = visual_prompt.strip('"\'')
+            
+            if not visual_prompt:
+                print("⚠ Empty VLM response, using fallback")
+                print(f"   Original query: {user_query}")
+                print(f"   Full VLM response: {response[:200]}")
+                return user_query.strip().lower().split()[0] if user_query.strip() else "object"
+            
+            print(f"✓ VLM refined prompt: '{user_query}' → '{visual_prompt}'")
+            return visual_prompt
+            
+        except Exception as e:
+            print(f"⚠ Error in prompt refinement: {e}")
+            print(f"   Original query: {user_query}")
+            import traceback
+            print(f"   Traceback: {traceback.format_exc()[:500]}")
+            return user_query.strip().lower().split()[0] if user_query.strip() else "object"
+
+    def _verify_detections_with_vlm(self, image, detections: List[Dict], 
+                                     query: str, visual_prompt: str, vlm: VLMInterface) -> List[Dict]:
+        """
+        Verify each detection matches the query using VLM yes/no validation.
+        
+        Args:
+            image: PIL Image of the full image
+            detections: List of detection dicts with 'box', 'score', 'mask_rle'
+            query: Original user query
+            visual_prompt: Visual prompt used for segmentation
+            vlm: VLMInterface instance
+            
+        Returns:
+            List of verified detections (only those that pass VLM validation)
+        """
+        from PIL import Image
+        
+        VERIFICATION_TEMPLATE = """You are a visual verification assistant. 
+Answer ONLY with 'yes' or 'no'. DEFAULT 'yes'
+
+TASK:
+1. Look only at the region inside the bounding box.
+2. Check if the object CLEARLY matches the USER QUERY or VISUAL PROMPT.
+
+USER QUERY: {query}
+VISUAL PROMPT: {visual_prompt}
+
+Answer 'yes' if:
+- The object in the box matches the query/prompt
+- It's a complete object (not partial/edge artifact)
+- It has expected visual characteristics
+
+Answer 'no' if:
+- Wrong object type
+- Partial/edge artifact
+- Doesn't match visual characteristics
+
+Answer ONLY: yes or no"""
+        
+        verified = []
+        rejected = []
+        
+        for idx, det in enumerate(detections):
+            try:
+                box = det["box"]  # [x1, y1, x2, y2]
+                x1, y1, x2, y2 = map(int, box)
+                x1, y1 = max(0, x1), max(0, y1)
+                x2, y2 = min(image.width, x2), min(image.height, y2)
+                
+                if x2 <= x1 or y2 <= y1:
+                    rejected.append((idx, "Invalid bounding box"))
+                    continue
+                
+                # Crop the detection region
+                cropped = image.crop((x1, y1, x2, y2))
+                
+                prompt = VERIFICATION_TEMPLATE.format(
+                    query=query,
+                    visual_prompt=visual_prompt
+                )
+                
+                response = vlm.query(cropped, prompt, max_tokens=16, temperature=0.1)
+                
+                if response is None:
+                    # Default to yes if VLM fails (conservative)
+                    print(f"  Detection {idx+1}: VLM verification failed (None response), accepting by default")
+                    print(f"    Query: {query}")
+                    print(f"    Visual prompt: {visual_prompt}")
+                    verified.append(det)
+                    continue
+                
+                # Extract yes/no from response
+                response_lower = response.strip().lower()
+                is_valid = "yes" in response_lower and "no" not in response_lower[:10]
+                
+                if is_valid:
+                    verified.append(det)
+                    print(f"  Detection {idx+1}: ✓ Verified by VLM")
+                else:
+                    rejected.append((idx, f"VLM rejected: {response[:50]}"))
+                    print(f"  Detection {idx+1}: ✗ Rejected by VLM")
+                    print(f"    VLM response: {response[:100]}")
+                    
+            except Exception as e:
+                print(f"  Detection {idx+1}: Error in verification: {e}, accepting by default")
+                print(f"    Query: {query}")
+                print(f"    Visual prompt: {visual_prompt}")
+                import traceback
+                print(f"    Traceback: {traceback.format_exc()[:300]}")
+                verified.append(det)  # Conservative: accept on error
+                continue
+        
+        print(f"✓ VLM verification: {len(verified)}/{len(detections)} detections verified")
+        return verified
+
+    def _rephrase_prompt_with_vlm(self, image_bytes: bytes, original_query: str, 
+                                   previous_prompt: str, vlm: VLMInterface) -> str:
+        """
+        Generate alternative prompt when no detections found.
+        
+        Args:
+            image_bytes: Raw image bytes
+            original_query: Original user query
+            previous_prompt: Previous visual prompt that found nothing
+            vlm: VLMInterface instance
+            
+        Returns:
+            Alternative visual prompt (synonym/variation)
+        """
+        from PIL import Image
+        import io
+        
+        image = Image.open(io.BytesIO(image_bytes)).convert('RGB')
+        
+        REPHRASE_TEMPLATE = """You are a visual descriptor for object segmentation. Generate alternative keywords (max 2-3 words).
+
+Original question: "{query}"
+Previous visual prompt that found nothing: "{previous_prompt}"
+
+USE CLOSELY RELATED SYNONYMS OF THE PREVIOUS PROMPT.
+- Try true synonyms (same meaning)
+- Try color variations
+- Try singular/plural
+- DO NOT generalize too much (avoid "object", "thing", "area")
+
+Examples:
+- "white plane" → "aircraft" or "airplane" or "gray plane"
+- "circular tank" → "round container" or "cylindrical tank"
+- "building" → "structure" or "house"
+
+Output ONLY the alternative keyword (2-3 words max), nothing else:"""
+        
+        prompt = REPHRASE_TEMPLATE.format(
+            query=original_query,
+            previous_prompt=previous_prompt
+        )
+        
+        try:
+            response = vlm.query(image, prompt, max_tokens=64, temperature=0.5)
+            
+            if response is None:
+                print("⚠ VLM returned None for rephrase, using fallback")
+                print(f"   Original query: {original_query}")
+                print(f"   Previous prompt: {previous_prompt}")
+                return previous_prompt  # Return same prompt as fallback
+            
+            # Extract the alternative prompt
+            alternative = response.strip().split('\n')[0].strip()
+            alternative = alternative.strip('"\'')
+            
+            if not alternative or alternative.lower() == previous_prompt.lower():
+                print("⚠ VLM rephrase same as previous, using variation")
+                print(f"   Original query: {original_query}")
+                print(f"   Previous prompt: {previous_prompt}")
+                print(f"   VLM response: {response[:200]}")
+                # Simple fallback: try adding "object" or using first word
+                words = previous_prompt.split()
+                if len(words) > 1:
+                    alternative = words[-1]  # Use last word
+                else:
+                    alternative = previous_prompt + " object"
+            
+            print(f"✓ VLM rephrased: '{previous_prompt}' → '{alternative}'")
+            return alternative
+            
+        except Exception as e:
+            print(f"⚠ Error in rephrase: {e}, using fallback")
+            print(f"   Original query: {original_query}")
+            print(f"   Previous prompt: {previous_prompt}")
+            import traceback
+            print(f"   Traceback: {traceback.format_exc()[:300]}")
+            return previous_prompt
+
+    @staticmethod
+    def _calculate_mask_area(mask_rle: Dict, gsd: float, image_shape: Tuple[int, int]) -> float:
+        """
+        Calculate area from RLE mask in square meters.
+        
+        Args:
+            mask_rle: RLE-encoded mask dict with 'counts' and 'size'
+            gsd: Ground Sample Distance (meters/pixel)
+            image_shape: (height, width) of original image
+            
+        Returns:
+            Area in square meters
+        """
+        import numpy as np
+        import pycocotools.mask as mask_utils
+        
+        try:
+            # Decode RLE to binary mask using pycocotools
+            # mask_rle should be a dict with 'counts' and 'size' keys
+            mask_binary = mask_utils.decode(mask_rle)
+            
+            # Handle mask dimensions
+            if mask_binary.ndim > 2:
+                mask_binary = mask_binary.squeeze()
+            
+            if mask_binary.ndim == 3:
+                mask_binary = mask_binary[:, :, 0] if mask_binary.shape[2] == 1 else mask_binary.max(axis=2)
+            
+            # Resize mask if needed to match image shape
+            if mask_binary.shape[:2] != image_shape:
+                from scipy.ndimage import zoom
+                zoom_factors = (
+                    image_shape[0] / mask_binary.shape[0],
+                    image_shape[1] / mask_binary.shape[1]
+                )
+                mask_binary = zoom(mask_binary.astype(float), zoom_factors, order=0) > 0.5
+            
+            # Count pixels and calculate area
+            pixel_count = np.sum(mask_binary > 0)
+            area_m2 = pixel_count * (gsd ** 2)
+            
+            return area_m2
+            
+        except Exception as e:
+            print(f"⚠ Error calculating mask area: {e}")
+            return 0.0
 
     @modal.method()
     def sam3_infer_only(
@@ -358,6 +775,77 @@ class SAM3Model:
         
         return box
 
+    def _transform_mask_to_original(self, mask_binary, tile_offset, scale: float, orig_size, tile_size):
+        """
+        Transform binary mask from tile coordinates to original image space.
+        
+        Args:
+            mask_binary: Binary mask numpy array at tile resolution [H, W]
+            tile_offset: (offset_x, offset_y) of tile in scaled image
+            scale: Scale factor used for this pyramid level
+            orig_size: (width, height) of original image
+            tile_size: (width, height) of tile
+            
+        Returns:
+            Binary mask numpy array at original image resolution [orig_h, orig_w]
+        """
+        import numpy as np
+        from scipy import ndimage
+        
+        offset_x, offset_y = tile_offset
+        orig_w, orig_h = orig_size
+        tile_w, tile_h = tile_size
+        
+        # Create full-size mask at original resolution
+        global_mask = np.zeros((orig_h, orig_w), dtype=np.uint8)
+        
+        # If scale != 1.0, we need to resize the mask to account for scaling
+        if scale != 1.0:
+            # Resize mask to original scale
+            # The tile covers a region that was scaled down, so we need to scale it back up
+            scale_factor = 1.0 / scale
+            resized_h = int(tile_h * scale_factor)
+            resized_w = int(tile_w * scale_factor)
+            
+            # Use scipy zoom for resizing (faster than PIL for binary masks)
+            zoom_factors = (resized_h / mask_binary.shape[0], resized_w / mask_binary.shape[1])
+            mask_resized = ndimage.zoom(mask_binary.astype(float), zoom_factors, order=0) > 0.5
+            mask_resized = mask_resized.astype(np.uint8)
+        else:
+            mask_resized = mask_binary.astype(np.uint8)
+            resized_h, resized_w = tile_h, tile_w
+        
+        # Calculate position in original image
+        # The offset is in scaled image coordinates, so scale it back
+        orig_offset_x = int(offset_x / scale)
+        orig_offset_y = int(offset_y / scale)
+        
+        # Calculate placement bounds (clip to image bounds)
+        y_start = max(0, orig_offset_y)
+        y_end = min(orig_h, orig_offset_y + resized_h)
+        x_start = max(0, orig_offset_x)
+        x_end = min(orig_w, orig_offset_x + resized_w)
+        
+        # Calculate source bounds (for the mask)
+        src_y_start = max(0, -orig_offset_y)
+        src_y_end = src_y_start + (y_end - y_start)
+        src_x_start = max(0, -orig_offset_x)
+        src_x_end = src_x_start + (x_end - x_start)
+        
+        # Ensure we don't exceed mask bounds
+        if src_y_end > mask_resized.shape[0]:
+            src_y_end = mask_resized.shape[0]
+            y_end = y_start + (src_y_end - src_y_start)
+        if src_x_end > mask_resized.shape[1]:
+            src_x_end = mask_resized.shape[1]
+            x_end = x_start + (src_x_end - src_x_start)
+        
+        # Place the mask
+        if y_end > y_start and x_end > x_start:
+            global_mask[y_start:y_end, x_start:x_end] = mask_resized[src_y_start:src_y_end, src_x_start:src_x_end]
+        
+        return global_mask
+
     def _calculate_iou(self, box1, box2) -> float:
         """
         Calculate Intersection over Union between two boxes.
@@ -438,9 +926,20 @@ class SAM3Model:
             elif isinstance(value, dict):
                 # Recursively extract from nested dicts
                 extracted[key] = self._extract_tile_backbone(value, tile_idx, batch_size)
-            elif isinstance(value, list) and len(value) == batch_size:
-                # Handle lists that match batch size
-                extracted[key] = [value[tile_idx]]
+            elif isinstance(value, list):
+                # Check if list contains tensors that need batch extraction
+                if len(value) > 0 and isinstance(value[0], torch.Tensor):
+                    # List of tensors (e.g., backbone_fpn, vision_pos_enc)
+                    # Extract single tile from each tensor's batch dimension
+                    extracted[key] = [
+                        t[tile_idx:tile_idx+1] if t.shape[0] == batch_size else t
+                        for t in value
+                    ]
+                elif len(value) == batch_size:
+                    # List of items per batch (original logic)
+                    extracted[key] = [value[tile_idx]]
+                else:
+                    extracted[key] = value
             else:
                 extracted[key] = value
         
@@ -489,8 +988,14 @@ class SAM3Model:
         scales = sorted(scales or [1.0, 0.5], reverse=True)
         
         # Set processor confidence threshold
+        # NOTE: We set a LOWER threshold in processor to get more candidates,
+        # then filter by confidence_threshold in the detection loop.
+        # This avoids double filtering (processor + loop) being too aggressive.
         original_threshold = self.processor.confidence_threshold
-        self.processor.confidence_threshold = confidence_threshold
+        # Use half the threshold in processor to get more candidates for NMS
+        processor_threshold = max(0.1, confidence_threshold * 0.5)
+        self.processor.confidence_threshold = processor_threshold
+        print(f"✓ Confidence thresholds: processor={processor_threshold:.2f}, final={confidence_threshold:.2f}")
         
         # Load image
         image = Image.open(io.BytesIO(image_bytes)).convert('RGB')
@@ -548,12 +1053,21 @@ class SAM3Model:
                 for i in range(len(tile_images)):
                     try:
                         # Extract per-tile backbone
+                        extracted_backbone = self._extract_tile_backbone(
+                            batch_state['backbone_out'], i, actual_batch_size
+                        )
+                        
+                        # Debug: Verify backbone_fpn extraction
+                        if 'backbone_fpn' in extracted_backbone:
+                            fpn_list = extracted_backbone['backbone_fpn']
+                            if isinstance(fpn_list, list) and len(fpn_list) > 0:
+                                first_fpn_shape = fpn_list[0].shape if hasattr(fpn_list[0], 'shape') else 'N/A'
+                                print(f"  ✓ Tile {i}: backbone_fpn extracted, first level shape: {first_fpn_shape}")
+                        
                         tile_state = {
                             'original_height': batch_state['original_heights'][i],
                             'original_width': batch_state['original_widths'][i],
-                            'backbone_out': self._extract_tile_backbone(
-                                batch_state['backbone_out'], i, actual_batch_size
-                            )
+                            'backbone_out': extracted_backbone
                         }
                         
                         # ================================================================
@@ -578,9 +1092,13 @@ class SAM3Model:
                             masks = tile_state['masks'].cpu()
                             scores = tile_state['scores'].cpu().numpy()
                             
+                            # Get tile dimensions for mask transformation
+                            tile_h = tile_state['original_height']
+                            tile_w = tile_state['original_width']
+                            
                             for j in range(len(boxes)):
                                 if scores[j] >= confidence_threshold:
-                                    # Transform to original coords
+                                    # Transform box to original coords
                                     orig_box = self._transform_box_to_original(
                                         boxes[j], tile_offsets[i], scale, (orig_w, orig_h)
                                     )
@@ -589,9 +1107,23 @@ class SAM3Model:
                                     if orig_box[2] <= orig_box[0] or orig_box[3] <= orig_box[1]:
                                         continue  # Skip degenerate boxes
                                     
-                                    # Encode mask as RLE (at tile resolution)
-                                    mask_binary = masks[j].squeeze().numpy() > 0.5
-                                    mask_rle = rle_encode(torch.tensor(mask_binary).unsqueeze(0))[0]
+                                    # Transform mask to original coords (CRITICAL: mask must match box coordinates)
+                                    mask_binary_tile = masks[j].squeeze().numpy() > 0.5
+                                    mask_binary_global = self._transform_mask_to_original(
+                                        mask_binary_tile, 
+                                        tile_offsets[i], 
+                                        scale, 
+                                        (orig_w, orig_h),
+                                        (tile_w, tile_h)
+                                    )
+                                    
+                                    # Encode mask as RLE at GLOBAL resolution
+                                    mask_rle = rle_encode(torch.tensor(mask_binary_global).unsqueeze(0))[0]
+                                    
+                                    # Validate mask-to-box alignment: RLE size must match original image
+                                    if mask_rle.get("size") != [orig_h, orig_w]:
+                                        print(f"⚠ Mask size mismatch: expected [{orig_h}, {orig_w}], got {mask_rle.get('size')}")
+                                        continue  # Skip this detection
                                     
                                     # Calculate box area in original image pixels
                                     box_area_pixels = int((orig_box[2] - orig_box[0]) * (orig_box[3] - orig_box[1]))
@@ -601,10 +1133,21 @@ class SAM3Model:
                                         'mask_rle': mask_rle,
                                         'score': float(scores[j]),
                                         'scale': scale,
-                                        'box_area_pixels': box_area_pixels,  # For accurate area calculation
+                                        'box_area_pixels': box_area_pixels,
                                     })
                     except Exception as e:
-                        print(f"⚠ Error processing tile {i} in batch: {e}")
+                        import traceback
+                        error_details = traceback.format_exc()
+                        print(f"⚠ Error processing tile {i} in batch at scale {scale}:")
+                        print(f"   Tile offset: {tile_offsets[i]}")
+                        print(f"   Error: {e}")
+                        print(f"   Traceback: {error_details[:500]}")
+                        stats.setdefault("tile_errors", []).append({
+                            "tile_idx": i,
+                            "scale": scale,
+                            "offset": tile_offsets[i],
+                            "error": str(e),
+                        })
                         continue
                 
                 # Free batch memory
@@ -616,7 +1159,11 @@ class SAM3Model:
                         pass  # Ignore cleanup errors
         
         stats["total_tiles"] = total_tiles
+        stats["successful_tiles"] = total_tiles - len(stats.get("tile_errors", []))
         print(f"✓ Processed {total_tiles} tiles across {len(scales)} scales")
+        print(f"  Successful tiles: {stats['successful_tiles']}/{total_tiles}")
+        if stats.get("tile_errors"):
+            print(f"  ⚠ Failed tiles: {len(stats['tile_errors'])}")
         print(f"  Raw detections: {len(all_detections)}")
         
         # Apply NMS
@@ -625,6 +1172,17 @@ class SAM3Model:
         
         # Restore original confidence threshold
         self.processor.confidence_threshold = original_threshold
+        
+        # Provide diagnostic warnings for edge cases
+        if stats["successful_tiles"] == 0:
+            print(f"❌ WARNING: All {total_tiles} tiles failed to process!")
+            print(f"   This may indicate a model loading issue or incompatible image format.")
+        elif len(final_detections) == 0 and len(all_detections) > 0:
+            print(f"⚠ WARNING: {len(all_detections)} raw detections reduced to 0 after NMS.")
+            print(f"   Consider lowering iou_threshold (current: {iou_threshold})")
+        elif len(final_detections) == 0:
+            print(f"ℹ No objects detected for prompt '{text_prompt}'.")
+            print(f"   Consider lowering confidence_threshold (current: {confidence_threshold})")
         
         return {
             "status": "success",
@@ -664,15 +1222,23 @@ class SAM3Model:
         self,
         image_bytes: bytes,
         text_prompt: str,
+        llm_config: Dict[str, Any],
         confidence_threshold: float = 0.5,
         pyramidal_config: Dict[str, Any] = None,
+        max_retries: int = 2,
     ) -> Dict[str, Any]:
         """
-        Count objects using pyramidal SAM3 segmentation.
+        Count objects using VLM-enhanced pyramidal SAM3 segmentation.
+        
+        Pipeline: VLM Prompt Refinement → SAM3 Segmentation → VLM Verification → Retry if needed
         
         Args:
             image_bytes: Raw image bytes
             text_prompt: Text prompt describing objects to count
+            llm_config: LLM configuration dict (required):
+                - base_url: API endpoint URL
+                - model: Model name
+                - api_key: API key (can be empty)
             confidence_threshold: Minimum confidence threshold (default: 0.5)
             pyramidal_config: Optional pyramidal configuration:
                 - tile_size: Size of each tile (default: 512)
@@ -680,10 +1246,28 @@ class SAM3Model:
                 - scales: List of scales (default: [1.0, 0.5])
                 - batch_size: Batch size (default: 16)
                 - iou_threshold: NMS IoU threshold (default: 0.5)
+            max_retries: Maximum retry attempts with rephrased prompts (default: 2)
         
         Returns:
-            Dict with count, confidence summary, detections, and processing stats
+            Dict with count, visual_prompt, verification_info, detections, and processing stats
         """
+        from PIL import Image
+        import io
+        
+        # Validate LLM config
+        try:
+            llm_config = validate_llm_config(llm_config)
+        except Exception as e:
+            return {"status": "error", "message": f"Invalid llm_config: {str(e)}"}
+        
+        # Initialize VLM interface
+        vlm = VLMInterface(
+            base_url=llm_config["base_url"],
+            model=llm_config["model"],
+            api_key=llm_config["api_key"],
+            timeout=120
+        )
+        
         # Set default pyramidal config
         config = {
             "tile_size": 512,
@@ -695,51 +1279,107 @@ class SAM3Model:
         if pyramidal_config:
             config.update(pyramidal_config)
         
-        # Run pyramidal inference
-        result = self._sam3_pyramidal_infer_impl(
-            image_bytes=image_bytes,
-            text_prompt=text_prompt,
-            tile_size=config["tile_size"],
-            overlap_ratio=config["overlap_ratio"],
-            scales=config["scales"],
-            iou_threshold=config["iou_threshold"],
-            confidence_threshold=confidence_threshold,
-            batch_size=config["batch_size"],
-        )
+        # Load image for VLM operations
+        image = Image.open(io.BytesIO(image_bytes)).convert('RGB')
         
-        if result["status"] != "success":
-            return result
+        # Track attempts for retry logic
+        attempts = []
+        visual_prompt = None
+        verified_detections = []
         
-        # Calculate confidence breakdown
-        # Note: All detections already pass confidence_threshold, so breakdown is relative to that
-        detections = result["detections"]
-        high_conf = sum(1 for d in detections if d["score"] >= 0.8)
-        medium_conf = sum(1 for d in detections if confidence_threshold <= d["score"] < 0.8)
-        # Low confidence only exists if threshold is below 0.5
-        low_conf = sum(1 for d in detections if d["score"] < 0.5) if confidence_threshold < 0.5 else 0
+        # Step 1: Refine prompt with VLM
+        print("Step 1: VLM Prompt Refinement")
+        visual_prompt = self._refine_prompt_with_vlm(image_bytes, text_prompt, vlm)
         
-        confidence_summary = {
-            "high": high_conf,      # >= 0.8
-            "medium": medium_conf,  # threshold <= score < 0.8
-            "low": low_conf,        # < 0.5 (only if threshold < 0.5)
+        # Retry loop
+        for attempt in range(max_retries + 1):
+            print(f"\n--- Attempt {attempt + 1}/{max_retries + 1} ---")
+            print(f"Using visual prompt: '{visual_prompt}'")
+            
+            # Step 2: Run SAM3 segmentation
+            result = self._sam3_pyramidal_infer_impl(
+                image_bytes=image_bytes,
+                text_prompt=visual_prompt,
+                tile_size=config["tile_size"],
+                overlap_ratio=config["overlap_ratio"],
+                scales=config["scales"],
+                iou_threshold=config["iou_threshold"],
+                confidence_threshold=confidence_threshold,
+                batch_size=config["batch_size"],
+            )
+            
+            if result["status"] != "success":
+                attempts.append({
+                    "attempt": attempt + 1,
+                    "visual_prompt": visual_prompt,
+                    "status": "error",
+                    "message": result.get("message", "Unknown error")
+                })
+                if attempt < max_retries:
+                    # Try rephrasing
+                    visual_prompt = self._rephrase_prompt_with_vlm(image_bytes, text_prompt, visual_prompt, vlm)
+                    continue
+                else:
+                    return result
+            
+            detections = result["detections"]
+            print(f"Found {len(detections)} raw detections")
+            
+            # Step 3: Verify detections with VLM
+            if len(detections) > 0:
+                print("Step 3: VLM Detection Verification")
+                verified_detections = self._verify_detections_with_vlm(
+                    image, detections, text_prompt, visual_prompt, vlm
+                )
+                
+                attempts.append({
+                    "attempt": attempt + 1,
+                    "visual_prompt": visual_prompt,
+                    "raw_count": len(detections),
+                    "verified_count": len(verified_detections),
+                    "rejected_count": len(detections) - len(verified_detections)
+                })
+                
+                # If we have verified detections, we're done
+                if len(verified_detections) > 0:
+                    break
+            else:
+                attempts.append({
+                    "attempt": attempt + 1,
+                    "visual_prompt": visual_prompt,
+                    "raw_count": 0,
+                    "verified_count": 0
+                })
+            
+            # If no detections and we have retries left, try rephrasing
+            if len(verified_detections) == 0 and attempt < max_retries:
+                print(f"No detections found, rephrasing prompt...")
+                visual_prompt = self._rephrase_prompt_with_vlm(image_bytes, text_prompt, visual_prompt, vlm)
+        
+        # Prepare response
+        verification_info = {
+            "attempts": attempts,
+            "verified_count": len(verified_detections),
+            "rejected_count": sum(a.get("rejected_count", 0) for a in attempts),
+            "total_attempts": len(attempts)
         }
         
-        # Extract object type from prompt (simple heuristic)
+        # Extract object type from prompt
         object_type = text_prompt.strip().lower()
-        # Try to extract key noun (last word typically)
         words = object_type.split()
         if words:
-            object_type = words[-1].rstrip('s')  # Remove trailing 's'
+            object_type = words[-1].rstrip('s')
         
         return {
             "status": "success",
-            "count": result["count"],
+            "count": len(verified_detections),
+            "visual_prompt": visual_prompt,
             "object_type": object_type,
-            "confidence_summary": confidence_summary,
-            "detections": detections,
-            "pyramidal_stats": result["pyramidal_stats"],
-            "orig_img_w": result["orig_img_w"],
-            "orig_img_h": result["orig_img_h"],
+            "verification_info": verification_info,
+            "detections": verified_detections,
+            "pyramidal_stats": result.get("pyramidal_stats", {}),
+            "orig_img_w": result.get("orig_img_w", 0),
+            "orig_img_h": result.get("orig_img_h", 0),
         }
 
     @modal.method()
@@ -747,18 +1387,25 @@ class SAM3Model:
         self,
         image_bytes: bytes,
         text_prompt: str,
+        llm_config: Dict[str, Any],
         gsd: float = None,
         confidence_threshold: float = 0.5,
         pyramidal_config: Dict[str, Any] = None,
+        max_retries: int = 2,
     ) -> Dict[str, Any]:
         """
-        Calculate areas of detected objects using Pyramidal SAM3 segmentation.
+        Calculate areas of detected objects using VLM-enhanced Pyramidal SAM3 segmentation.
+        
+        Pipeline: VLM Keyword Extraction → SAM3 Segmentation → VLM Validation → Mask-Based Area Calculation
         
         Args:
             image_bytes: Raw image bytes
             text_prompt: Text prompt describing objects to measure
-            gsd: Ground Sample Distance in meters/pixel (optional)
-                 If provided, calculates real-world area in square meters
+            llm_config: LLM configuration dict (required):
+                - base_url: API endpoint URL
+                - model: Model name
+                - api_key: API key (can be empty)
+            gsd: Ground Sample Distance in meters/pixel (required for real-world area)
             confidence_threshold: Minimum confidence threshold (default: 0.5)
             pyramidal_config: Optional pyramidal configuration:
                 - tile_size: Size of each tile (default: 512)
@@ -766,12 +1413,27 @@ class SAM3Model:
                 - scales: List of scales (default: [1.0, 0.5])
                 - batch_size: Batch size (default: 16)
                 - iou_threshold: NMS IoU threshold (default: 0.5)
+            max_retries: Maximum retry attempts with rephrased prompts (default: 2)
         
         Returns:
-            Dict with object count, total area, coverage percentage, and per-object areas
+            Dict with object count, total area (mask-based), coverage percentage, and per-object areas
         """
-        # Note: Using box-based area calculation (accurate in original image space)
-        # Mask-based area not used due to tile resolution mismatch
+        from PIL import Image
+        import io
+        
+        # Validate LLM config
+        try:
+            llm_config = validate_llm_config(llm_config)
+        except Exception as e:
+            return {"status": "error", "message": f"Invalid llm_config: {str(e)}"}
+        
+        # Initialize VLM interface
+        vlm = VLMInterface(
+            base_url=llm_config["base_url"],
+            model=llm_config["model"],
+            api_key=llm_config["api_key"],
+            timeout=120
+        )
         
         # Set default pyramidal config
         config = {
@@ -784,44 +1446,108 @@ class SAM3Model:
         if pyramidal_config:
             config.update(pyramidal_config)
         
-        # Run pyramidal inference
-        result = self._sam3_pyramidal_infer_impl(
-            image_bytes=image_bytes,
-            text_prompt=text_prompt,
-            tile_size=config["tile_size"],
-            overlap_ratio=config["overlap_ratio"],
-            scales=config["scales"],
-            iou_threshold=config["iou_threshold"],
-            confidence_threshold=confidence_threshold,
-            batch_size=config["batch_size"],
-        )
-        
-        if result["status"] != "success":
-            return result
-        
-        detections = result["detections"]
-        orig_w = result["orig_img_w"]
-        orig_h = result["orig_img_h"]
+        # Load image for VLM operations
+        image = Image.open(io.BytesIO(image_bytes)).convert('RGB')
+        orig_w, orig_h = image.size
+        image_shape = (orig_h, orig_w)
         total_image_pixels = orig_w * orig_h
         
-        # Calculate areas for each detection using box area (accurate in original image space)
-        # Note: Mask-based area is NOT used because masks are encoded at tile resolution,
-        # not original image resolution. Box area provides accurate measurements.
+        # Step 1: Extract keywords with VLM (for area, we use multi-keyword approach)
+        print("Step 1: VLM Keyword Extraction")
+        keywords = self._extract_keywords_with_vlm(image_bytes, text_prompt, vlm)
+        
+        # Track attempts
+        attempts = []
+        all_verified_detections = []
+        last_result = None
+        
+        # Step 2: Segment with each keyword and combine
+        print("\nStep 2: Multi-keyword Segmentation")
+        for keyword_idx, keyword in enumerate(keywords):
+            print(f"\n--- Keyword {keyword_idx + 1}/{len(keywords)}: '{keyword}' ---")
+            
+            visual_prompt = keyword
+            verified_detections = []
+            
+            # Retry loop for this keyword
+            for attempt in range(max_retries + 1):
+                print(f"  Attempt {attempt + 1}/{max_retries + 1} with prompt: '{visual_prompt}'")
+                
+                # Run SAM3 segmentation
+                result = self._sam3_pyramidal_infer_impl(
+                    image_bytes=image_bytes,
+                    text_prompt=visual_prompt,
+                    tile_size=config["tile_size"],
+                    overlap_ratio=config["overlap_ratio"],
+                    scales=config["scales"],
+                    iou_threshold=config["iou_threshold"],
+                    confidence_threshold=confidence_threshold,
+                    batch_size=config["batch_size"],
+                )
+                
+                last_result = result  # Keep last result for stats
+                
+                if result["status"] != "success":
+                    if attempt < max_retries:
+                        visual_prompt = self._rephrase_prompt_with_vlm(image_bytes, text_prompt, visual_prompt, vlm)
+                        continue
+                    else:
+                        break
+                
+                detections = result["detections"]
+                print(f"  Found {len(detections)} raw detections")
+                
+                # Step 3: Verify detections with VLM
+                if len(detections) > 0:
+                    print("  Step 3: VLM Mask Validation")
+                    verified_detections = self._verify_detections_with_vlm(
+                        image, detections, text_prompt, visual_prompt, vlm
+                    )
+                    
+                    if len(verified_detections) > 0:
+                        # Deduplicate against existing detections
+                        for new_det in verified_detections:
+                            is_duplicate = False
+                            for existing_det in all_verified_detections:
+                                iou = self._calculate_iou(new_det["box"], existing_det["box"])
+                                if iou > 0.5:
+                                    is_duplicate = True
+                                    break
+                            if not is_duplicate:
+                                all_verified_detections.append(new_det)
+                        break
+                
+                # Try rephrasing if no detections
+                if len(verified_detections) == 0 and attempt < max_retries:
+                    visual_prompt = self._rephrase_prompt_with_vlm(image_bytes, text_prompt, visual_prompt, vlm)
+        
+        print(f"\nTotal verified detections: {len(all_verified_detections)}")
+        
+        # Step 4: Calculate mask-based areas
+        print("Step 4: Mask-Based Area Calculation")
+        if gsd is None or gsd <= 0:
+            return {
+                "status": "error",
+                "message": "gsd is required for area calculation. Provide gsd in meters/pixel."
+            }
+        
         individual_areas = []
         total_pixel_area = 0
         
-        for idx, det in enumerate(detections):
+        for idx, det in enumerate(all_verified_detections):
             try:
-                # Use pre-calculated box area (in original image pixels)
-                # This is computed during detection and accounts for scale transformation
-                pixel_area = det.get("box_area_pixels", 0)
-                
-                # Fallback: calculate from box coordinates if not present
-                if pixel_area == 0:
+                # Calculate area from mask (mask-based, more accurate)
+                mask_rle = det.get("mask_rle")
+                if mask_rle:
+                    area_m2 = self._calculate_mask_area(mask_rle, gsd, image_shape)
+                    pixel_area = int(area_m2 / (gsd ** 2))  # Convert back to pixels for reporting
+                else:
+                    # Fallback to box area if mask not available
                     box = det["box"]
                     pixel_area = int((box[2] - box[0]) * (box[3] - box[1]))
+                    area_m2 = pixel_area * (gsd ** 2)
                 
-                if pixel_area <= 0:
+                if area_m2 <= 0:
                     continue
                 
                 total_pixel_area += pixel_area
@@ -829,43 +1555,142 @@ class SAM3Model:
                 area_info = {
                     "id": idx + 1,
                     "pixel_area": pixel_area,
+                    "real_area_m2": round(area_m2, 4),
                     "score": det["score"],
                     "box": det["box"],
                 }
                 
-                # Calculate real area if GSD is provided
-                if gsd is not None and gsd > 0:
-                    real_area_m2 = pixel_area * (gsd ** 2)
-                    area_info["real_area_m2"] = round(real_area_m2, 4)
-                
                 individual_areas.append(area_info)
+                print(f"  Object {idx+1}: {area_m2:.2f} m² ({pixel_area} pixels)")
                 
             except Exception as e:
                 print(f"⚠ Error calculating area for detection {idx}: {e}")
                 continue
         
         # Calculate coverage percentage
+        total_image_area_m2 = total_image_pixels * (gsd ** 2)
         coverage_percentage = (total_pixel_area / total_image_pixels * 100) if total_image_pixels > 0 else 0
+        total_real_area_m2 = total_pixel_area * (gsd ** 2)
         
         # Prepare response
         response = {
             "status": "success",
             "object_count": len(individual_areas),
             "total_pixel_area": total_pixel_area,
+            "total_real_area_m2": round(total_real_area_m2, 4),
             "coverage_percentage": round(coverage_percentage, 4),
             "individual_areas": individual_areas,
+            "visual_prompt": ", ".join(keywords),
+            "verification_info": {
+                "keywords": keywords,
+                "verified_count": len(all_verified_detections)
+            },
             "orig_img_w": orig_w,
             "orig_img_h": orig_h,
-            "pyramidal_stats": result["pyramidal_stats"],
+            "gsd": gsd,
+            "pyramidal_stats": last_result.get("pyramidal_stats", {}) if last_result else {},
         }
         
-        # Add real-world area if GSD provided
-        if gsd is not None and gsd > 0:
-            total_real_area_m2 = total_pixel_area * (gsd ** 2)
-            response["total_real_area_m2"] = round(total_real_area_m2, 4)
-            response["gsd"] = gsd
-        
         return response
+
+    def _extract_keywords_with_vlm(self, image_bytes: bytes, user_query: str, vlm: VLMInterface) -> List[str]:
+        """
+        Extract multiple keywords from user query using VLM (for area calculation).
+        
+        Args:
+            image_bytes: Raw image bytes
+            user_query: Natural language query
+            vlm: VLMInterface instance
+            
+        Returns:
+            List of 2-4 keywords for segmentation
+        """
+        from PIL import Image
+        import io
+        
+        image = Image.open(io.BytesIO(image_bytes)).convert('RGB')
+        
+        KEYWORD_EXTRACTION_TEMPLATE = """Analyze this satellite/aerial image and the user's query to extract segmentation keywords.
+
+User Query: "{query}"
+
+Your task:
+1. Identify the PRIMARY object(s) the user wants to measure area for
+2. Generate 2-4 SHORT keywords/phrases (2-4 words each) that describe these objects visually
+3. Focus on: color, shape, texture, context (e.g., "white circular tanks", "rectangular buildings")
+4. DO NOT include numbers or counts
+5. DO NOT answer the query, just extract visual descriptors
+
+Output format (JSON):
+{{
+  "keywords": ["keyword1", "keyword2", "keyword3"],
+  "primary_object": "main object type",
+  "reasoning": "brief explanation"
+}}
+
+Now analyze the image and query."""
+        
+        prompt = KEYWORD_EXTRACTION_TEMPLATE.format(query=user_query)
+        
+        try:
+            response = vlm.query(image, prompt, max_tokens=256, temperature=0.7)
+            
+            if response is None:
+                print("⚠ VLM returned None for keyword extraction, using fallback")
+                print(f"   Original query: {user_query}")
+                return [user_query]
+            
+            # Try to extract JSON from response
+            json_match = re.search(r'\{.*\}', response, re.DOTALL)
+            if json_match:
+                try:
+                    json_str = json_match.group()
+                    result_dict = json.loads(json_str)
+                    
+                    # Validate with Pydantic
+                    validated_result = KeywordExtractionResponse(**result_dict)
+                    keywords = validated_result.keywords
+                    primary_object = validated_result.primary_object
+                    reasoning = validated_result.reasoning
+                    
+                    print(f"\n=== Keyword Extraction ===")
+                    print(f"Primary Object: {primary_object}")
+                    print(f"Keywords: {keywords}")
+                    if reasoning:
+                        print(f"Reasoning: {reasoning}")
+                    print(f"===========================\n")
+                    
+                    if keywords:
+                        return keywords
+                    else:
+                        print(f"⚠ No keywords in validated response, using fallback")
+                        return [user_query]
+                        
+                except ValidationError as ve:
+                    print(f"❌ VLM response validation failed: {ve}")
+                    print(f"   Full VLM response: {response[:500]}")
+                    print(f"   Original query: {user_query}")
+                    print(f"   Using fallback: {user_query}")
+                    return [user_query]
+                except json.JSONDecodeError as je:
+                    print(f"❌ JSON decode error: {je}")
+                    print(f"   Full VLM response: {response[:500]}")
+                    print(f"   Original query: {user_query}")
+                    print(f"   Using fallback: {user_query}")
+                    return [user_query]
+            else:
+                print(f"❌ Could not find JSON in VLM response")
+                print(f"   Full VLM response: {response[:500]}")
+                print(f"   Original query: {user_query}")
+                print(f"   Using fallback: {user_query}")
+                return [user_query]
+                
+        except Exception as e:
+            print(f"❌ Error in keyword extraction: {e}")
+            print(f"   Original query: {user_query}")
+            import traceback
+            print(f"   Traceback: {traceback.format_exc()[:500]}")
+            return [user_query]
 
     def call_sam_service_pyramidal(
         self,
@@ -1191,14 +2016,20 @@ from modal import fastapi_endpoint  # lightweight JSON endpoint decorator
 @fastapi_endpoint(method="POST")
 def sam3_count(body: Dict[str, Any]) -> Dict[str, Any]:
     """
-    HTTP endpoint for counting objects using Pyramidal SAM3 segmentation.
+    HTTP endpoint for counting objects using VLM-enhanced Pyramidal SAM3 segmentation.
     
     POST /sam3/count
     JSON body:
     {
       "prompt": "trees",                   # Required: what objects to count
       "image_b64": "...",                  # OR "image_url": "https://..."
+      "llm_config": {                      # Required: VLM configuration
+        "base_url": "https://...",
+        "model": "Qwen/Qwen3-VL-30B-A3B-Instruct",
+        "api_key": ""
+      },
       "confidence_threshold": 0.5,         # Optional: min confidence (default: 0.5)
+      "max_retries": 2,                    # Optional: max retry attempts (default: 2)
       "pyramidal_config": {                # Optional: pyramidal configuration
         "tile_size": 512,
         "overlap_ratio": 0.15,
@@ -1212,11 +2043,12 @@ def sam3_count(body: Dict[str, Any]) -> Dict[str, Any]:
     {
       "status": "success",
       "count": 47,
+      "visual_prompt": "tree",
       "object_type": "tree",
-      "confidence_summary": {
-        "high": 35,      // >= 0.8
-        "medium": 10,    // 0.5 - 0.8
-        "low": 2         // < 0.5
+      "verification_info": {
+        "attempts": [...],
+        "verified_count": 47,
+        "rejected_count": 3
       },
       "detections": [...],
       "pyramidal_stats": {...}
@@ -1226,8 +2058,16 @@ def sam3_count(body: Dict[str, Any]) -> Dict[str, Any]:
     if "prompt" not in body:
         return {"status": "error", "message": "Missing 'prompt' in request body."}
     
+    if "llm_config" not in body:
+        return {
+            "status": "error",
+            "message": "Missing 'llm_config' in request body. Provide complete LLM configuration with 'base_url', 'model', and 'api_key'."
+        }
+    
     text_prompt = body["prompt"]
+    llm_config = body["llm_config"]
     confidence_threshold = body.get("confidence_threshold", 0.5)
+    max_retries = body.get("max_retries", 2)
     pyramidal_config = body.get("pyramidal_config")
     
     # Get image bytes from either image_b64 or image_url
@@ -1262,8 +2102,10 @@ def sam3_count(body: Dict[str, Any]) -> Dict[str, Any]:
         result = SAM3Model().sam3_count.remote(
             image_bytes=image_bytes,
             text_prompt=text_prompt,
+            llm_config=llm_config,
             confidence_threshold=confidence_threshold,
             pyramidal_config=pyramidal_config,
+            max_retries=max_retries,
         )
         print(f"✓ sam3_count returned count: {result.get('count', 0)}")
         return result
@@ -1290,15 +2132,21 @@ def sam3_count(body: Dict[str, Any]) -> Dict[str, Any]:
 @fastapi_endpoint(method="POST")
 def sam3_area(body: Dict[str, Any]) -> Dict[str, Any]:
     """
-    HTTP endpoint for calculating object areas using Pyramidal SAM3 segmentation.
+    HTTP endpoint for calculating object areas using VLM-enhanced Pyramidal SAM3 segmentation.
     
     POST /sam3/area
     JSON body:
     {
       "prompt": "solar panels",            # Required: what objects to measure
       "image_b64": "...",                  # OR "image_url": "https://..."
-      "gsd": 0.5,                          # Optional: Ground Sample Distance (m/pixel)
+      "llm_config": {                      # Required: VLM configuration
+        "base_url": "https://...",
+        "model": "Qwen/Qwen3-VL-30B-A3B-Instruct",
+        "api_key": ""
+      },
+      "gsd": 0.5,                          # Required: Ground Sample Distance (m/pixel)
       "confidence_threshold": 0.5,         # Optional: min confidence (default: 0.5)
+      "max_retries": 2,                    # Optional: max retry attempts (default: 2)
       "pyramidal_config": {                # Optional: pyramidal configuration
         "tile_size": 512,
         "overlap_ratio": 0.15,
@@ -1313,12 +2161,14 @@ def sam3_area(body: Dict[str, Any]) -> Dict[str, Any]:
       "status": "success",
       "object_count": 12,
       "total_pixel_area": 125000,
-      "total_real_area_m2": 31250.0,       // Only if gsd provided
+      "total_real_area_m2": 31250.0,
       "coverage_percentage": 12.5,
       "individual_areas": [
         {"id": 1, "pixel_area": 5000, "real_area_m2": 1250.0, "score": 0.9, "box": [...]},
         ...
       ],
+      "visual_prompt": "circular white tank, storage container",
+      "verification_info": {...},
       "pyramidal_stats": {...}
     }
     """
@@ -1326,9 +2176,17 @@ def sam3_area(body: Dict[str, Any]) -> Dict[str, Any]:
     if "prompt" not in body:
         return {"status": "error", "message": "Missing 'prompt' in request body."}
     
+    if "llm_config" not in body:
+        return {
+            "status": "error",
+            "message": "Missing 'llm_config' in request body. Provide complete LLM configuration with 'base_url', 'model', and 'api_key'."
+        }
+    
     text_prompt = body["prompt"]
+    llm_config = body["llm_config"]
     gsd = body.get("gsd")
     confidence_threshold = body.get("confidence_threshold", 0.5)
+    max_retries = body.get("max_retries", 2)
     pyramidal_config = body.get("pyramidal_config")
     
     # Get image bytes from either image_b64 or image_url
@@ -1363,11 +2221,13 @@ def sam3_area(body: Dict[str, Any]) -> Dict[str, Any]:
         result = SAM3Model().sam3_area.remote(
             image_bytes=image_bytes,
             text_prompt=text_prompt,
+            llm_config=llm_config,
             gsd=gsd,
             confidence_threshold=confidence_threshold,
             pyramidal_config=pyramidal_config,
+            max_retries=max_retries,
         )
-        print(f"✓ sam3_area returned {result.get('object_count', 0)} objects, total area: {result.get('total_pixel_area', 0)} pixels")
+        print(f"✓ sam3_area returned {result.get('object_count', 0)} objects, total area: {result.get('total_real_area_m2', 0)} m²")
         return result
         
     except Exception as e:

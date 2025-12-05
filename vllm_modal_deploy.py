@@ -28,8 +28,10 @@
 import os
 import subprocess
 from pathlib import Path
+from typing import Optional, List, Dict, Any, Union
 
 import modal
+from pydantic import BaseModel, Field
 
 # ------------------------------------------------------------------------------
 # Modal app + image
@@ -90,6 +92,167 @@ image = (
 )
 
 # ------------------------------------------------------------------------------
+# Pydantic Models for API Documentation (must be at module level for Swagger)
+# ------------------------------------------------------------------------------
+
+class HealthResponse(BaseModel):
+    """Health check response model"""
+    status: str = Field(..., description="Server status", example="ok")
+    model: str = Field(..., description="Model identifier", example=MODEL_ID)
+    parser: str = Field(..., description="Parser type (automatic or manual)", example="automatic")
+    error: Optional[str] = Field(None, description="Error message if status is error")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "status": "ok",
+                "model": MODEL_ID,
+                "parser": "automatic"
+            }
+        }
+
+class ModelInfo(BaseModel):
+    """Model information"""
+    id: str = Field(..., description="Model identifier")
+    object: str = Field(default="model", description="Object type")
+    created: int = Field(default=0, description="Creation timestamp")
+    owned_by: str = Field(default="vllm", description="Model owner")
+
+class ModelListResponse(BaseModel):
+    """List of available models"""
+    object: str = Field(default="list", description="Object type")
+    data: List[ModelInfo] = Field(..., description="List of available models")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "object": "list",
+                "data": [
+                    {
+                        "id": MODEL_ID,
+                        "object": "model",
+                        "created": 0,
+                        "owned_by": "vllm"
+                    }
+                ]
+            }
+        }
+
+class ChatMessage(BaseModel):
+    """Chat message"""
+    role: str = Field(..., description="Message role (system, user, assistant, tool)", example="user")
+    content: Union[str, List[Dict[str, Any]]] = Field(
+        ..., 
+        description="Message content. Can be a string (text) or a list of content parts for multimodal messages (text and images).",
+        example="What is the capital of France?"
+    )
+    name: Optional[str] = Field(None, description="Name of the author (for tool calls)")
+    tool_calls: Optional[List[Dict[str, Any]]] = Field(None, description="Tool calls made by the assistant")
+    tool_call_id: Optional[str] = Field(None, description="Tool call ID (for tool messages)")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "role": "user",
+                "content": "What is the capital of France?"
+            }
+        }
+
+class ChatCompletionRequest(BaseModel):
+    """Chat completion request (OpenAI-compatible)"""
+    model: str = Field(default=MODEL_ID, description="Model to use for completion")
+    messages: List[ChatMessage] = Field(..., description="List of messages in the conversation")
+    temperature: Optional[float] = Field(0.7, ge=0.0, le=2.0, description="Sampling temperature")
+    top_p: Optional[float] = Field(1.0, ge=0.0, le=1.0, description="Nucleus sampling parameter")
+    n: Optional[int] = Field(1, ge=1, description="Number of completions to generate")
+    stream: Optional[bool] = Field(False, description="Whether to stream the response")
+    stop: Optional[Union[str, List[str]]] = Field(None, description="Stop sequences")
+    max_tokens: Optional[int] = Field(8192, ge=1, le=8192, description="Maximum tokens to generate (capped at 8192)")
+    presence_penalty: Optional[float] = Field(0.0, ge=-2.0, le=2.0, description="Presence penalty")
+    frequency_penalty: Optional[float] = Field(0.0, ge=-2.0, le=2.0, description="Frequency penalty")
+    logit_bias: Optional[Dict[str, float]] = Field(None, description="Logit bias")
+    user: Optional[str] = Field(None, description="User identifier")
+    tools: Optional[List[Dict[str, Any]]] = Field(None, description="List of available tools for function calling")
+    tool_choice: Optional[Union[str, Dict[str, Any]]] = Field(None, description="Tool choice strategy")
+    max_thinking_tokens: Optional[int] = Field(2048, ge=0, le=2048, description="Maximum thinking tokens (capped at 2048)")
+    
+    class Config:
+        # Allow extra fields for OpenAI compatibility (e.g., response_format, etc.)
+        extra = "allow"
+        json_schema_extra = {
+            "example": {
+                "model": MODEL_ID,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "What is the capital of France?"
+                    }
+                ],
+                "temperature": 0.7,
+                "max_tokens": 100,
+                "max_thinking_tokens": 2048
+            }
+        }
+
+class ChatChoice(BaseModel):
+    """Chat completion choice"""
+    index: int = Field(..., description="Choice index")
+    message: ChatMessage = Field(..., description="Generated message")
+    finish_reason: Optional[str] = Field(None, description="Reason for finishing")
+
+class Usage(BaseModel):
+    """Token usage statistics"""
+    prompt_tokens: int = Field(..., description="Number of tokens in the prompt")
+    completion_tokens: int = Field(..., description="Number of tokens in the completion")
+    total_tokens: int = Field(..., description="Total number of tokens")
+
+class ChatCompletionResponse(BaseModel):
+    """Chat completion response (OpenAI-compatible)"""
+    id: str = Field(..., description="Completion ID")
+    object: str = Field(default="chat.completion", description="Object type")
+    created: int = Field(..., description="Creation timestamp")
+    model: str = Field(..., description="Model used")
+    choices: List[ChatChoice] = Field(..., description="List of completion choices")
+    usage: Optional[Usage] = Field(None, description="Token usage statistics")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "id": "chatcmpl-123",
+                "object": "chat.completion",
+                "created": 1677652288,
+                "model": MODEL_ID,
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "The capital of France is Paris."
+                        },
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 9,
+                    "completion_tokens": 9,
+                    "total_tokens": 18
+                }
+            }
+        }
+
+class ErrorResponse(BaseModel):
+    """Error response model"""
+    error: str = Field(..., description="Error message")
+    traceback: Optional[str] = Field(None, description="Error traceback (if available)")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "error": "Request to vLLM server timed out"
+            }
+        }
+
+# ------------------------------------------------------------------------------
 # vLLM Server Deployment
 # ------------------------------------------------------------------------------
 
@@ -142,7 +305,14 @@ def vllm_server():
     
     # Create FastAPI app for proxy
     from fastapi.middleware.cors import CORSMiddleware
-    app = fastapi.FastAPI(title="Qwen3-VL vLLM Server")
+    app = fastapi.FastAPI(
+        title="Qwen3-VL vLLM Server",
+        description="OpenAI-compatible API server for Qwen3-VL-30B-A3B-Instruct model powered by vLLM",
+        version="1.0.0",
+        docs_url="/docs",
+        redoc_url="/redoc",
+        openapi_url="/openapi.json"
+    )
     
     # Add CORS middleware to allow frontend access
     app.add_middleware(
@@ -306,62 +476,119 @@ def vllm_server():
         await http_client.aclose()
     
     # Health endpoint
-    @app.get("/health")
-    async def health():
+    @app.get(
+        "/health",
+        response_model=HealthResponse,
+        summary="Health check",
+        description="Check the health status of the vLLM server and model",
+        tags=["Health"]
+    )
+    async def health() -> HealthResponse:
+        """
+        Health check endpoint.
+        
+        Returns the status of the server, model identifier, and parser type.
+        """
         if USE_AUTOMATIC_PARSER and vllm_process:
             # Check vLLM server health
             try:
                 resp = await http_client.get(f"{vllm_url}/health", timeout=2)
                 if resp.status_code == 200:
-                    return {"status": "ok", "model": MODEL_ID, "parser": "automatic"}
+                    return HealthResponse(
+                        status="ok",
+                        model=MODEL_ID,
+                        parser="automatic"
+                    )
             except:
-                return {"status": "error", "model": MODEL_ID, "parser": "automatic", "error": "vLLM server not responding"}
-        return {"status": "ok", "model": MODEL_ID, "parser": "manual"}
+                return HealthResponse(
+                    status="error",
+                    model=MODEL_ID,
+                    parser="automatic",
+                    error="vLLM server not responding"
+                )
+        return HealthResponse(
+            status="ok",
+            model=MODEL_ID,
+            parser="manual"
+        )
     
     # Models endpoint
-    @app.get("/v1/models")
-    async def list_models():
+    @app.get(
+        "/v1/models",
+        response_model=ModelListResponse,
+        summary="List models",
+        description="List all available models",
+        tags=["Models"]
+    )
+    async def list_models() -> ModelListResponse:
+        """
+        List all available models.
+        
+        Returns a list of models available on this server.
+        """
         if USE_AUTOMATIC_PARSER:
             # Proxy to vLLM server
             try:
                 resp = await http_client.get(f"{vllm_url}/v1/models", timeout=10)
-                return resp.json()
+                data = resp.json()
+                # Convert to our response model if possible
+                if "data" in data and isinstance(data["data"], list):
+                    models = [ModelInfo(**item) for item in data["data"]]
+                    return ModelListResponse(object=data.get("object", "list"), data=models)
+                return ModelListResponse(**data)
             except Exception as e:
                 print(f"❌ Error proxying to vLLM server: {e}")
-                return JSONResponse(
-                    {"error": f"Failed to connect to vLLM server: {e}"},
-                    status_code=500
+                raise fastapi.HTTPException(
+                    status_code=500,
+                    detail=f"Failed to connect to vLLM server: {e}"
                 )
         else:
             # Manual response
-            return {
-                "object": "list",
-                "data": [
-                    {
-                        "id": MODEL_ID,
-                        "object": "model",
-                        "created": 0,
-                        "owned_by": "vllm"
-                    }
+            return ModelListResponse(
+                object="list",
+                data=[
+                    ModelInfo(
+                        id=MODEL_ID,
+                        object="model",
+                        created=0,
+                        owned_by="vllm"
+                    )
                 ]
-            }
+            )
     
     # Chat completions endpoint - proxy to vLLM server when using automatic parser
-    @app.post("/v1/chat/completions")
-    async def chat_completions(request: Request):
+    @app.post(
+        "/v1/chat/completions",
+        summary="Create chat completion",
+        description="Create a chat completion using the Qwen3-VL model. Supports text and multimodal inputs, as well as tool/function calling.",
+        tags=["Chat"],
+        response_model=Union[ChatCompletionResponse, Dict[str, Any]],
+        responses={
+            200: {"description": "Successful completion", "model": ChatCompletionResponse},
+            400: {"description": "Bad request", "model": ErrorResponse},
+            500: {"description": "Internal server error", "model": ErrorResponse},
+            504: {"description": "Gateway timeout", "model": ErrorResponse}
+        }
+    )
+    async def chat_completions(chat_request: ChatCompletionRequest):
+        """
+        Create a chat completion.
+        
+        This endpoint accepts OpenAI-compatible chat completion requests and proxies them
+        to the underlying vLLM server. It supports:
+        - Text and multimodal (image) inputs
+        - Tool/function calling
+        - Streaming responses
+        - Custom temperature, top_p, and other parameters
+        
+        The request body follows the OpenAI Chat Completions API format.
+        """
         if USE_AUTOMATIC_PARSER:
             # Proxy request to vLLM's built-in server (which handles tool calling automatically)
             try:
-                # Handle potential client disconnection when reading request body
-                try:
-                    req_body = await request.json()
-                except ClientDisconnect:
-                    # Handle ClientDisconnect gracefully
-                    print(f"⚠️  Client disconnected while reading request body")
-                    return JSONResponse(
-                        {"error": "Client disconnected before request was fully received"},
-                        status_code=499  # 499 Client Closed Request
-                    )
+                # Convert Pydantic model to dict, including any extra fields
+                # When extra="allow" is set in Config, model_dump() automatically includes extra fields
+                req_body = chat_request.model_dump(exclude_none=True)
                 
                 print(f"📥 Proxying request to vLLM server: model={req_body.get('model', MODEL_ID)}, tools={len(req_body.get('tools', []))}")
                 
@@ -410,13 +637,15 @@ def vllm_server():
                     except Exception:
                         error_text = f"Failed to read error response (status {resp.status_code}): {text_error}"
                 print(f"❌ vLLM server error: {resp.status_code} - {error_text[:500]}")
+                error_response = ErrorResponse(error=error_text)
                 return JSONResponse(
-                    {"error": error_text},
+                    content=error_response.model_dump(),
                     status_code=resp.status_code
                 )
             except httpx.TimeoutException:
+                error_response = ErrorResponse(error="Request to vLLM server timed out")
                 return JSONResponse(
-                    {"error": "Request to vLLM server timed out"},
+                    content=error_response.model_dump(),
                     status_code=504
                 )
             except Exception as e:
@@ -425,26 +654,22 @@ def vllm_server():
                 error_trace = traceback.format_exc()
                 print(f"❌ Error proxying to vLLM server: {error_msg}")
                 print(f"   Traceback: {error_trace}")
+                error_response = ErrorResponse(error=error_msg, traceback=error_trace)
                 return JSONResponse(
-                    {"error": error_msg, "traceback": error_trace},
+                    content=error_response.model_dump(),
                     status_code=500
                 )
         else:
             # Fallback to manual parsing (old implementation)
             # This code path is kept for safety/fallback
-            return await _manual_parsing_endpoint(request)
-    
-    # Manual parsing endpoint (fallback) - kept for safety
-    # This will be implemented if needed, but automatic parser is preferred
-    async def _manual_parsing_endpoint(request: fastapi.Request):
-        """Fallback endpoint with manual parsing - kept for safety"""
-        return JSONResponse(
-            {
-                "error": "Manual parsing mode is not implemented in this version. Please use automatic parser (USE_AUTOMATIC_PARSER=True)",
-                "note": "Automatic parser provides better reliability and maintenance"
-            },
-            status_code=501
-        )
+            error_response = ErrorResponse(
+                error="Manual parsing mode is not implemented in this version. Please use automatic parser (USE_AUTOMATIC_PARSER=True)",
+                traceback="Automatic parser provides better reliability and maintenance"
+            )
+            return JSONResponse(
+                content=error_response.model_dump(),
+                status_code=501
+            )
     
     return app
 
