@@ -1,0 +1,407 @@
+import torch
+import numpy as np
+from PIL import Image
+from typing import List, Dict, Tuple, Optional
+from dataclasses import dataclass
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+
+@dataclass
+class Detection:
+    """Container for a single detection"""
+    mask: np.ndarray
+    box: np.ndarray # [x1, y1, x2, y2]
+    score: float
+    scale: float
+    tile_offset: Tuple[int, int]
+
+@dataclass
+class TileInfo:
+    """Container for tile information"""
+    image: Image.Image
+    offset: Tuple[int, int]
+    scale: float
+    original_tile_size: Tuple[int, int] # Size before resize
+
+class PyramidalSAM3:
+    """
+    Optimized pyramidal tiling segmentation wrapper for SAM3.
+    Processes ALL tiles from ALL scales in batches, then applies filtering and NMS.
+    """
+    
+    def __init__(self, model, image_size, processor, 
+                 tile_size: int = 800,
+                 overlap_ratio: float = 0.15,
+                 scales: List[float] = [1.0, 0.5, 0.25],
+                 iou_threshold: float = 0.5,
+                 conf_threshold: float = 0.5,
+                 scale_filter_threshold: float = 0.3,
+                 batch_size: int = 8):
+        """
+        Args:
+            model: SAM3 model instance
+            processor: SAM3 processor instance
+            image_size: (width, height) tuple for resizing tiles
+            tile_size: Size of each tile before resizing (default 800x800)
+            overlap_ratio: Overlap between adjacent tiles (0.15 = 15%)
+            scales: Pyramid scales to process (1.0 = original, 0.5 = half, etc.)
+            iou_threshold: IoU threshold for final NMS
+            conf_threshold: Minimum confidence score to keep detection
+            scale_filter_threshold: Enclosure threshold for filtering lower scale detections
+            batch_size: Number of tiles to process in parallel
+        """
+        self.model = model
+        self.processor = processor
+        self.tile_size = tile_size
+        self.overlap_ratio = overlap_ratio
+        self.scales = sorted(scales, reverse=True) # Process largest first
+        self.iou_threshold = iou_threshold
+        self.conf_threshold = conf_threshold
+        self.scale_filter_threshold = scale_filter_threshold
+        self.batch_size = batch_size
+        self.image_size = image_size
+        
+    def create_tiles(self, image: Image.Image, scale: float) -> List[TileInfo]:
+        """Generate overlapping tiles from an image at a specific scale."""
+        img_width, img_height = image.size
+        
+        # Calculate tile size for this scale
+        current_tile_size = int(self.tile_size * scale)
+        stride = int(current_tile_size * (1 - self.overlap_ratio))
+        
+        tiles = []
+        
+        # Handle edge cases for small images
+        if img_width <= current_tile_size and img_height <= current_tile_size:
+            resized = image.resize(self.image_size, Image.LANCZOS)
+            return [TileInfo(resized, (0, 0), scale, (img_width, img_height))]
+        
+        for y in range(0, img_height, stride):
+            for x in range(0, img_width, stride):
+                # Adjust last tiles to not exceed image bounds
+                x_end = min(x + current_tile_size, img_width)
+                y_end = min(y + current_tile_size, img_height)
+                
+                # Adjust start for last tiles to maintain tile_size
+                x_start = max(0, x_end - current_tile_size)
+                y_start = max(0, y_end - current_tile_size)
+                
+                # Crop the tile
+                tile = image.crop((x_start, y_start, x_end, y_end))
+                original_tile_size = tile.size
+                
+                # Resize tile to target image size
+                tile_resized = tile.resize(self.image_size, Image.LANCZOS)
+                
+                tiles.append(TileInfo(
+                    tile_resized, 
+                    (x_start, y_start), 
+                    scale,
+                    original_tile_size
+                ))
+                
+                if x_end >= img_width:
+                    break
+            
+            if y_end >= img_height:
+                break
+        
+        return tiles
+    
+    def generate_all_tiles(self, image: Image.Image) -> List[TileInfo]:
+        """
+        Generate ALL tiles from ALL scales at once.
+        
+        Returns:
+            Flat list of all TileInfo objects across all scales
+        """
+        all_tiles = []
+        
+        print(f"Generating tiles for {len(self.scales)} pyramid levels...")
+        print(f"Image size: {image.size}")
+        print(f"Target tile resize: {self.image_size}")
+        
+        for scale in self.scales:
+            tiles = self.create_tiles(image, scale)
+            all_tiles.extend(tiles)
+            tile_size = int(self.tile_size * scale)
+            print(f" Scale {scale}: {len(tiles)} tiles (tile_size: {tile_size}x{tile_size} -> {self.image_size})")
+        
+        print(f"Total tiles generated: {len(all_tiles)}")
+        return all_tiles
+    
+    def process_batch(self, tile_batch: List[TileInfo], prompt: str) -> List[Dict]:
+        """Process a batch of tiles through SAM3."""
+        batch_outputs = []
+        
+        for tile_info in tile_batch:
+            try:
+                # Run SAM3 on resized tile
+                inference_state = self.processor.set_image(tile_info.image)
+                output = self.processor.set_text_prompt(
+                    state=inference_state, 
+                    prompt=prompt
+                )
+                
+                batch_outputs.append({
+                    'masks': output.get("masks", []),
+                    'boxes': output.get("boxes", []),
+                    'scores': output.get("scores", []),
+                    'tile_info': tile_info
+                })
+                
+            except Exception as e:
+                print(f" Error processing tile: {e}")
+                batch_outputs.append({
+                    'masks': [],
+                    'boxes': [],
+                    'scores': [],
+                    'tile_info': tile_info
+                })
+        
+        return batch_outputs
+    
+    def transform_detection(self, mask, box, score, tile_info: TileInfo, orig_size):
+        """Transform detection from resized tile coordinates to original image coordinates."""
+        offset_x, offset_y = tile_info.offset
+        orig_tile_w, orig_tile_h = tile_info.original_tile_size
+        resized_w, resized_h = self.image_size
+        
+        # Convert to numpy if it's a tensor
+        if torch.is_tensor(box):
+            box = box.cpu().numpy()
+        if torch.is_tensor(mask):
+            mask = mask.cpu().numpy()
+        if torch.is_tensor(score):
+            score = float(score.cpu().numpy())
+        
+        # Calculate scale factors from resized tile to original tile
+        scale_x = orig_tile_w / resized_w
+        scale_y = orig_tile_h / resized_h
+        
+        # Transform box coordinates
+        box_orig = box.copy()
+        box_orig[0] = box[0] * scale_x + offset_x # x1
+        box_orig[1] = box[1] * scale_y + offset_y # y1
+        box_orig[2] = box[2] * scale_x + offset_x # x2
+        box_orig[3] = box[3] * scale_y + offset_y # y2
+        
+        # Clip to image bounds
+        box_orig[0] = max(0, min(box_orig[0], orig_size[0]))
+        box_orig[1] = max(0, min(box_orig[1], orig_size[1]))
+        box_orig[2] = max(0, min(box_orig[2], orig_size[0]))
+        box_orig[3] = max(0, min(box_orig[3], orig_size[1]))
+        
+        return Detection(
+            mask=mask,
+            box=box_orig,
+            score=score,
+            scale=tile_info.scale,
+            tile_offset=tile_info.offset
+        )
+    
+    def calculate_iou(self, box1: np.ndarray, box2: np.ndarray) -> float:
+        """Calculate Intersection over Union between two boxes."""
+        x1 = max(box1[0], box2[0])
+        y1 = max(box1[1], box2[1])
+        x2 = min(box1[2], box2[2])
+        y2 = min(box1[3], box2[3])
+        
+        intersection = max(0, x2 - x1) * max(0, y2 - y1)
+        
+        area1 = (box1[2] - box1[0]) * (box1[3] - box1[1])
+        area2 = (box2[2] - box2[0]) * (box2[3] - box2[1])
+        
+        union = area1 + area2 - intersection
+        
+        return intersection / union if union > 0 else 0
+    
+    def _bbox_enclosed_fraction(self, new_box: np.ndarray, exist_box: np.ndarray) -> float:
+        """Returns fraction of new_box area that is overlapped by exist_box."""
+        x1 = max(new_box[0], exist_box[0])
+        y1 = max(new_box[1], exist_box[1])
+        x2 = min(new_box[2], exist_box[2])
+        y2 = min(new_box[3], exist_box[3])
+
+        inter_w = max(0.0, x2 - x1)
+        inter_h = max(0.0, y2 - y1)
+        intersection = inter_w * inter_h
+
+        area_new = max(1e-8, (new_box[2] - new_box[0]) * (new_box[3] - new_box[1]))
+        return float(intersection / area_new)
+
+    def hierarchical_scale_filter(self, detections: List[Detection]) -> List[Detection]:
+        """
+        Filter detections hierarchically by scale.
+        For each detection from a smaller scale, check if it's enclosed by 
+        any detection from a larger scale. Remove if enclosed fraction exceeds threshold.
+        """
+        # Group detections by scale
+        detections_by_scale = {}
+        for det in detections:
+            if det.scale not in detections_by_scale:
+                detections_by_scale[det.scale] = []
+            detections_by_scale[det.scale].append(det)
+        
+        # Process scales from largest to smallest
+        sorted_scales = sorted(detections_by_scale.keys(), reverse=True)
+        filtered_detections = []
+        
+        print(f"\nApplying hierarchical scale filtering (threshold={self.scale_filter_threshold})...")
+        
+        for scale_idx, scale in enumerate(sorted_scales):
+            current_scale_dets = detections_by_scale[scale]
+            print(f" Scale {scale}: {len(current_scale_dets)} detections", end='')
+            
+            if scale_idx == 0:
+                # Largest scale - keep all
+                filtered_detections.extend(current_scale_dets)
+                print(f" -> kept all (largest scale)")
+            else:
+                # Check against all larger scale detections
+                kept = []
+                for det in current_scale_dets:
+                    max_enclosed = 0.0
+                    for larger_det in filtered_detections:
+                        enclosed_frac = self._bbox_enclosed_fraction(det.box, larger_det.box)
+                        max_enclosed = max(max_enclosed, enclosed_frac)
+                        if max_enclosed >= 1.0:
+                            break
+                    
+                    # Keep if not significantly enclosed
+                    if max_enclosed < self.scale_filter_threshold:
+                        kept.append(det)
+                
+                filtered_detections.extend(kept)
+                removed = len(current_scale_dets) - len(kept)
+                print(f" -> kept {len(kept)} (removed {removed})")
+        
+        return filtered_detections
+    
+    def non_max_suppression(self, detections: List[Detection]) -> List[Detection]:
+        """Apply Non-Maximum Suppression to remove duplicate detections."""
+        if len(detections) == 0:
+            return []
+        
+        # Sort by score (descending)
+        detections = sorted(detections, key=lambda d: -d.score)
+        
+        keep = []
+        
+        while detections:
+            current = detections.pop(0)
+            keep.append(current)
+            
+            # Remove detections with high IoU with current
+            detections = [
+                d for d in detections
+                if self.calculate_iou(current.box, d.box) < self.iou_threshold
+            ]
+        
+        return keep
+    
+    def segment_with_tiling(self, image: Image.Image, prompt: str) -> Dict:
+        """
+        Perform pyramidal tiling segmentation with optimized batch processing.
+        
+        Process ALL tiles from ALL scales together, then apply filtering and NMS.
+        
+        Args:
+            image: Input PIL Image
+            prompt: Text prompt for SAM3
+            
+        Returns:
+            Dictionary with 'detections', 'masks', 'boxes', 'scores', 'scales'
+        """
+        orig_size = image.size
+        
+        # Step 1: Generate ALL tiles from ALL scales
+        all_tiles = self.generate_all_tiles(image)
+        
+        # Step 2: Process ALL tiles in batches
+        print(f"\nProcessing {len(all_tiles)} tiles in batches of {self.batch_size}...")
+        all_detections = []
+        
+        for batch_idx in range(0, len(all_tiles), self.batch_size):
+            batch_end = min(batch_idx + self.batch_size, len(all_tiles))
+            tile_batch = all_tiles[batch_idx:batch_end]
+            
+            print(f" Batch {batch_idx//self.batch_size + 1}/{(len(all_tiles)-1)//self.batch_size + 1} "
+                  f"(tiles {batch_idx+1}-{batch_end})", end='\r')
+            
+            # Process batch
+            batch_outputs = self.process_batch(tile_batch, prompt)
+            
+            # Transform and store detections
+            for output in batch_outputs:
+                tile_info = output['tile_info']
+                masks = output['masks']
+                boxes = output['boxes']
+                scores = output['scores']
+                
+                for mask, box, score in zip(masks, boxes, scores):
+                    if score >= self.conf_threshold:
+                        detection = self.transform_detection(
+                            mask, box, score, 
+                            tile_info,
+                            orig_size
+                        )
+                        all_detections.append(detection)
+        
+        print(f"\n\nTotal detections after confidence filtering: {len(all_detections)}")
+        
+        # Step 3: Apply hierarchical scale filtering
+        filtered_detections = self.hierarchical_scale_filter(all_detections)
+        print(f"Detections after hierarchical filtering: {len(filtered_detections)}")
+        
+        # Step 4: Apply final NMS
+        print(f"\nApplying final NMS (IoU threshold={self.iou_threshold})...")
+        final_detections = self.non_max_suppression(filtered_detections)
+        print(f"Final detections after NMS: {len(final_detections)}")
+        
+        # Prepare output in SAM3 format
+        return {
+            'detections': final_detections,
+            'masks': [d.mask for d in final_detections],
+            'boxes': [d.box for d in final_detections],
+            'scores': [d.score for d in final_detections],
+            'scales': [d.scale for d in final_detections]
+        }
+    
+    def visualize_results(self, image: Image.Image, results: Dict, 
+                         save_path: Optional[str] = None):
+        """Visualize detection results on the image with scale information."""
+        fig, ax = plt.subplots(1, figsize=(12, 12))
+        ax.imshow(image)
+        
+        colors = plt.cm.rainbow(np.linspace(0, 1, len(results['boxes'])))
+        
+        for idx, (box, score, scale) in enumerate(zip(results['boxes'], 
+                                                       results['scores'],
+                                                       results.get('scales', [1.0]*len(results['boxes'])))):
+            x1, y1, x2, y2 = box
+            width = x2 - x1
+            height = y2 - y1
+            
+            rect = patches.Rectangle(
+                (x1, y1), width, height,
+                linewidth=2, edgecolor=colors[idx], facecolor='none'
+            )
+            ax.add_patch(rect)
+            
+            # Add label with score and scale
+            ax.text(
+                x1, y1 - 5, f'{score:.2f} (s={scale:.1f})',
+                color='white', fontsize=10, weight='bold',
+                bbox=dict(boxstyle='round', facecolor=colors[idx], alpha=0.7)
+            )
+        
+        ax.set_title(f'Optimized Pyramidal Segmentation ({len(results["boxes"])} detections)')
+        ax.axis('off')
+        plt.tight_layout()
+        
+        if save_path:
+            plt.savefig(save_path, dpi=150, bbox_inches='tight')
+            print(f"Visualization saved to {save_path}")
+        
+        plt.show()

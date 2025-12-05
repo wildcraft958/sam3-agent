@@ -6,7 +6,7 @@
 set -e
 
 # Configuration
-ENDPOINT_URL="https://aryan-don357--sam3-agent-sam3-segment.modal.run"
+ENDPOINT_URL="https://srinjoy59--sam3-agent-sam3-segment.modal.run"
 OPENAI_API_KEY="${1:-${OPENAI_API_KEY:-}}"
 IMAGE_URL="https://images.unsplash.com/photo-1506905925346-21bda4d32df4"
 PROMPT="segment all objects"

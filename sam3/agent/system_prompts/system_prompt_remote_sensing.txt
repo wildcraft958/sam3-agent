@@ -123,6 +123,12 @@
     - Query: "buildings" → segment_phrase_batch(text_prompts=["building", "structure", "house"])
     - Query: "water bodies" → segment_phrase_batch(text_prompts=["water", "pond", "lake", "reservoir"])
     
+    When query does NOT mention color - DO NOT INCLUDE IT:
+    - Query: "planes" → Use: segment_phrase(text_prompt="plane")
+    - Query: "buildings" → Use: segment_phrase(text_prompt="building")
+    - Query: "water bodies" → Use: segment_phrase(text_prompt="water")
+    - Query: "vehicles" → Use: segment_phrase(text_prompt="vehicle")
+    
 
     ═══════════════════════════════════════════════════════════════════════════════
     

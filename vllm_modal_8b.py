@@ -1,8 +1,8 @@
 # vllm_modal_deploy.py
 #
-# Deploy Qwen3-VL-32B-Thinking model with vLLM on Modal
+# Deploy Qwen3-VL-8B-Instruct model with vLLM on Modal
 #
-# This script deploys a vLLM server with Qwen3-VL-32B-Thinking model,
+# This script deploys a vLLM server with Qwen3-VL-8B-Instruct model,
 # using Modal volumes to cache model weights for fast loading.
 #
 # Usage:
@@ -19,9 +19,9 @@
 #   {
 #     "llm_config": {
 #       "base_url": "https://your-username--qwen3-vl-vllm-server.modal.run/v1",
-#       "model": "Qwen/Qwen3-VL-32B-Thinking",
+#       "model": "Qwen/Qwen3-VL-8B-Instruct",
 #       "api_key": "",
-#       "name": "qwen3-vl-32b-thinking-modal"
+#       "name": "qwen3-vl-8b-instruct-modal"
 #     }
 #   }
 
@@ -35,22 +35,22 @@ import modal
 # Modal app + image
 # ------------------------------------------------------------------------------
 
-app = modal.App("qwen3-vl-vllm-server-30B")
+app = modal.App("qwen3-vl-vllm-server-8B")
 
-# Create volume for model weights (~64GB for 32B model in bfloat16)
+# Create volume for model weights (~16GB for 8B model in bfloat16)
 # This will cache the model weights to avoid re-downloading on each deployment
-MODEL_VOLUME = modal.Volume.from_name("qwen3-vl-30b-instruct-weights", create_if_missing=True)
+MODEL_VOLUME = modal.Volume.from_name("qwen3-vl-8b-instruct-weights", create_if_missing=True)
 
 # Model configuration
-MODEL_ID = "Qwen/Qwen3-VL-30B-A3B-Instruct"
+MODEL_ID = "Qwen/Qwen3-VL-8B-Instruct"
 HF_CACHE_DIR = "/root/.cache/huggingface"  # Standard HuggingFace cache location
 
 # GPU Configuration
 # Available GPUs in Modal: "B200", "H200", "H100", "A100", "L40S", "A10", "L4", "T4"
-# For 30B model: Use tensor parallelism (2-4 GPUs) to avoid OOM
+# For 8B model: Single GPU is sufficient (A100 or L40S recommended)
 # Note: B200 and H200 may not be available in all regions. If unavailable, use H100 or A100.
-GPU_TYPE = "A100-80GB"  # A100 80GB recommended for 30B model
-NUM_GPUS = 2  # Use 2 GPUs with tensor parallelism to avoid OOM (increase to 3-4 if still OOM)
+GPU_TYPE = "A100-80GB"  # A100 80GB works well for 8B model (L40S or A10 also sufficient)
+NUM_GPUS = 1  # Single GPU is sufficient for 8B model
 
 # Build GPU string for Modal
 if NUM_GPUS == 1:
@@ -103,7 +103,7 @@ USE_AUTOMATIC_PARSER = True  # Set to False to fallback to manual parsing
     secrets=[
         modal.Secret.from_name("huggingface-secret"),  # For HF_TOKEN if model is gated
     ],
-    timeout=7200,  # 2 hour timeout for model loading (32B model takes longer)
+    timeout=3600,  # 1 hour timeout for model loading (8B model loads faster)
     scaledown_window=3600,  # Keep container alive for 1 hour after last request
     min_containers=1,  # Keep at least 1 container always running (persistent model)
 )
@@ -111,15 +111,15 @@ USE_AUTOMATIC_PARSER = True  # Set to False to fallback to manual parsing
 @modal.asgi_app()
 def vllm_server():
     """
-    Deploy vLLM server with Qwen3-VL-32B-Thinking model.
+    Deploy vLLM server with Qwen3-VL-8B-Instruct model.
     
     This function uses vLLM's built-in OpenAI server with automatic tool call parsing
     (when USE_AUTOMATIC_PARSER=True) or falls back to custom FastAPI endpoint with
     manual parsing (when USE_AUTOMATIC_PARSER=False).
     
     GPU Configuration:
-    - Single GPU: Set NUM_GPUS=1, GPU_TYPE="A100" (A100 80GB recommended for 32B model)
-    - Multiple GPUs: Set NUM_GPUS=2+ for tensor parallelism (if single GPU OOM)
+    - Single GPU: Set NUM_GPUS=1, GPU_TYPE="A100" (A100 80GB works well, L40S or A10 also sufficient for 8B model)
+    - Multiple GPUs: Set NUM_GPUS=2+ for tensor parallelism (usually not needed for 8B model)
     """
     import atexit
     import time
@@ -128,6 +128,7 @@ def vllm_server():
     from fastapi.responses import JSONResponse
     from fastapi import Request
     from starlette.requests import ClientDisconnect
+    from fastapi.middleware.cors import CORSMiddleware
     
     print(f"🚀 Initializing vLLM server with {MODEL_ID}...")
     print(f"GPU Configuration: {GPU_SPEC} ({NUM_GPUS} GPU(s))")
@@ -141,18 +142,22 @@ def vllm_server():
     os.environ["HF_HUB_CACHE"] = str(model_cache_path)
     
     # Create FastAPI app for proxy
-    from fastapi.middleware.cors import CORSMiddleware
     app = fastapi.FastAPI(title="Qwen3-VL vLLM Server")
-    
-    # Add CORS middleware to allow frontend access
+    # Robust CORS: allow frontend origins configured via env (default: allow all)
+    allowed_origins_raw = os.environ.get("CORS_ALLOW_ORIGINS", "*")
+    allowed_origins = (
+        ["*"]
+        if allowed_origins_raw.strip() == "*"
+        else [o.strip() for o in allowed_origins_raw.split(",") if o.strip()]
+    )
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],  # Allow all origins for API access
+        allow_origins=allowed_origins or ["*"],
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+        expose_headers=["*"],
     )
-    
     http_client = httpx.AsyncClient(timeout=300.0)
     
     vllm_process = None
@@ -169,23 +174,23 @@ def vllm_server():
             "--model", MODEL_ID,
             "--trust-remote-code",
             "--dtype", "bfloat16",
-            "--gpu-memory-utilization", "0.85",  # Reduced from 0.95 to avoid OOM
+            "--gpu-memory-utilization", "0.90",  # Reduced from 0.95 to avoid OOM
             "--max-model-len", "32768",  # Reduced from 60K to 32K to save memory (increase if needed)
-            "--limit-mm-per-prompt", '{"image": 4}',  # Increased to 4 for examine_each_mask (needs 3 images: raw, masked, zoomed)
+            "--limit-mm-per-prompt", '{"image": 2}',  # Enforce 2-image cap per prompt (agent stays within this limit)
             "--enforce-eager",  # Disables CUDA graphs to save memory
-            "--max-num-seqs", "2",  # Further reduced batch size for memory efficiency
+            "--max-num-seqs", "1",  # Further reduced batch size for memory efficiency
             "--max-num-batched-tokens", "4096",  # Reduced to save memory
             "--swap-space", "4",  # Enable 4GB CPU swap space for overflow
             "--port", str(vllm_port),
             "--host", "0.0.0.0",
         ]
         
-        # Add tensor parallelism if multiple GPUs (required for 30B model to avoid OOM)
+        # Add tensor parallelism if multiple GPUs (usually not needed for 8B model)
         if NUM_GPUS > 1:
             vllm_cmd.extend(["--tensor-parallel-size", str(NUM_GPUS)])
-            print(f"✓ Tensor parallelism enabled: {NUM_GPUS} GPUs (splits model across GPUs to avoid OOM)")
+            print(f"✓ Tensor parallelism enabled: {NUM_GPUS} GPUs (splits model across GPUs)")
         else:
-            print("⚠️  WARNING: Single GPU may cause OOM for 30B model. Consider setting NUM_GPUS=2 or higher.")
+            print("✓ Single GPU configuration (sufficient for 8B model)")
         
         # Enable flash attention (installed in image by default)
         # try:
@@ -458,7 +463,7 @@ def vllm_server():
     gpu="A100-80GB",  # Use A100 for download (or any available GPU - doesn't need to match server GPU)
     volumes={HF_CACHE_DIR: MODEL_VOLUME},
     secrets=[modal.Secret.from_name("huggingface-secret")],
-    timeout=7200,  # 2 hours for 32B model download (larger model requires more time)
+    timeout=3600,  # 1 hour for 8B model download (smaller model downloads faster)
 )
 def download_model_to_volume():
     """
@@ -479,7 +484,7 @@ def download_model_to_volume():
     
     print(f"Downloading {MODEL_ID} to volume...")
     print(f"Cache directory: {HF_CACHE_DIR}")
-    print("This may take 15-30 minutes for a 32B model...")
+    print("This may take 5-15 minutes for an 8B model...")
     
     # Set HuggingFace environment variables
     os.environ["HF_HOME"] = HF_CACHE_DIR

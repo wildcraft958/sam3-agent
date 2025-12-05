@@ -24,7 +24,7 @@ def main():
     parser.add_argument(
         "--endpoint-url",
         type=str,
-        default="https://animesh-raj--sam3-agent-sam3-segment.modal.run",
+        default="https://srinjoy59--sam3-agent-sam3-segment.modal.run",
         help="Modal endpoint URL"
     )
     parser.add_argument(
