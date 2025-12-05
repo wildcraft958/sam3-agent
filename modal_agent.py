@@ -220,6 +220,411 @@ class VerificationResponse(BaseModel):
 
 
 # ------------------------------------------------------------------------------
+# Pydantic models for OpenAI-compatible Chat Completions API (Swagger docs)
+# ------------------------------------------------------------------------------
+
+class ImageUrl(BaseModel):
+    """Image URL for multimodal messages"""
+    url: str = Field(..., description="URL of the image or base64 data URI (data:image/jpeg;base64,...)")
+    detail: Optional[str] = Field("auto", description="Image detail level: 'low', 'high', or 'auto'")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "url": "https://example.com/image.jpg",
+                "detail": "auto"
+            }
+        }
+
+
+class ContentPartText(BaseModel):
+    """Text content part for multimodal messages"""
+    type: str = Field("text", const=True, description="Content type, must be 'text'")
+    text: str = Field(..., description="Text content")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "type": "text",
+                "text": "What is in this image?"
+            }
+        }
+
+
+class ContentPartImage(BaseModel):
+    """Image content part for multimodal messages"""
+    type: str = Field("image_url", const=True, description="Content type, must be 'image_url'")
+    image_url: ImageUrl = Field(..., description="Image URL object")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "type": "image_url",
+                "image_url": {
+                    "url": "https://example.com/image.jpg",
+                    "detail": "auto"
+                }
+            }
+        }
+
+
+class FunctionDefinition(BaseModel):
+    """Function definition for tool calling"""
+    name: str = Field(..., description="Function name")
+    description: Optional[str] = Field(None, description="Function description")
+    parameters: Optional[Dict[str, Any]] = Field(None, description="Function parameters (JSON Schema)")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "name": "get_weather",
+                "description": "Get current weather for a location",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "location": {"type": "string", "description": "City name"},
+                        "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}
+                    },
+                    "required": ["location"]
+                }
+            }
+        }
+
+
+class Tool(BaseModel):
+    """Tool definition for function calling"""
+    type: str = Field("function", description="Tool type, currently only 'function' is supported")
+    function: FunctionDefinition = Field(..., description="Function definition")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get current weather",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"location": {"type": "string"}},
+                        "required": ["location"]
+                    }
+                }
+            }
+        }
+
+
+class ToolCall(BaseModel):
+    """Tool call made by the assistant"""
+    id: str = Field(..., description="Unique identifier for the tool call")
+    type: str = Field("function", description="Type of tool call")
+    function: Dict[str, Any] = Field(..., description="Function call details with 'name' and 'arguments'")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "id": "call_abc123",
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "arguments": '{"location": "San Francisco"}'
+                }
+            }
+        }
+
+
+class ChatMessage(BaseModel):
+    """
+    Chat message in conversation.
+    
+    Supports multiple roles:
+    - system: System instructions
+    - user: User messages (can include text and images)
+    - assistant: Assistant responses (can include tool calls)
+    - tool: Tool/function results
+    """
+    role: str = Field(
+        ..., 
+        description="Message role: 'system', 'user', 'assistant', or 'tool'",
+        example="user"
+    )
+    content: Optional[Any] = Field(
+        None,
+        description="Message content. String for text, or list of content parts for multimodal (text + images)"
+    )
+    name: Optional[str] = Field(None, description="Name of the author (for tool messages)")
+    tool_calls: Optional[List[ToolCall]] = Field(None, description="Tool calls made by the assistant")
+    tool_call_id: Optional[str] = Field(None, description="Tool call ID (required for 'tool' role messages)")
+
+    class Config:
+        json_schema_extra = {
+            "examples": [
+                {
+                    "role": "user",
+                    "content": "What is the capital of France?"
+                },
+                {
+                    "role": "user", 
+                    "content": [
+                        {"type": "text", "text": "What is in this image?"},
+                        {"type": "image_url", "image_url": {"url": "https://example.com/image.jpg"}}
+                    ]
+                },
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_123",
+                            "type": "function",
+                            "function": {"name": "get_weather", "arguments": '{"location": "Paris"}'}
+                        }
+                    ]
+                }
+            ]
+        }
+
+
+class ChatCompletionRequest(BaseModel):
+    """
+    OpenAI-compatible chat completion request.
+    
+    Use this to send messages to the LLM and receive completions.
+    Supports text, multimodal (images), and tool/function calling.
+    """
+    model: str = Field(
+        ..., 
+        description="Model identifier to use for completion",
+        example="gpt-4o"
+    )
+    messages: List[ChatMessage] = Field(
+        ..., 
+        description="List of messages in the conversation",
+        min_length=1
+    )
+    temperature: Optional[float] = Field(
+        0.7, 
+        ge=0.0, 
+        le=2.0, 
+        description="Sampling temperature (0-2). Higher = more random"
+    )
+    top_p: Optional[float] = Field(
+        1.0, 
+        ge=0.0, 
+        le=1.0, 
+        description="Nucleus sampling: only consider tokens with top_p probability mass"
+    )
+    n: Optional[int] = Field(
+        1, 
+        ge=1, 
+        le=10, 
+        description="Number of completions to generate"
+    )
+    stream: Optional[bool] = Field(
+        False, 
+        description="Whether to stream partial responses (SSE)"
+    )
+    stop: Optional[Any] = Field(
+        None, 
+        description="Stop sequences (string or list of strings)"
+    )
+    max_tokens: Optional[int] = Field(
+        4096, 
+        ge=1, 
+        le=128000, 
+        description="Maximum tokens to generate"
+    )
+    presence_penalty: Optional[float] = Field(
+        0.0, 
+        ge=-2.0, 
+        le=2.0, 
+        description="Presence penalty for new tokens (-2 to 2)"
+    )
+    frequency_penalty: Optional[float] = Field(
+        0.0, 
+        ge=-2.0, 
+        le=2.0, 
+        description="Frequency penalty for repeated tokens (-2 to 2)"
+    )
+    logit_bias: Optional[Dict[str, float]] = Field(
+        None, 
+        description="Token ID to bias value mapping"
+    )
+    user: Optional[str] = Field(
+        None, 
+        description="Unique user identifier for abuse monitoring"
+    )
+    tools: Optional[List[Tool]] = Field(
+        None, 
+        description="List of tools/functions available for the model to call"
+    )
+    tool_choice: Optional[Any] = Field(
+        None, 
+        description="Tool choice: 'none', 'auto', 'required', or specific tool"
+    )
+    response_format: Optional[Dict[str, Any]] = Field(
+        None, 
+        description="Response format: {'type': 'json_object'} for JSON mode"
+    )
+    seed: Optional[int] = Field(
+        None, 
+        description="Random seed for deterministic generation"
+    )
+
+    class Config:
+        extra = "allow"  # Allow additional fields for provider compatibility
+        json_schema_extra = {
+            "example": {
+                "model": "gpt-4o",
+                "messages": [
+                    {"role": "system", "content": "You are a helpful assistant."},
+                    {"role": "user", "content": "What is the capital of France?"}
+                ],
+                "temperature": 0.7,
+                "max_tokens": 1000
+            }
+        }
+
+
+class ChatChoice(BaseModel):
+    """A single completion choice in the response"""
+    index: int = Field(..., description="Choice index (0-based)")
+    message: ChatMessage = Field(..., description="Generated message")
+    finish_reason: Optional[str] = Field(
+        None, 
+        description="Reason generation stopped: 'stop', 'length', 'tool_calls', 'content_filter'"
+    )
+    logprobs: Optional[Dict[str, Any]] = Field(None, description="Log probabilities (if requested)")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "The capital of France is Paris."
+                },
+                "finish_reason": "stop"
+            }
+        }
+
+
+class TokenUsage(BaseModel):
+    """Token usage statistics for the completion"""
+    prompt_tokens: int = Field(..., description="Tokens in the prompt")
+    completion_tokens: int = Field(..., description="Tokens in the completion")
+    total_tokens: int = Field(..., description="Total tokens (prompt + completion)")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "prompt_tokens": 25,
+                "completion_tokens": 10,
+                "total_tokens": 35
+            }
+        }
+
+
+class ChatCompletionResponse(BaseModel):
+    """
+    OpenAI-compatible chat completion response.
+    
+    Contains the generated message(s), token usage, and metadata.
+    """
+    id: str = Field(..., description="Unique completion identifier", example="chatcmpl-abc123")
+    object: str = Field("chat.completion", description="Object type (always 'chat.completion')")
+    created: int = Field(..., description="Unix timestamp of creation")
+    model: str = Field(..., description="Model used for completion")
+    choices: List[ChatChoice] = Field(..., description="List of completion choices")
+    usage: Optional[TokenUsage] = Field(None, description="Token usage statistics")
+    system_fingerprint: Optional[str] = Field(None, description="System fingerprint for reproducibility")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "id": "chatcmpl-abc123",
+                "object": "chat.completion",
+                "created": 1677652288,
+                "model": "gpt-4o",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "The capital of France is Paris."
+                        },
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 25,
+                    "completion_tokens": 10,
+                    "total_tokens": 35
+                }
+            }
+        }
+
+
+class ChatCompletionChunk(BaseModel):
+    """
+    Streaming chat completion chunk (SSE response).
+    
+    Sent when stream=true. Contains partial content.
+    """
+    id: str = Field(..., description="Completion identifier (same across chunks)")
+    object: str = Field("chat.completion.chunk", description="Object type")
+    created: int = Field(..., description="Unix timestamp of creation")
+    model: str = Field(..., description="Model used for completion")
+    choices: List[Dict[str, Any]] = Field(..., description="Delta choices with partial content")
+    system_fingerprint: Optional[str] = Field(None, description="System fingerprint")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "id": "chatcmpl-abc123",
+                "object": "chat.completion.chunk",
+                "created": 1677652288,
+                "model": "gpt-4o",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"content": "The"},
+                        "finish_reason": None
+                    }
+                ]
+            }
+        }
+
+
+class APIError(BaseModel):
+    """API error response"""
+    message: str = Field(..., description="Error message")
+    type: str = Field(..., description="Error type", example="invalid_request_error")
+    param: Optional[str] = Field(None, description="Parameter that caused the error")
+    code: Optional[str] = Field(None, description="Error code")
+
+
+class ErrorResponse(BaseModel):
+    """
+    OpenAI-compatible error response.
+    
+    Returned when an API request fails.
+    """
+    error: APIError = Field(..., description="Error details")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "error": {
+                    "message": "Invalid API key provided",
+                    "type": "authentication_error",
+                    "param": None,
+                    "code": "invalid_api_key"
+                }
+            }
+        }
+
+
+# ------------------------------------------------------------------------------
 # LLM configuration helpers
 # ------------------------------------------------------------------------------
 
