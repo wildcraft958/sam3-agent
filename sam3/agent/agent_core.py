@@ -1622,7 +1622,7 @@ DO NOT try to segment again. Analyze the existing masks shown in the image above
                         print(f"\n🔄 Applying BBox NMS deduplication to {masks_before_nms} total masks...")
                         
                         # Remove overlaps using Bounding Box NMS only
-                        combined_output = remove_overlapping_masks(combined_output, bbox_iou_thresh=0.5)
+                        combined_output = remove_overlapping_masks(combined_output, bbox_iou_thresh=0.4)
                         final_masks = len(combined_output.get("pred_boxes", []))
                         MASKS_FOUND_COUNT = final_masks
                         
