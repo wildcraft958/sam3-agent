@@ -27,8 +27,8 @@ import requests
 # ============================================================================
 
 DEFAULT_CONFIG = {
-    "sam3_endpoint": "https://aryan-don357--sam3-agent-sam3-segment.modal.run",
-    "vllm_endpoint": "https://aryan-don357--qwen3-vl-vllm-server-30b-vllm-server.modal.run/v1",
+    "sam3_endpoint": "https://srinjoy59--sam3-agent-sam3-segment.modal.run",
+    "vllm_endpoint": "https://srinjoy59--qwen3-vl-vllm-server-30b-vllm-server.modal.run/v1",
     "model_name": "Qwen/Qwen2.5-VL-32B-Instruct",
     "api_key": "dummy",  # vLLM doesn't require real key
     "max_tokens": 4096,

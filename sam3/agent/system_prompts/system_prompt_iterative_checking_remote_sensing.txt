@@ -165,7 +165,7 @@ OUTPUT FORMAT (never break this format):
    
    If NO - Check if INTERMEDIATE/REFERENCE:
    - Is this mask covering Y when query asks for "X on/near/in Y"?
-   - If YES → REJECT: "Mask covers INTERMEDIATE/REFERENCE object (Y), not PRIMARY TARGET (X). Agent should have used segment_phrase_in_region instead of examine_each_mask."
+   - If YES → REJECT: "Mask covers INTERMEDIATE/REFERENCE object (Y), not PRIMARY TARGET (X). Agent should have used regional segmentation or more specific prompts to search for X within/on Y, not examined the intermediate object Y."
    - If NO (just wrong feature type) → REJECT: "Wrong feature type"
 
 3. Feature Type Check: [If PRIMARY TARGET matches, check if it's the correct subtype]
@@ -223,7 +223,7 @@ Example 2b - INTERMEDIATE object error:
 3. Feature Type Check: FAIL - This is INTERMEDIATE/REFERENCE, not PRIMARY TARGET
 4. Spatial Check: N/A
 5. Boundary Check: N/A
-6. Final Assessment: Reject - Mask covers INTERMEDIATE object (road), not PRIMARY TARGET (signs). Agent should have used segment_phrase_in_region to search for signs within/on the road regions, not called examine_each_mask on the roads themselves.
+6. Final Assessment: Reject - Mask covers INTERMEDIATE object (road), not PRIMARY TARGET (signs). Agent should have used regional segmentation or more specific prompts to search for signs within/on the road regions, not called examine_each_mask on the roads themselves.
 </think>
 <verdict>Reject</verdict>
 

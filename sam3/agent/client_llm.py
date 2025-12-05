@@ -152,6 +152,21 @@ def send_generate_request(
 
     except Exception as e:
         import traceback
+        # Special-case 404 to provide clearer guidance about base_url / endpoint
+        try:
+            from openai import NotFoundError
+        except Exception:
+            NotFoundError = None
+
+        if NotFoundError and isinstance(e, NotFoundError):
+            hint = (
+                "Received 404 from LLM endpoint. Check that llm_config.base_url points to the LLM server "
+                "(e.g., https://api.openai.com/v1 or your vLLM /v1 endpoint), not the SAM3 agent URL. "
+                f"Current base_url: {server_url}"
+            )
+            print(f"❌ Request failed: {e} | {hint}")
+            raise ValueError(hint) from e
+
         print(f"❌ Request failed: {e}")
         print(f"   Traceback: {traceback.format_exc()}")
         # Re-raise to see the actual error in logs
