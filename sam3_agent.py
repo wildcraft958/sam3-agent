@@ -47,6 +47,10 @@ import tempfile
 import re
 import io
 from functools import partial
+
+# Disable PIL decompression bomb limit for large satellite/aerial imagery
+from PIL import Image as PILImageConfig
+PILImageConfig.MAX_IMAGE_PIXELS = None
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple, Literal, Union
 from pydantic import BaseModel, Field, ValidationError, ConfigDict
@@ -1197,7 +1201,14 @@ Output ONLY the alternative keyword (2-3 words max), nothing else:"""
         try:
             # Decode RLE to binary mask using pycocotools
             # mask_rle should be a dict with 'counts' and 'size' keys
-            mask_binary = mask_utils.decode(mask_rle)
+            # Handle stringified counts (from JSON serialization fix)
+            mask_rle_for_decode = mask_rle
+            if isinstance(mask_rle, dict) and 'counts' in mask_rle:
+                counts = mask_rle['counts']
+                if isinstance(counts, str):
+                    mask_rle_for_decode = mask_rle.copy()
+                    mask_rle_for_decode['counts'] = counts.encode('utf-8')
+            mask_binary = mask_utils.decode(mask_rle_for_decode)
             
             # Handle mask dimensions
             if mask_binary.ndim > 2:
@@ -2419,7 +2430,8 @@ Now analyze the image and query."""
             }
         
         # Save to JSON (same as original call_sam_service)
-        text_prompt_for_save = text_prompt.replace("/", "_")
+        import hashlib
+        
         image_basename = _os.path.basename(image_path)
         image_basename_no_ext = _os.path.splitext(image_basename)[0]
         safe_dir_name = image_basename_no_ext.replace("/", "_").replace("\\", "_")
@@ -2428,7 +2440,13 @@ Now analyze the image and query."""
         if not safe_dir_name or safe_dir_name.startswith("-"):
             safe_dir_name = "output" if not safe_dir_name else "image_" + safe_dir_name
         
-        output_dir = _os.path.join(output_folder_path, safe_dir_name, text_prompt_for_save)
+        # Truncate/hash long prompts to avoid "Filename too long" OS error (255 byte limit)
+        prompt_hash = hashlib.md5(text_prompt.encode()).hexdigest()[:8]
+        safe_prompt_slug = text_prompt.replace("/", "_").replace("\\", "_")
+        if len(safe_prompt_slug) > 50:
+            safe_prompt_slug = safe_prompt_slug[:50] + f"_{prompt_hash}"
+        
+        output_dir = _os.path.join(output_folder_path, safe_dir_name, safe_prompt_slug)
         _os.makedirs(output_dir, exist_ok=True)
         
         json_path = _os.path.join(output_dir, "sam3_output.json")
