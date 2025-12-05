@@ -124,6 +124,9 @@ class VLMInterface:
         from PIL import Image as PILImage
         buffered = io.BytesIO()
         if isinstance(image, PILImage.Image):
+            # Convert to RGB if needed (JPEG doesn't support alpha)
+            if image.mode in ('RGBA', 'LA', 'P'):
+                image = image.convert('RGB')
             image.save(buffered, format="JPEG")
         else:
             # Assume it's already bytes
@@ -1748,6 +1751,11 @@ Output ONLY the alternative keyword (2-3 words max), nothing else:"""
                                     # Encode mask as RLE at GLOBAL resolution
                                     mask_rle = rle_encode(torch.tensor(mask_binary_global, dtype=torch.bool).unsqueeze(0))[0]
                                     
+                                    # CRITICAL FIX: Decode bytes to string for JSON serialization
+                                    # pycocotools returns 'counts' as bytes which can't be serialized to JSON
+                                    if "counts" in mask_rle and isinstance(mask_rle["counts"], bytes):
+                                        mask_rle["counts"] = mask_rle["counts"].decode("utf-8")
+                                    
                                     # Validate mask-to-box alignment: RLE size must match original image
                                     if mask_rle.get("size") != [orig_h, orig_w]:
                                         print(f"⚠ Mask size mismatch: expected [{orig_h}, {orig_w}], got {mask_rle.get('size')}")
@@ -2534,9 +2542,28 @@ Now analyze the image and query."""
             )
 
             with tempfile.TemporaryDirectory() as temp_dir:
-                image_path = os.path.join(temp_dir, "input_image.jpg")
-                with open(image_path, "wb") as f:
-                    f.write(image_bytes)
+                # Convert image to JPEG for reliable reading by cv2/PIL
+                from PIL import Image as PILImage
+                
+                try:
+                    # Open image and convert to RGB if needed
+                    pil_img = PILImage.open(io.BytesIO(image_bytes))
+                    
+                    # Convert to RGB if needed (handles RGBA, P, LA modes)
+                    if pil_img.mode in ('RGBA', 'LA', 'P'):
+                        pil_img = pil_img.convert('RGB')
+                    elif pil_img.mode != 'RGB':
+                        pil_img = pil_img.convert('RGB')
+                    
+                    # Save once as JPEG for consistency
+                    image_path = os.path.join(temp_dir, "input_image.jpg")
+                    pil_img.save(image_path, format="JPEG", quality=95)
+                    
+                except Exception as img_error:
+                    print(f"⚠️ Image format detection failed: {img_error}, trying raw save")
+                    image_path = os.path.join(temp_dir, "input_image.jpg")
+                    with open(image_path, "wb") as f:
+                        f.write(image_bytes)
 
                 output_dir = os.path.join(temp_dir, "output")
                 os.makedirs(output_dir, exist_ok=True)
@@ -2552,7 +2579,7 @@ Now analyze the image and query."""
                         call_sam_service=call_sam_service,
                         debug=debug,
                         output_dir=output_dir,
-                        max_generations=10,  # Limit LLM API calls to 7
+                        max_generations=10,  # Limit LLM API calls to 10
                     )
 
                     if not final_output_dict:
@@ -2579,6 +2606,24 @@ Now analyze the image and query."""
                     raw_json.pop("text_prompt", None)
                     raw_json.pop("image_path", None)
 
+                    # Helper to make objects JSON-serializable (handles bytes from RLE masks)
+                    def make_json_serializable(obj):
+                        """Recursively convert bytes and other non-serializable types to JSON-safe values."""
+                        if isinstance(obj, bytes):
+                            return obj.decode("utf-8")
+                        if isinstance(obj, dict):
+                            return {k: make_json_serializable(v) for k, v in obj.items()}
+                        if isinstance(obj, list):
+                            return [make_json_serializable(i) for i in obj]
+                        if isinstance(obj, (int, float, str, bool, type(None))):
+                            return obj
+                        # Handle numpy types
+                        if hasattr(obj, 'item'):  # numpy scalar
+                            return obj.item()
+                        if hasattr(obj, 'tolist'):  # numpy array
+                            return obj.tolist()
+                        return str(obj)  # Fallback to string representation
+
                     # Try to normalize "regions" field if present, otherwise construct from pred_boxes/pred_masks
                     regions = (
                         raw_json.get("regions")
@@ -2600,6 +2645,10 @@ Now analyze the image and query."""
                             }
                             for i, (box, mask) in enumerate(zip(pred_boxes, pred_masks))
                         ]
+
+                    # Ensure all data is JSON-serializable before returning
+                    raw_json = make_json_serializable(raw_json)
+                    regions = make_json_serializable(regions)
 
                     summary = (
                         f"SAM3 returned {len(regions)} regions for prompt: {prompt}"
@@ -2747,8 +2796,9 @@ Supports any OpenAI-compatible API (OpenAI, vLLM, Anthropic, etc.)
         if image_bytes:
             try:
                 img = PILImage.open(io.BytesIO(image_bytes))
+                img_format = img.format  # Capture format BEFORE verify() closes the image
                 img.verify()  # Verify it's a valid image
-                print(f"✓ Valid image: {img.format} format")
+                print(f"✓ Valid image: {img_format} format")
             except Exception as e:
                 # Log first 100 bytes for debugging
                 preview = image_bytes[:100] if len(image_bytes) > 100 else image_bytes
