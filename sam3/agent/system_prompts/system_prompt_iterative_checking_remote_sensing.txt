@@ -55,6 +55,31 @@ REMOTE SENSING QUICK CHECKS:
    PROBLEMATIC: Major portions missing, large wrong areas included
 
 
+═══════════════════════════════════════════════════════════════════════════════
+⚠️ CRITICAL: SHADOW VS DARK OBJECT VERIFICATION
+═══════════════════════════════════════════════════════════════════════════════
+
+For ANY dark-colored mask, you MUST determine: Is this a SHADOW or a REAL DARK OBJECT?
+
+SHADOW INDICATORS (if 3+ apply → REJECT as shadow):
+□ Elongated shape stretching in one direction
+□ Adjacent to a taller object (building, tree, pole)
+□ Flat/uniform with NO internal texture or structure
+□ Shape does NOT match query object type
+□ Follows same direction as other shadows in image
+
+REAL DARK OBJECT INDICATORS (if these apply → may ACCEPT):
+✓ Defined edges matching query object shape (car=rectangular, building=angular)
+✓ Has internal texture, details, or structure visible
+✓ NOT positioned as if cast from adjacent tall object
+✓ Shape CONSISTENT with query target type
+✓ Similar objects in image also appear dark
+
+⚠️ DO NOT reject dark objects just because they are dark!
+   Verify they exhibit SHADOW characteristics before rejecting.
+
+═══════════════════════════════════════════════════════════════════════════════
+
 DECISION CRITERIA:
 
 ACCEPT if:
@@ -62,12 +87,14 @@ ACCEPT if:
 ✓ Spatial location satisfies position constraints
 ✓ Boundaries reasonably delineate the feature
 ✓ It's the TARGET feature, not a reference feature
+✓ If dark: Has object structure, NOT shadow characteristics
 
 REJECT if:
 ✗ Wrong feature type
 ✗ Wrong location
 ✗ Major boundary errors (>30% wrong area)
 ✗ Mask is on reference feature instead of target
+✗ Mask is a SHADOW (elongated, flat, adjacent to tall object, no structure)
 
 
 OUTPUT FORMAT:
@@ -108,17 +135,47 @@ Example 1 - HIGH confidence, quick accept:
 </think>
 <verdict>Accept</verdict>
 
-Example 2 - LOW confidence, PRIMARY TARGET mismatch:
+Example 2 - LOW confidence, shadow misidentified as object:
 <think>
-1. Quick Scan: LOW confidence - mask on dark area, could be water or shadow
+1. Quick Scan: LOW confidence - mask on dark elongated area
 2. PRIMARY TARGET Check:
-   - Query: "water in northern part"
-   - PRIMARY TARGET: "water"
-   - This mask covers: shadow
-   - Match: NO - This is a shadow from building, not water
-3. Feature Type Check: FAIL - wrong feature type
-4. Spatial Check: Yes - location matches "northern"
-5. Boundary Check: Boundaries follow shadow shape
-6. Final Assessment: Reject - PRIMARY TARGET mismatch. Mask covers shadow, not water.
+   - Query: "black cars"
+   - PRIMARY TARGET: "cars"
+   - This mask covers: dark elongated shape
+   - Match: UNCERTAIN - need shadow check
+
+3. SHADOW VS DARK OBJECT CHECK:
+   □ Elongated shape? YES - stretches in one direction
+   □ Adjacent to tall object? YES - next to building
+   □ No internal structure? YES - flat, uniform dark
+   □ Shape matches car? NO - too elongated, no wheels/windows
+   □ Follows shadow direction? YES - same angle as other shadows
+   
+   Result: 5/5 shadow indicators → This is a SHADOW, not a car
+
+4. Final Assessment: Reject - This is a building's shadow, not a black car.
 </think>
 <verdict>Reject</verdict>
+
+Example 3 - Dark object correctly identified (NOT a shadow):
+<think>
+1. Quick Scan: MEDIUM confidence - dark rectangular shape in parking lot
+2. PRIMARY TARGET Check:
+   - Query: "black cars"
+   - PRIMARY TARGET: "cars"
+   - This mask covers: dark rectangular shape
+   - Match: POSSIBLE - need shadow check
+
+3. SHADOW VS DARK OBJECT CHECK:
+   □ Elongated shape? NO - compact rectangle like a car
+   □ Adjacent to tall object? NO - in open parking lot
+   □ No internal structure? NO - can see windshield/roof details
+   □ Shape matches car? YES - rectangular with car proportions
+   □ Follows shadow direction? NO - other cars cast shadows, this doesn't
+   
+   Result: 0/5 shadow indicators → This is a REAL DARK CAR
+
+4. Spatial Check: In parking lot as expected
+5. Final Assessment: Accept - dark-colored car, NOT a shadow
+</think>
+<verdict>Accept</verdict>

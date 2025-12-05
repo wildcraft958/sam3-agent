@@ -27,6 +27,427 @@ from io import BytesIO
 import torch
 
 
+def visualize_mask_subset(input_json: dict, mask_indices: list, output_path: str) -> str:
+    """
+    Render only a subset of masks (specified by indices) on the image.
+    Returns the path to the saved visualization.
+    """
+    # Create a subset JSON with only the specified masks
+    subset_json = {
+        "orig_img_h": input_json["orig_img_h"],
+        "orig_img_w": input_json["orig_img_w"],
+        "original_image_path": input_json["original_image_path"],
+        "pred_boxes": [input_json["pred_boxes"][i] for i in mask_indices],
+        "pred_masks": [input_json["pred_masks"][i] for i in mask_indices],
+        "pred_scores": [input_json.get("pred_scores", [1.0] * len(input_json["pred_boxes"]))[i] for i in mask_indices],
+    }
+    
+    # Use the visualize function to render
+    viz_img = visualize(subset_json)
+    viz_img.save(output_path)
+    return output_path
+
+
+def batch_assess_confidence(
+    combined_output: dict,
+    img_path: str,
+    initial_query: str,
+    sam_output_dir: str,
+    llm_generate_fn,  # The configured send_generate_request function
+    batch_size: int = 10,
+) -> dict:
+    """
+    Assess confidence for masks in batches of batch_size.
+    
+    If total masks > batch_size, splits into batches, sends each to the model
+    for confidence assessment, and combines results.
+    
+    Args:
+        llm_generate_fn: The configured send_generate_request function (with server_url, api_key)
+    
+    Returns a dict mapping mask index (0-based) to confidence: {"HIGH", "MEDIUM", "LOW"}
+    """
+    num_masks = len(combined_output.get("pred_boxes", []))
+    
+    if num_masks <= batch_size:
+        # No batching needed
+        return {}
+    
+    print(f"\n📊 Batched confidence assessment: {num_masks} masks in batches of {batch_size}")
+    
+    confidences = {}
+    num_batches = (num_masks + batch_size - 1) // batch_size
+    
+    for batch_idx in range(num_batches):
+        start_idx = batch_idx * batch_size
+        end_idx = min(start_idx + batch_size, num_masks)
+        batch_mask_indices = list(range(start_idx, end_idx))
+        
+        print(f"  📦 Batch {batch_idx + 1}/{num_batches}: masks {start_idx + 1}-{end_idx}")
+        
+        # Create visualization for this batch
+        batch_viz_path = os.path.join(sam_output_dir, f"batch_{batch_idx}_viz.png")
+        visualize_mask_subset(combined_output, batch_mask_indices, batch_viz_path)
+        
+        # Create the confidence assessment prompt - simple task instruction only
+        mask_list = ", ".join([str(i + 1) for i in batch_mask_indices])
+        confidence_prompt = f"""TASK: Assess if each mask matches the query "{initial_query}".
+
+Masks shown: {mask_list} (numbered {start_idx + 1} to {end_idx}).
+
+For EACH mask, output ONE line:
+Mask N: HIGH/MEDIUM/LOW
+
+- HIGH = clearly matches "{initial_query}"
+- MEDIUM = probably matches but uncertain
+- LOW = doesn't match or wrong type
+
+Assess each mask now:"""
+
+        # Build messages - no system prompt, just user message with images and task
+        batch_messages = [
+            {
+                "role": "user", 
+                "content": [
+                    {"type": "image", "image": img_path},
+                    {"type": "image", "image": batch_viz_path},
+                    {"type": "text", "text": confidence_prompt},
+                ]
+            }
+        ]
+        
+        try:
+            # Call the model using the configured llm_generate_fn (same as main agent)
+            response = llm_generate_fn(
+                messages=batch_messages,
+                max_tokens=512,
+            )
+            
+            if response:
+                print(f"    ✓ Got confidence assessment")
+                # Parse the response to extract confidences
+                for line in response.split("\n"):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    # Look for patterns like "Mask 1: HIGH" or "Mask 1 - HIGH" or "1: HIGH"
+                    match = re.search(r'(?:Mask\s*)?(\d+)\s*[:\-]\s*(HIGH|MEDIUM|LOW)', line, re.IGNORECASE)
+                    if match:
+                        mask_num = int(match.group(1))
+                        confidence = match.group(2).upper()
+                        # Store with 0-based index
+                        confidences[mask_num - 1] = confidence
+            else:
+                print(f"    ⚠️ No response for batch {batch_idx + 1}")
+                
+        except Exception as e:
+            print(f"    ❌ Error in batch {batch_idx + 1}: {e}")
+    
+    print(f"  ✅ Assessed {len(confidences)}/{num_masks} masks")
+    
+    # Summarize
+    high_count = sum(1 for c in confidences.values() if c == "HIGH")
+    med_count = sum(1 for c in confidences.values() if c == "MEDIUM")
+    low_count = sum(1 for c in confidences.values() if c == "LOW")
+    print(f"     HIGH: {high_count}, MEDIUM: {med_count}, LOW: {low_count}")
+    
+    return confidences
+
+
+def cluster_boxes_by_proximity(boxes: list, distance_threshold: float = 0.15) -> list:
+    """
+    Cluster bounding boxes by spatial proximity using simple greedy clustering.
+    
+    Args:
+        boxes: List of [x1, y1, x2, y2] bounding boxes
+        distance_threshold: Maximum normalized distance between box centers to be in same cluster
+    
+    Returns:
+        List of clusters, where each cluster is a list of box indices
+    """
+    if not boxes:
+        return []
+    
+    # Calculate centroids of each box
+    centroids = []
+    for box in boxes:
+        cx = (box[0] + box[2]) / 2
+        cy = (box[1] + box[3]) / 2
+        centroids.append((cx, cy))
+    
+    # Find image dimensions from boxes for normalization
+    max_x = max(box[2] for box in boxes)
+    max_y = max(box[3] for box in boxes)
+    img_diagonal = (max_x**2 + max_y**2) ** 0.5
+    
+    # Greedy clustering
+    assigned = [False] * len(boxes)
+    clusters = []
+    
+    for i in range(len(boxes)):
+        if assigned[i]:
+            continue
+        
+        # Start new cluster with this box
+        cluster = [i]
+        assigned[i] = True
+        
+        # Find all nearby unassigned boxes
+        for j in range(i + 1, len(boxes)):
+            if assigned[j]:
+                continue
+            
+            # Calculate distance between centroids
+            dist = ((centroids[i][0] - centroids[j][0])**2 + 
+                    (centroids[i][1] - centroids[j][1])**2) ** 0.5
+            normalized_dist = dist / img_diagonal if img_diagonal > 0 else 0
+            
+            if normalized_dist < distance_threshold:
+                cluster.append(j)
+                assigned[j] = True
+        
+        clusters.append(cluster)
+    
+    return clusters
+
+
+def create_cluster_crop(
+    img_path: str,
+    boxes: list,
+    cluster_indices: list,
+    output_path: str,
+    padding_ratio: float = 0.1,
+) -> tuple:
+    """
+    Create a cropped image containing only the boxes in the cluster.
+    
+    Returns:
+        (crop_path, crop_box) where crop_box is [x1, y1, x2, y2] in original image coords
+    """
+    from PIL import Image
+    
+    # Get bounding box that contains all boxes in cluster
+    cluster_boxes = [boxes[i] for i in cluster_indices]
+    
+    min_x = min(box[0] for box in cluster_boxes)
+    min_y = min(box[1] for box in cluster_boxes)
+    max_x = max(box[2] for box in cluster_boxes)
+    max_y = max(box[3] for box in cluster_boxes)
+    
+    # Load original image
+    img = Image.open(img_path)
+    img_w, img_h = img.size
+    
+    # Add padding
+    pad_x = (max_x - min_x) * padding_ratio
+    pad_y = (max_y - min_y) * padding_ratio
+    
+    crop_x1 = max(0, int(min_x - pad_x))
+    crop_y1 = max(0, int(min_y - pad_y))
+    crop_x2 = min(img_w, int(max_x + pad_x))
+    crop_y2 = min(img_h, int(max_y + pad_y))
+    
+    # Crop and save
+    crop = img.crop((crop_x1, crop_y1, crop_x2, crop_y2))
+    crop.save(output_path)
+    
+    return output_path, (crop_x1, crop_y1, crop_x2, crop_y2)
+
+
+def assess_cluster_with_crop(
+    combined_output: dict,
+    img_path: str,
+    initial_query: str,
+    cluster_indices: list,
+    cluster_id: int,
+    sam_output_dir: str,
+    llm_generate_fn,  # The configured send_generate_request function
+) -> dict:
+    """
+    Assess confidence for masks in a cluster using a cropped image.
+    
+    Args:
+        llm_generate_fn: The configured send_generate_request function (with server_url, api_key)
+    
+    Returns:
+        dict mapping mask index (0-based) to confidence: {"HIGH", "MEDIUM", "LOW"}
+    """
+    boxes = combined_output.get("pred_boxes", [])
+    
+    # Create crop for this cluster
+    crop_path = os.path.join(sam_output_dir, f"cluster_{cluster_id}_crop.png")
+    crop_path, crop_box = create_cluster_crop(img_path, boxes, cluster_indices, crop_path)
+    
+    # Create visualization of masks in this cluster on the crop
+    # We need to adjust box coordinates relative to crop
+    crop_x1, crop_y1, crop_x2, crop_y2 = crop_box
+    
+    # Create a mini-visualization showing the cluster masks
+    cluster_viz_path = os.path.join(sam_output_dir, f"cluster_{cluster_id}_viz.png")
+    visualize_mask_subset(combined_output, cluster_indices, cluster_viz_path)
+    
+    # Build the assessment prompt - simple task instruction only
+    mask_nums = [i + 1 for i in cluster_indices]
+    mask_list = ", ".join(str(m) for m in mask_nums)
+    
+    prompt = f"""TASK: Assess if each mask matches "{initial_query}".
+
+Masks in this crop: {mask_list}
+
+For EACH mask, output ONE line:
+Mask N: HIGH/MEDIUM/LOW
+
+- HIGH = clearly matches "{initial_query}"
+- MEDIUM = probably matches but uncertain  
+- LOW = doesn't match or wrong type
+
+Be strict - only HIGH if confident. Assess now:"""
+
+    # Build messages - no system prompt, just user message with images and task
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "image": crop_path},
+                {"type": "image", "image": cluster_viz_path},
+                {"type": "text", "text": prompt},
+            ]
+        }
+    ]
+    
+    confidences = {}
+    
+    try:
+        response = llm_generate_fn(messages=messages, max_tokens=256)
+        
+        if response:
+            for line in response.split("\n"):
+                line = line.strip()
+                if not line:
+                    continue
+                match = re.search(r'(?:Mask\s*)?(\d+)\s*[:\-]\s*(HIGH|MEDIUM|LOW)', line, re.IGNORECASE)
+                if match:
+                    mask_num = int(match.group(1))
+                    confidence = match.group(2).upper()
+                    # Only store if mask is in this cluster
+                    if mask_num in mask_nums:
+                        confidences[mask_num - 1] = confidence
+    except Exception as e:
+        print(f"    ❌ Error assessing cluster {cluster_id}: {e}")
+    
+    return confidences
+
+
+def smart_confidence_assessment(
+    combined_output: dict,
+    img_path: str,
+    initial_query: str,
+    sam_output_dir: str,
+    initial_confidences: dict,
+    llm_generate_fn,  # The configured send_generate_request function
+    uncertain_threshold: int = 10,
+) -> dict:
+    """
+    Smart confidence assessment using clustering and crops for MEDIUM/LOW confidence masks.
+    
+    When there are too many MEDIUM/LOW confidence masks:
+    1. Cluster them by spatial proximity
+    2. Create crops for each cluster
+    3. Run VLM on each crop to refine confidence
+    4. Return final confidences
+    
+    Args:
+        combined_output: The SAM output with boxes, masks, scores
+        img_path: Path to original image
+        initial_query: User's query
+        sam_output_dir: Directory to save intermediate files
+        initial_confidences: Dict of initial confidence assessments
+        llm_generate_fn: The configured send_generate_request function (with server_url, api_key)
+        uncertain_threshold: If MEDIUM+LOW count > this, use clustering
+    
+    Returns:
+        Final confidence dict mapping mask index (0-based) to confidence
+    """
+    boxes = combined_output.get("pred_boxes", [])
+    num_masks = len(boxes)
+    
+    # Separate masks by confidence
+    high_masks = [i for i, c in initial_confidences.items() if c == "HIGH"]
+    medium_masks = [i for i, c in initial_confidences.items() if c == "MEDIUM"]
+    low_masks = [i for i, c in initial_confidences.items() if c == "LOW"]
+    
+    # Also handle masks not in initial_confidences (treat as MEDIUM)
+    all_assessed = set(initial_confidences.keys())
+    unassessed = [i for i in range(num_masks) if i not in all_assessed]
+    medium_masks.extend(unassessed)
+    
+    uncertain_masks = medium_masks + low_masks
+    
+    print(f"\n🎯 Smart confidence assessment:")
+    print(f"   HIGH: {len(high_masks)}, MEDIUM: {len(medium_masks)}, LOW: {len(low_masks)}")
+    
+    # If not too many uncertain masks, just return initial confidences
+    if len(uncertain_masks) <= uncertain_threshold:
+        print(f"   ✓ Uncertain masks ({len(uncertain_masks)}) <= threshold ({uncertain_threshold}), using initial assessment")
+        return initial_confidences
+    
+    print(f"   ⚠️ Uncertain masks ({len(uncertain_masks)}) > threshold ({uncertain_threshold})")
+    print(f"   🔍 Clustering and crop-based assessment...")
+    
+    # Get boxes for uncertain masks only
+    uncertain_boxes = [boxes[i] for i in uncertain_masks]
+    
+    # Cluster the uncertain boxes
+    clusters = cluster_boxes_by_proximity(uncertain_boxes, distance_threshold=0.15)
+    
+    # Map cluster indices back to original mask indices
+    cluster_to_original = []
+    for cluster in clusters:
+        original_indices = [uncertain_masks[i] for i in cluster]
+        cluster_to_original.append(original_indices)
+    
+    print(f"   📦 Found {len(cluster_to_original)} clusters from {len(uncertain_masks)} uncertain masks")
+    
+    # Start with HIGH confidence masks (they're already confirmed)
+    final_confidences = {i: "HIGH" for i in high_masks}
+    
+    # Assess each cluster using crops
+    for cluster_id, cluster_mask_indices in enumerate(cluster_to_original):
+        print(f"   🔍 Cluster {cluster_id + 1}/{len(cluster_to_original)}: masks {[i+1 for i in cluster_mask_indices]}")
+        
+        cluster_confidences = assess_cluster_with_crop(
+            combined_output=combined_output,
+            img_path=img_path,
+            initial_query=initial_query,
+            cluster_indices=cluster_mask_indices,
+            cluster_id=cluster_id,
+            sam_output_dir=sam_output_dir,
+            llm_generate_fn=llm_generate_fn,
+        )
+        
+        # Update final confidences
+        for mask_idx, conf in cluster_confidences.items():
+            final_confidences[mask_idx] = conf
+        
+        # For masks not assessed, keep their initial confidence or mark as LOW
+        for mask_idx in cluster_mask_indices:
+            if mask_idx not in final_confidences:
+                if mask_idx in initial_confidences:
+                    final_confidences[mask_idx] = initial_confidences[mask_idx]
+                else:
+                    final_confidences[mask_idx] = "LOW"
+    
+    # Summarize final results
+    final_high = sum(1 for c in final_confidences.values() if c == "HIGH")
+    final_med = sum(1 for c in final_confidences.values() if c == "MEDIUM")
+    final_low = sum(1 for c in final_confidences.values() if c == "LOW")
+    
+    print(f"\n   ✅ Final assessment after clustering:")
+    print(f"      HIGH: {final_high}, MEDIUM: {final_med}, LOW: {final_low}")
+    
+    return final_confidences
+
+
 def parse_tool_calls_from_text(text: str) -> list:
     """
     Parse tool calls from text response when not using OpenAI function calling API.
@@ -991,22 +1412,107 @@ DO NOT try to segment again. Analyze the existing masks shown in the image above
                             dedup_info = f"\n🔄 DEDUPLICATION: {duplicates_removed} duplicate masks removed via NMS (same objects detected by multiple prompts)."
                             print(f"🔄 NMS removed {duplicates_removed} duplicate masks ({masks_before_nms} → {final_masks})")
                         
-                        sam3_output_text_message = f"✅ SUCCESS: Found {final_masks} UNIQUE masks from prompts: {prompt_summary}.{dedup_info}"
+                        # ============================================================
+                        # BATCHED CONFIDENCE ASSESSMENT (if > 10 masks)
+                        # ============================================================
+                        confidence_info = ""
+                        mask_confidences = {}
+                        final_mask_confidences = {}
+                        BATCH_THRESHOLD = 10
+                        UNCERTAIN_THRESHOLD = 10  # If MEDIUM+LOW > this, use smart clustering
+                        
+                        if final_masks > BATCH_THRESHOLD:
+                            print(f"\n🔍 Running batched confidence assessment ({final_masks} masks > {BATCH_THRESHOLD})...")
+                            
+                            # Step 1: Initial batch assessment
+                            mask_confidences = batch_assess_confidence(
+                                combined_output=combined_output,
+                                img_path=img_path,
+                                initial_query=initial_text_prompt,
+                                sam_output_dir=sam_output_dir,
+                                llm_generate_fn=send_generate_request,
+                                batch_size=BATCH_THRESHOLD,
+                            )
+                            
+                            # Step 2: Count MEDIUM/LOW - if too many, use smart clustering
+                            if mask_confidences:
+                                med_low_count = sum(1 for c in mask_confidences.values() if c in ["MEDIUM", "LOW"])
+                                
+                                if med_low_count > UNCERTAIN_THRESHOLD:
+                                    print(f"\n⚠️ Too many uncertain masks ({med_low_count} > {UNCERTAIN_THRESHOLD})")
+                                    print(f"🔍 Running smart clustering assessment...")
+                                    
+                                    # Use smart clustering for better assessment
+                                    final_mask_confidences = smart_confidence_assessment(
+                                        combined_output=combined_output,
+                                        img_path=img_path,
+                                        initial_query=initial_text_prompt,
+                                        sam_output_dir=sam_output_dir,
+                                        initial_confidences=mask_confidences,
+                                        llm_generate_fn=send_generate_request,
+                                        uncertain_threshold=UNCERTAIN_THRESHOLD,
+                                    )
+                                else:
+                                    final_mask_confidences = mask_confidences
+                            else:
+                                final_mask_confidences = {}
+                            
+                            if final_mask_confidences:
+                                # Build confidence summary for the main LLM
+                                high_masks = sorted([i+1 for i, c in final_mask_confidences.items() if c == "HIGH"])
+                                med_masks = sorted([i+1 for i, c in final_mask_confidences.items() if c == "MEDIUM"])
+                                low_masks = sorted([i+1 for i, c in final_mask_confidences.items() if c == "LOW"])
+                                
+                                confidence_info = f"\n\n📊 PRE-ASSESSED CONFIDENCES:"
+                                if high_masks:
+                                    confidence_info += f"\n   ✅ HIGH (confirmed): {high_masks}"
+                                if med_masks:
+                                    confidence_info += f"\n   ⚠️ MEDIUM (need examination): {med_masks}"
+                                if low_masks:
+                                    confidence_info += f"\n   ❌ LOW (rejected): {low_masks}"
+                                
+                                # Guidance based on confidences
+                                if high_masks and not med_masks:
+                                    confidence_info += f"\n\n🎯 All {len(high_masks)} HIGH confidence masks are confirmed. You can select them directly."
+                                elif med_masks:
+                                    confidence_info += f"\n\n⚠️ {len(med_masks)} masks need examination. Consider calling examine_each_mask for them."
+                                if low_masks:
+                                    confidence_info += f"\n❌ {len(low_masks)} LOW confidence masks should be EXCLUDED from selection."
+                        
+                        sam3_output_text_message = f"✅ SUCCESS: Found {final_masks} UNIQUE masks from prompts: {prompt_summary}.{dedup_info}{confidence_info}"
                         
                         # Build a comprehensive analysis prompt
+                        # If we have pre-assessed confidences, include guidance
+                        pre_assess_guidance = ""
+                        if final_mask_confidences:
+                            high_list = sorted([i+1 for i, c in final_mask_confidences.items() if c == "HIGH"])
+                            med_list = sorted([i+1 for i, c in final_mask_confidences.items() if c == "MEDIUM"])
+                            low_list = sorted([i+1 for i, c in final_mask_confidences.items() if c == "LOW"])
+                            
+                            if high_list or med_list or low_list:
+                                pre_assess_guidance = f"""
+📊 PRE-ASSESSED CONFIDENCES (use these to speed up your analysis):
+"""
+                                if high_list:
+                                    pre_assess_guidance += f"   ✅ HIGH (confirmed, select these): {high_list}\n"
+                                if med_list:
+                                    pre_assess_guidance += f"   ⚠️ MEDIUM (verify before selecting): {med_list}\n"
+                                if low_list:
+                                    pre_assess_guidance += f"   ❌ LOW (exclude these): {low_list}\n"
+                        
                         analysis_instruction = f"""
 ═══════════════════════════════════════════════════════════════════════════════
 🎯 MASKS FOUND - NOW ANALYZE THEM
 ═══════════════════════════════════════════════════════════════════════════════
 
 {final_masks} masks were detected. The masked image is shown below.
-
+{pre_assess_guidance}
 YOUR TASK NOW (follow these steps EXACTLY):
 
-1. QUICK SCAN each mask - assign confidence:
-   - HIGH: clearly matches query "{initial_text_prompt}"
-   - MEDIUM: probably matches but uncertain
-   - LOW: uncertain if correct
+1. If PRE-ASSESSED confidences are provided above:
+   - HIGH confidence masks: You can select these directly
+   - MEDIUM confidence masks: Verify they match the query before selecting
+   - LOW confidence masks: EXCLUDE these from selection
 
 2. For query "{initial_text_prompt}", identify which mask(s) match
 
