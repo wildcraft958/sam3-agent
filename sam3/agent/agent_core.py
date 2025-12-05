@@ -27,6 +27,427 @@ from io import BytesIO
 import torch
 
 
+def visualize_mask_subset(input_json: dict, mask_indices: list, output_path: str) -> str:
+    """
+    Render only a subset of masks (specified by indices) on the image.
+    Returns the path to the saved visualization.
+    """
+    # Create a subset JSON with only the specified masks
+    subset_json = {
+        "orig_img_h": input_json["orig_img_h"],
+        "orig_img_w": input_json["orig_img_w"],
+        "original_image_path": input_json["original_image_path"],
+        "pred_boxes": [input_json["pred_boxes"][i] for i in mask_indices],
+        "pred_masks": [input_json["pred_masks"][i] for i in mask_indices],
+        "pred_scores": [input_json.get("pred_scores", [1.0] * len(input_json["pred_boxes"]))[i] for i in mask_indices],
+    }
+    
+    # Use the visualize function to render
+    viz_img = visualize(subset_json)
+    viz_img.save(output_path)
+    return output_path
+
+
+def batch_assess_confidence(
+    combined_output: dict,
+    img_path: str,
+    initial_query: str,
+    sam_output_dir: str,
+    llm_generate_fn,  # The configured send_generate_request function
+    batch_size: int = 10,
+) -> dict:
+    """
+    Assess confidence for masks in batches of batch_size.
+    
+    If total masks > batch_size, splits into batches, sends each to the model
+    for confidence assessment, and combines results.
+    
+    Args:
+        llm_generate_fn: The configured send_generate_request function (with server_url, api_key)
+    
+    Returns a dict mapping mask index (0-based) to confidence: {"HIGH", "MEDIUM", "LOW"}
+    """
+    num_masks = len(combined_output.get("pred_boxes", []))
+    
+    if num_masks <= batch_size:
+        # No batching needed
+        return {}
+    
+    print(f"\n📊 Batched confidence assessment: {num_masks} masks in batches of {batch_size}")
+    
+    confidences = {}
+    num_batches = (num_masks + batch_size - 1) // batch_size
+    
+    for batch_idx in range(num_batches):
+        start_idx = batch_idx * batch_size
+        end_idx = min(start_idx + batch_size, num_masks)
+        batch_mask_indices = list(range(start_idx, end_idx))
+        
+        print(f"  📦 Batch {batch_idx + 1}/{num_batches}: masks {start_idx + 1}-{end_idx}")
+        
+        # Create visualization for this batch
+        batch_viz_path = os.path.join(sam_output_dir, f"batch_{batch_idx}_viz.png")
+        visualize_mask_subset(combined_output, batch_mask_indices, batch_viz_path)
+        
+        # Create the confidence assessment prompt - simple task instruction only
+        mask_list = ", ".join([str(i + 1) for i in batch_mask_indices])
+        confidence_prompt = f"""TASK: Assess if each mask matches the query "{initial_query}".
+
+Masks shown: {mask_list} (numbered {start_idx + 1} to {end_idx}).
+
+For EACH mask, output ONE line:
+Mask N: HIGH/MEDIUM/LOW
+
+- HIGH = clearly matches "{initial_query}"
+- MEDIUM = probably matches but uncertain
+- LOW = doesn't match or wrong type
+
+Assess each mask now:"""
+
+        # Build messages - no system prompt, just user message with images and task
+        batch_messages = [
+            {
+                "role": "user", 
+                "content": [
+                    {"type": "image", "image": img_path},
+                    {"type": "image", "image": batch_viz_path},
+                    {"type": "text", "text": confidence_prompt},
+                ]
+            }
+        ]
+        
+        try:
+            # Call the model using the configured llm_generate_fn (same as main agent)
+            response = llm_generate_fn(
+                messages=batch_messages,
+                max_tokens=512,
+            )
+            
+            if response:
+                print(f"    ✓ Got confidence assessment")
+                # Parse the response to extract confidences
+                for line in response.split("\n"):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    # Look for patterns like "Mask 1: HIGH" or "Mask 1 - HIGH" or "1: HIGH"
+                    match = re.search(r'(?:Mask\s*)?(\d+)\s*[:\-]\s*(HIGH|MEDIUM|LOW)', line, re.IGNORECASE)
+                    if match:
+                        mask_num = int(match.group(1))
+                        confidence = match.group(2).upper()
+                        # Store with 0-based index
+                        confidences[mask_num - 1] = confidence
+            else:
+                print(f"    ⚠️ No response for batch {batch_idx + 1}")
+                
+        except Exception as e:
+            print(f"    ❌ Error in batch {batch_idx + 1}: {e}")
+    
+    print(f"  ✅ Assessed {len(confidences)}/{num_masks} masks")
+    
+    # Summarize
+    high_count = sum(1 for c in confidences.values() if c == "HIGH")
+    med_count = sum(1 for c in confidences.values() if c == "MEDIUM")
+    low_count = sum(1 for c in confidences.values() if c == "LOW")
+    print(f"     HIGH: {high_count}, MEDIUM: {med_count}, LOW: {low_count}")
+    
+    return confidences
+
+
+def cluster_boxes_by_proximity(boxes: list, distance_threshold: float = 0.15) -> list:
+    """
+    Cluster bounding boxes by spatial proximity using simple greedy clustering.
+    
+    Args:
+        boxes: List of [x1, y1, x2, y2] bounding boxes
+        distance_threshold: Maximum normalized distance between box centers to be in same cluster
+    
+    Returns:
+        List of clusters, where each cluster is a list of box indices
+    """
+    if not boxes:
+        return []
+    
+    # Calculate centroids of each box
+    centroids = []
+    for box in boxes:
+        cx = (box[0] + box[2]) / 2
+        cy = (box[1] + box[3]) / 2
+        centroids.append((cx, cy))
+    
+    # Find image dimensions from boxes for normalization
+    max_x = max(box[2] for box in boxes)
+    max_y = max(box[3] for box in boxes)
+    img_diagonal = (max_x**2 + max_y**2) ** 0.5
+    
+    # Greedy clustering
+    assigned = [False] * len(boxes)
+    clusters = []
+    
+    for i in range(len(boxes)):
+        if assigned[i]:
+            continue
+        
+        # Start new cluster with this box
+        cluster = [i]
+        assigned[i] = True
+        
+        # Find all nearby unassigned boxes
+        for j in range(i + 1, len(boxes)):
+            if assigned[j]:
+                continue
+            
+            # Calculate distance between centroids
+            dist = ((centroids[i][0] - centroids[j][0])**2 + 
+                    (centroids[i][1] - centroids[j][1])**2) ** 0.5
+            normalized_dist = dist / img_diagonal if img_diagonal > 0 else 0
+            
+            if normalized_dist < distance_threshold:
+                cluster.append(j)
+                assigned[j] = True
+        
+        clusters.append(cluster)
+    
+    return clusters
+
+
+def create_cluster_crop(
+    img_path: str,
+    boxes: list,
+    cluster_indices: list,
+    output_path: str,
+    padding_ratio: float = 0.1,
+) -> tuple:
+    """
+    Create a cropped image containing only the boxes in the cluster.
+    
+    Returns:
+        (crop_path, crop_box) where crop_box is [x1, y1, x2, y2] in original image coords
+    """
+    from PIL import Image
+    
+    # Get bounding box that contains all boxes in cluster
+    cluster_boxes = [boxes[i] for i in cluster_indices]
+    
+    min_x = min(box[0] for box in cluster_boxes)
+    min_y = min(box[1] for box in cluster_boxes)
+    max_x = max(box[2] for box in cluster_boxes)
+    max_y = max(box[3] for box in cluster_boxes)
+    
+    # Load original image
+    img = Image.open(img_path)
+    img_w, img_h = img.size
+    
+    # Add padding
+    pad_x = (max_x - min_x) * padding_ratio
+    pad_y = (max_y - min_y) * padding_ratio
+    
+    crop_x1 = max(0, int(min_x - pad_x))
+    crop_y1 = max(0, int(min_y - pad_y))
+    crop_x2 = min(img_w, int(max_x + pad_x))
+    crop_y2 = min(img_h, int(max_y + pad_y))
+    
+    # Crop and save
+    crop = img.crop((crop_x1, crop_y1, crop_x2, crop_y2))
+    crop.save(output_path)
+    
+    return output_path, (crop_x1, crop_y1, crop_x2, crop_y2)
+
+
+def assess_cluster_with_crop(
+    combined_output: dict,
+    img_path: str,
+    initial_query: str,
+    cluster_indices: list,
+    cluster_id: int,
+    sam_output_dir: str,
+    llm_generate_fn,  # The configured send_generate_request function
+) -> dict:
+    """
+    Assess confidence for masks in a cluster using a cropped image.
+    
+    Args:
+        llm_generate_fn: The configured send_generate_request function (with server_url, api_key)
+    
+    Returns:
+        dict mapping mask index (0-based) to confidence: {"HIGH", "MEDIUM", "LOW"}
+    """
+    boxes = combined_output.get("pred_boxes", [])
+    
+    # Create crop for this cluster
+    crop_path = os.path.join(sam_output_dir, f"cluster_{cluster_id}_crop.png")
+    crop_path, crop_box = create_cluster_crop(img_path, boxes, cluster_indices, crop_path)
+    
+    # Create visualization of masks in this cluster on the crop
+    # We need to adjust box coordinates relative to crop
+    crop_x1, crop_y1, crop_x2, crop_y2 = crop_box
+    
+    # Create a mini-visualization showing the cluster masks
+    cluster_viz_path = os.path.join(sam_output_dir, f"cluster_{cluster_id}_viz.png")
+    visualize_mask_subset(combined_output, cluster_indices, cluster_viz_path)
+    
+    # Build the assessment prompt - simple task instruction only
+    mask_nums = [i + 1 for i in cluster_indices]
+    mask_list = ", ".join(str(m) for m in mask_nums)
+    
+    prompt = f"""TASK: Assess if each mask matches "{initial_query}".
+
+Masks in this crop: {mask_list}
+
+For EACH mask, output ONE line:
+Mask N: HIGH/MEDIUM/LOW
+
+- HIGH = clearly matches "{initial_query}"
+- MEDIUM = probably matches but uncertain  
+- LOW = doesn't match or wrong type
+
+Be strict - only HIGH if confident. Assess now:"""
+
+    # Build messages - no system prompt, just user message with images and task
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "image": crop_path},
+                {"type": "image", "image": cluster_viz_path},
+                {"type": "text", "text": prompt},
+            ]
+        }
+    ]
+    
+    confidences = {}
+    
+    try:
+        response = llm_generate_fn(messages=messages, max_tokens=256)
+        
+        if response:
+            for line in response.split("\n"):
+                line = line.strip()
+                if not line:
+                    continue
+                match = re.search(r'(?:Mask\s*)?(\d+)\s*[:\-]\s*(HIGH|MEDIUM|LOW)', line, re.IGNORECASE)
+                if match:
+                    mask_num = int(match.group(1))
+                    confidence = match.group(2).upper()
+                    # Only store if mask is in this cluster
+                    if mask_num in mask_nums:
+                        confidences[mask_num - 1] = confidence
+    except Exception as e:
+        print(f"    ❌ Error assessing cluster {cluster_id}: {e}")
+    
+    return confidences
+
+
+def smart_confidence_assessment(
+    combined_output: dict,
+    img_path: str,
+    initial_query: str,
+    sam_output_dir: str,
+    initial_confidences: dict,
+    llm_generate_fn,  # The configured send_generate_request function
+    uncertain_threshold: int = 10,
+) -> dict:
+    """
+    Smart confidence assessment using clustering and crops for MEDIUM/LOW confidence masks.
+    
+    When there are too many MEDIUM/LOW confidence masks:
+    1. Cluster them by spatial proximity
+    2. Create crops for each cluster
+    3. Run VLM on each crop to refine confidence
+    4. Return final confidences
+    
+    Args:
+        combined_output: The SAM output with boxes, masks, scores
+        img_path: Path to original image
+        initial_query: User's query
+        sam_output_dir: Directory to save intermediate files
+        initial_confidences: Dict of initial confidence assessments
+        llm_generate_fn: The configured send_generate_request function (with server_url, api_key)
+        uncertain_threshold: If MEDIUM+LOW count > this, use clustering
+    
+    Returns:
+        Final confidence dict mapping mask index (0-based) to confidence
+    """
+    boxes = combined_output.get("pred_boxes", [])
+    num_masks = len(boxes)
+    
+    # Separate masks by confidence
+    high_masks = [i for i, c in initial_confidences.items() if c == "HIGH"]
+    medium_masks = [i for i, c in initial_confidences.items() if c == "MEDIUM"]
+    low_masks = [i for i, c in initial_confidences.items() if c == "LOW"]
+    
+    # Also handle masks not in initial_confidences (treat as MEDIUM)
+    all_assessed = set(initial_confidences.keys())
+    unassessed = [i for i in range(num_masks) if i not in all_assessed]
+    medium_masks.extend(unassessed)
+    
+    uncertain_masks = medium_masks + low_masks
+    
+    print(f"\n🎯 Smart confidence assessment:")
+    print(f"   HIGH: {len(high_masks)}, MEDIUM: {len(medium_masks)}, LOW: {len(low_masks)}")
+    
+    # If not too many uncertain masks, just return initial confidences
+    if len(uncertain_masks) <= uncertain_threshold:
+        print(f"   ✓ Uncertain masks ({len(uncertain_masks)}) <= threshold ({uncertain_threshold}), using initial assessment")
+        return initial_confidences
+    
+    print(f"   ⚠️ Uncertain masks ({len(uncertain_masks)}) > threshold ({uncertain_threshold})")
+    print(f"   🔍 Clustering and crop-based assessment...")
+    
+    # Get boxes for uncertain masks only
+    uncertain_boxes = [boxes[i] for i in uncertain_masks]
+    
+    # Cluster the uncertain boxes
+    clusters = cluster_boxes_by_proximity(uncertain_boxes, distance_threshold=0.15)
+    
+    # Map cluster indices back to original mask indices
+    cluster_to_original = []
+    for cluster in clusters:
+        original_indices = [uncertain_masks[i] for i in cluster]
+        cluster_to_original.append(original_indices)
+    
+    print(f"   📦 Found {len(cluster_to_original)} clusters from {len(uncertain_masks)} uncertain masks")
+    
+    # Start with HIGH confidence masks (they're already confirmed)
+    final_confidences = {i: "HIGH" for i in high_masks}
+    
+    # Assess each cluster using crops
+    for cluster_id, cluster_mask_indices in enumerate(cluster_to_original):
+        print(f"   🔍 Cluster {cluster_id + 1}/{len(cluster_to_original)}: masks {[i+1 for i in cluster_mask_indices]}")
+        
+        cluster_confidences = assess_cluster_with_crop(
+            combined_output=combined_output,
+            img_path=img_path,
+            initial_query=initial_query,
+            cluster_indices=cluster_mask_indices,
+            cluster_id=cluster_id,
+            sam_output_dir=sam_output_dir,
+            llm_generate_fn=llm_generate_fn,
+        )
+        
+        # Update final confidences
+        for mask_idx, conf in cluster_confidences.items():
+            final_confidences[mask_idx] = conf
+        
+        # For masks not assessed, keep their initial confidence or mark as LOW
+        for mask_idx in cluster_mask_indices:
+            if mask_idx not in final_confidences:
+                if mask_idx in initial_confidences:
+                    final_confidences[mask_idx] = initial_confidences[mask_idx]
+                else:
+                    final_confidences[mask_idx] = "LOW"
+    
+    # Summarize final results
+    final_high = sum(1 for c in final_confidences.values() if c == "HIGH")
+    final_med = sum(1 for c in final_confidences.values() if c == "MEDIUM")
+    final_low = sum(1 for c in final_confidences.values() if c == "LOW")
+    
+    print(f"\n   ✅ Final assessment after clustering:")
+    print(f"      HIGH: {final_high}, MEDIUM: {final_med}, LOW: {final_low}")
+    
+    return final_confidences
+
+
 def parse_tool_calls_from_text(text: str) -> list:
     """
     Parse tool calls from text response when not using OpenAI function calling API.
@@ -43,13 +464,9 @@ def parse_tool_calls_from_text(text: str) -> list:
     
     # Known function names (matching active tools in TOOLS list)
     known_functions = [
-        "segment_phrase", "examine_each_mask", "select_masks_and_return", 
+        "segment_phrase_batch", "examine_each_mask", "select_masks_and_return", 
         "report_no_mask", 
-        # "filter_masks_by_spatial_position",  # Disabled - spatial filtering done in LLM thinking
-        # "segment_phrase_in_region", 
         "filter_masks_by_attributes",
-        # "filter_masks_by_relative_position"  # Disabled - relative filtering done in LLM thinking
-        # "segment_phrase_with_tiling"  # Commented out - not currently active
     ]
     
     # Pattern 1: JSON object with name/arguments structure
@@ -72,19 +489,34 @@ def parse_tool_calls_from_text(text: str) -> list:
         return tool_calls
     
     # Pattern 2: Function call syntax like segment_phrase(text_prompt="car")
+    # or segment_phrase_batch(text_prompts=["a", "b", "c"])
     for func_name in known_functions:
         # Match function_name followed by parentheses with arguments
-        pattern = rf'{func_name}\s*\(\s*([^)]*)\s*\)'
+        # Use a more robust pattern that handles nested brackets
+        pattern = rf'{func_name}\s*\(([^)]*(?:\[[^\]]*\][^)]*)*)\)'
         for match in re.finditer(pattern, text):
             args_text = match.group(1).strip()
             
             # Parse arguments into dict
             args_dict = {}
             if args_text:
+                # Special handling for text_prompts array (segment_phrase_batch)
+                text_prompts_match = re.search(r'text_prompts\s*=\s*(\[[^\]]+\])', args_text)
+                if text_prompts_match:
+                    try:
+                        args_dict["text_prompts"] = json.loads(text_prompts_match.group(1))
+                    except json.JSONDecodeError:
+                        # Try to extract strings manually
+                        array_str = text_prompts_match.group(1)
+                        strings = re.findall(r'"([^"]+)"|\'([^\']+)\'', array_str)
+                        args_dict["text_prompts"] = [s[0] or s[1] for s in strings]
+                
                 # Handle keyword arguments like: text_prompt="car", other_arg=123
-                kwarg_pattern = r'(\w+)\s*=\s*(?:"([^"]*)"|\'([^\']*)\'|(\[[^\]]*\])|(\{[^}]*\})|([^,\s]+))'
+                kwarg_pattern = r'(\w+)\s*=\s*(?:"([^"]*)"|\'([^\']*)\'|(\[[^\]]*\])|(\{[^}]*\})|([^,\s\]]+))'
                 for kwmatch in re.finditer(kwarg_pattern, args_text):
                     key = kwmatch.group(1)
+                    if key == "text_prompts" and "text_prompts" in args_dict:
+                        continue  # Already handled above
                     # Get the first non-None value from the capture groups
                     value = kwmatch.group(2) or kwmatch.group(3) or kwmatch.group(4) or kwmatch.group(5) or kwmatch.group(6)
                     if value:
@@ -129,9 +561,50 @@ def parse_tool_calls_from_text(text: str) -> list:
     if tool_calls:
         return tool_calls
     
-    # Pattern 4: Look for simple mentions of functions with text_prompt in quotes nearby
+    # Pattern 4: Look for simple mentions of functions with text_prompt(s) in quotes nearby
     # This is a fallback for less structured outputs
-    if "segment_phrase" in text:
+    
+    # First check for segment_phrase_batch with text_prompts array
+    if "segment_phrase_batch" in text:
+        # Look for text_prompts array patterns
+        batch_patterns = [
+            r'"text_prompts"\s*:\s*(\[[^\]]+\])',
+            r"'text_prompts'\s*:\s*(\[[^\]]+\])",
+            r'text_prompts\s*=\s*(\[[^\]]+\])',
+        ]
+        for pattern in batch_patterns:
+            match = re.search(pattern, text)
+            if match:
+                try:
+                    text_prompts = json.loads(match.group(1))
+                    tool_calls.append({
+                        "id": "call_0",
+                        "type": "function",
+                        "function": {
+                            "name": "segment_phrase_batch",
+                            "arguments": json.dumps({"text_prompts": text_prompts})
+                        }
+                    })
+                    return tool_calls
+                except json.JSONDecodeError:
+                    # Try to extract strings manually
+                    array_str = match.group(1)
+                    strings = re.findall(r'"([^"]+)"|\'([^\']+)\'', array_str)
+                    text_prompts = [s[0] or s[1] for s in strings]
+                    if text_prompts:
+                        tool_calls.append({
+                            "id": "call_0",
+                            "type": "function",
+                            "function": {
+                                "name": "segment_phrase_batch",
+                                "arguments": json.dumps({"text_prompts": text_prompts})
+                            }
+                        })
+                        return tool_calls
+    
+    # Convert segment_phrase to segment_phrase_batch (ONE-SHOT system)
+    # If the model tries to call segment_phrase, convert it to a batch call with the single prompt
+    if "segment_phrase" in text and "segment_phrase_batch" not in text:
         # Look for text_prompt patterns
         prompt_patterns = [
             r'"text_prompt"\s*:\s*"([^"]+)"',
@@ -143,12 +616,14 @@ def parse_tool_calls_from_text(text: str) -> list:
             match = re.search(pattern, text)
             if match:
                 text_prompt = match.group(1)
+                # Convert to batch format with single prompt
+                print(f"⚠️ Converting segment_phrase('{text_prompt}') → segment_phrase_batch(['{text_prompt}'])")
                 tool_calls.append({
                     "id": "call_0",
-                    "type": "function",  # Required by OpenAI/vLLM format
+                    "type": "function",
                     "function": {
-                        "name": "segment_phrase",
-                        "arguments": json.dumps({"text_prompt": text_prompt})
+                        "name": "segment_phrase_batch",
+                        "arguments": json.dumps({"text_prompts": [text_prompt]})
                     }
                 })
                 return tool_calls
@@ -215,17 +690,18 @@ TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "segment_phrase",
-            "description": "Use SAM3 (Segment Anything Model 3) to segment all instances of a feature by generating segmentation mask(s). Works best with simple noun phrases (1-3 words). All previously generated mask(s) will be deleted when called.",
+            "name": "segment_phrase_batch",
+            "description": "THE ONLY segmentation tool. Provide ALL possible prompts (3-5 synonyms/variations) at once. SAM3 runs on ALL prompts simultaneously, combines results, and removes duplicates via NMS. This is a ONE-SHOT operation - no retries allowed. After this, you MUST analyze the masks and call select_masks_and_return or report_no_mask.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "text_prompt": {
-                        "type": "string",
-                        "description": "A simple noun phrase (1-3 words). Examples: building, road, water, tree, vehicle, ship, field, roof, pool, runway"
+                    "text_prompts": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Array of 3-5 simple noun phrases (synonyms/variations). Examples: ['windmill', 'wind turbine', 'turbine', 'tower', 'rotor'] or ['ship', 'boat', 'vessel', 'barge', 'cargo ship']"
                     }
                 },
-                "required": ["text_prompt"]
+                "required": ["text_prompts"]
             }
         }
     },
@@ -460,7 +936,7 @@ def _prune_messages_for_next_round(
     # Part 1: always keep the first two message JSONs
     part1 = copy.deepcopy(messages_list[:2])
 
-    # Part 2: search backwards for the latest assistant message containing a segment_phrase tool call
+    # Part 2: search backwards for the latest assistant message containing a segment_phrase_batch tool call
     part2_start_idx = None
     for idx in range(len(messages_list) - 1, 1, -1):
         msg = messages_list[idx]
@@ -471,7 +947,7 @@ def _prune_messages_for_next_round(
         if "tool_calls" in msg and msg["tool_calls"]:
             for tool_call in msg["tool_calls"]:
                 function_name = tool_call.get("function", {}).get("name", "")
-                if function_name == "segment_phrase":
+                if function_name == "segment_phrase_batch":
                     part2_start_idx = idx
                     break
         # Fallback: check for <tool> tags in content (backward compatibility)
@@ -481,7 +957,7 @@ def _prune_messages_for_next_round(
                     isinstance(content, dict)
                     and content.get("type") == "text"
                     and "<tool>" in content.get("text", "")
-                    and "segment_phrase" in content.get("text", "")
+                    and "segment_phrase_batch" in content.get("text", "")
                 ):
                     part2_start_idx = idx
                     break
@@ -489,40 +965,12 @@ def _prune_messages_for_next_round(
             break
 
     part2 = messages_list[part2_start_idx:] if part2_start_idx is not None else []
-    
-    # Remove surplus images from part2 so the total stays within the 2-image limit
-    max_images_allowed = 2
-    max_images_in_part2 = max(0, max_images_allowed - count_images(part1))
-    images_kept = 0
-    part2_cleaned = []
-    for msg in part2:
-        msg_copy = copy.deepcopy(msg)
-        if msg_copy.get("content") and isinstance(msg_copy["content"], list):
-            filtered_content = []
-            for item in msg_copy["content"]:
-                if (
-                    isinstance(item, dict)
-                    and item.get("type") == "image"
-                ):
-                    # Skip duplicate of the initial raw image and cap total images
-                    if item.get("image") == img_path:
-                        continue
-                    if images_kept < max_images_in_part2:
-                        filtered_content.append(item)
-                        images_kept += 1
-                else:
-                    filtered_content.append(item)
-            msg_copy["content"] = filtered_content
-        part2_cleaned.append(msg_copy)
 
     # Part 3: decide whether to add warning text to the second message in part1
-    previously_used = (
-        [p for p in used_text_prompts if p != latest_sam3_text_prompt]
-        if latest_sam3_text_prompt
-        else list(used_text_prompts)
-    )
-    if part2_cleaned and len(previously_used) > 0:
-        warning_text = f'Note that we have previously called the segment_phrase tool with each "text_prompt" in this list: {list(previously_used)}, but none of the generated results were satisfactory. So make sure that you do not use any of these phrases as the "text_prompt" to call the segment_phrase tool again.'
+    # Note: In ONE-SHOT system, we don't allow retries, but keep this for informational purposes
+    previously_used = list(used_text_prompts) if used_text_prompts else []
+    if part2 and len(previously_used) > 0:
+        warning_text = f'Note: segment_phrase_batch has been called (ONE-SHOT). You must now analyze the masks and select them.'
         # Replace the second message entirely to keep exactly 2 content items
         part1[1] = {
             "role": "user",
@@ -540,7 +988,7 @@ def _prune_messages_for_next_round(
 
     # Build the new messages list: part1 (with optional warning), then part2
     new_messages = list(part1)
-    new_messages.extend(part2_cleaned)
+    new_messages.extend(part2)
     return new_messages
 
 
@@ -588,6 +1036,10 @@ def agent_inference(
     # Track tool call history for fallback logic
     recent_tool_calls = []  # Track last 3 tool calls
     sam3_segmentation_count = 0  # Count SAM3 segmentation attempts
+    
+    # Flag to track if masks have been found - once True, no more segment calls allowed
+    MASKS_FOUND = False
+    MASKS_FOUND_COUNT = 0
 
     # debug setup
     debug_folder_path = None
@@ -782,112 +1234,316 @@ def agent_inference(
         if len(recent_tool_calls) > 3:
             recent_tool_calls.pop(0)
         
-        # Count SAM3 segmentation attempts (only segment_phrase now - others disabled)
-        if function_name == "segment_phrase":  # Only count segment_phrase
-            sam3_segmentation_count += 1
-            print(f"📊 SAM3 segmentation attempt #{sam3_segmentation_count}")
+        # Note: segment_phrase_batch is ONE-SHOT, count is set inside the handler
         
         if PATH_TO_LATEST_OUTPUT_JSON == "":
-            # The first tool call must be segment_phrase or report_no_mask
-            # Note: segment_phrase_in_region and segment_phrase_with_tiling have been disabled
+            # The first tool call must be segment_phrase_batch or report_no_mask
             assert (
-                tool_call["name"] == "segment_phrase"
-                # or tool_call["name"] == "segment_phrase_with_tiling"  # DISABLED
-                # or tool_call["name"] == "segment_phrase_in_region"  # DISABLED
+                tool_call["name"] == "segment_phrase_batch"
                 or tool_call["name"] == "report_no_mask"
-            ), f"First tool call must be segment_phrase or report_no_mask, got {tool_call['name']}"
+            ), f"First tool call must be segment_phrase_batch or report_no_mask, got {tool_call['name']}"
 
-        if tool_call["name"] == "segment_phrase":
-            print("🔍 Calling segment_phrase tool...")
-            assert list(tool_call["parameters"].keys()) == ["text_prompt"], f"Expected ['text_prompt'], got {list(tool_call['parameters'].keys())}"
+        if tool_call["name"] == "segment_phrase_batch":
+            print("🔍 Calling segment_phrase_batch tool with multiple prompts...")
+            
+            # CRITICAL: If masks have already been found, reject further segment calls
+            if MASKS_FOUND:
+                print(f"⚠️ REJECTED: segment_phrase_batch called but {MASKS_FOUND_COUNT} masks already exist!")
+                reject_message = f"""⚠️ ERROR: You called segment_phrase_batch but {MASKS_FOUND_COUNT} masks have ALREADY been detected!
 
-            # Check if this text_prompt has been used before
-            current_text_prompt = tool_call["parameters"]["text_prompt"]
-            if current_text_prompt in USED_TEXT_PROMPTS:
-                print(
-                    f"❌ Text prompt '{current_text_prompt}' has been used before. Requesting a different prompt."
-                )
-                duplicate_prompt_message = f"You have previously used '{current_text_prompt}' as your text_prompt to call the segment_phrase tool. You may not use it again. Please call the segment_phrase tool again with a different, perhaps more general, or more creative simple noun phrase prompt, while adhering to all the rules stated in the system prompt. You must also never use any of the following text_prompt(s): {str(list(USED_TEXT_PROMPTS))}."
-                # Append assistant message with tool call
+This is a ONE-SHOT system. You CANNOT call segment_phrase_batch again.
+
+You MUST either:
+1. Call select_masks_and_return([mask_numbers]) to select the masks that match the query
+2. Call report_no_mask() if none of the {MASKS_FOUND_COUNT} masks match
+
+DO NOT try to segment again. Analyze the existing masks shown in the image above."""
                 messages.append({
                     "role": "assistant",
                     "content": generated_text if generated_text else None,
                     "tool_calls": [tool_call_data],
                 })
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": [{"type": "text", "text": duplicate_prompt_message}],
-                    }
-                )
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "content": json.dumps({"message": reject_message, "error": "masks_already_found", "num_masks": MASKS_FOUND_COUNT}),
+                })
             else:
-                # Add the text_prompt to the set of used prompts
-                USED_TEXT_PROMPTS.add(current_text_prompt)
-                LATEST_SAM3_TEXT_PROMPT = current_text_prompt
-                PATH_TO_LATEST_OUTPUT_JSON = call_sam_service(
-                    image_path=img_path,
-                    text_prompt=current_text_prompt,
-                    output_folder_path=sam_output_dir,
-                )
-                # Check if file exists before reading
-                if not os.path.exists(PATH_TO_LATEST_OUTPUT_JSON):
-                    raise FileNotFoundError(
-                        f"SAM3 output file not found: {PATH_TO_LATEST_OUTPUT_JSON}. "
-                        f"This may be due to a path construction issue with temporary directories."
-                    )
-                sam3_outputs = json.load(open(PATH_TO_LATEST_OUTPUT_JSON, "r"))
-                sam3_output_image_path = sam3_outputs.get("output_image_path", "")
-                num_masks = len(sam3_outputs.get("pred_boxes", []))
-
-                # Append assistant message with tool call
-                messages.append({
-                    "role": "assistant",
-                    "content": generated_text if generated_text else None,
-                    "tool_calls": [tool_call_data],
-                })
+                text_prompts = tool_call["parameters"].get("text_prompts", [])
                 
-                if num_masks == 0:
-                    print("❌ No masks generated by SAM3, reporting no mask to Qwen.")
-                    
-                    # Deterministic count tracking - inject into message
-                    attempt_status = f"\n\n📊 ATTEMPT TRACKING:\n- SAM3 attempts: {sam3_segmentation_count}/3"
-                    
-                    if sam3_segmentation_count >= 3:
-                        sam3_output_text_message = f"The segment_phrase tool did not generate any masks for the text_prompt '{current_text_prompt}'.{attempt_status}\n\n⚠️ You have exhausted all 3 SAM3 attempts without finding any matching objects. Please call report_no_mask to conclude that no matching objects exist in the image."
-                    else:
-                        sam3_output_text_message = f"The segment_phrase tool did not generate any masks for the text_prompt '{current_text_prompt}'.{attempt_status}\n\nNow, please call the segment_phrase tool again with a different, perhaps more general, or more creative simple noun phrase text_prompt, while adhering to all the rules stated in the system prompt. Please be reminded that the original user query was '{initial_text_prompt}'."
-                    
-                    # Append tool result with role: "tool"
+                if not text_prompts or not isinstance(text_prompts, list):
+                    print("❌ Invalid text_prompts parameter")
+                    messages.append({
+                        "role": "assistant",
+                        "content": generated_text if generated_text else None,
+                        "tool_calls": [tool_call_data],
+                    })
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tool_call_id,
-                        "content": json.dumps({"message": sam3_output_text_message, "num_masks": 0}),
+                        "content": json.dumps({"message": "Error: text_prompts must be a non-empty array of strings", "num_masks": 0}),
                     })
                 else:
-                    # Deterministic count tracking - inject into message
-                    attempt_status = f"\n\n📊 ATTEMPT TRACKING:\n- SAM3 attempts: {sam3_segmentation_count}/3"
+                    print(f"📝 Trying {len(text_prompts)} prompts: {text_prompts}")
                     
-                    sam3_output_text_message = rf"The segment_phrase tool generated {num_masks} available masks.{attempt_status}\n\nAll {num_masks} available masks are rendered in this image below, now you must analyze the {num_masks} available mask(s) carefully, compare them against the raw input image and the original user query, and determine your next action. Please be reminded that the original user query was '{initial_text_prompt}'."
-                    # Per Qwen3 docs: Add tool result with role: "tool"
+                    # Track all masks from all prompts
+                    all_boxes = []
+                    all_masks = []
+                    all_scores = []
+                    successful_prompts = []
+                    failed_prompts = []
+                    orig_img_h = None
+                    orig_img_w = None
+                    
+                    for prompt in text_prompts:
+                        USED_TEXT_PROMPTS.add(prompt)
+                        print(f"  🔍 Trying prompt: '{prompt}'")
+                        
+                        try:
+                            output_json = call_sam_service(
+                                image_path=img_path,
+                                text_prompt=prompt,
+                                output_folder_path=sam_output_dir,
+                            )
+                            
+                            if os.path.exists(output_json):
+                                sam3_out = json.load(open(output_json, "r"))
+                                num_found = len(sam3_out.get("pred_boxes", []))
+                                
+                                if num_found > 0:
+                                    successful_prompts.append((prompt, num_found))
+                                    all_boxes.extend(sam3_out.get("pred_boxes", []))
+                                    all_masks.extend(sam3_out.get("pred_masks", []))
+                                    all_scores.extend(sam3_out.get("pred_scores", []))
+                                    orig_img_h = sam3_out.get("orig_img_h")
+                                    orig_img_w = sam3_out.get("orig_img_w")
+                                    PATH_TO_LATEST_OUTPUT_JSON = output_json
+                                    print(f"    ✓ Found {num_found} masks")
+                                else:
+                                    failed_prompts.append(prompt)
+                                    print(f"    ✗ No masks")
+                            else:
+                                failed_prompts.append(prompt)
+                        except Exception as e:
+                            print(f"    ❌ Error: {e}")
+                            failed_prompts.append(prompt)
+                    
+                    # ONE-SHOT: This is the only attempt
+                    sam3_segmentation_count = 1
+                    total_masks = len(all_boxes)
+                    print(f"\n📊 Batch results: {total_masks} total masks from {len(successful_prompts)} successful prompts")
+                    
+                    # Append assistant message with tool call
                     messages.append({
-                        "role": "tool",
-                        "tool_call_id": tool_call_id,
-                        "content": json.dumps({
-                            "message": sam3_output_text_message,
-                            "num_masks": num_masks,
-                            "output_image_path": sam3_output_image_path,
-                        }),
+                        "role": "assistant",
+                        "content": generated_text if generated_text else None,
+                        "tool_calls": [tool_call_data],
                     })
-                    # For vision models: Add user message with image so model can visually analyze masks
-                    # Note: Tool result contains the message, user message only provides the image for visual analysis
-                    messages.append({
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": "Please analyze the masks shown in the image below."},
-                            {"type": "image", "image": sam3_output_image_path},
-                        ],
-                    })
-                print("\n\n>>> sam3_output_text_message:\n", sam3_output_text_message)
+                    
+                    if total_masks == 0:
+                        # No masks found - tell agent to call report_no_mask
+                        sam3_output_text_message = f"segment_phrase_batch tried {len(text_prompts)} prompts ({text_prompts}) but found 0 masks.\n\n⚠️ This is a ONE-SHOT system. No retries allowed.\n\nYou MUST call report_no_mask() now since no objects were detected."
+                        
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call_id,
+                            "content": json.dumps({"message": sam3_output_text_message, "num_masks": 0}),
+                        })
+                    else:
+                        # MASKS FOUND! Set flag to prevent further segment calls
+                        MASKS_FOUND = True
+                        MASKS_FOUND_COUNT = total_masks
+                        
+                        # Apply NMS to remove duplicates across prompts
+                        from .helpers.mask_overlap_removal import remove_overlapping_masks
+                        
+                        # Create combined output
+                        combined_output = {
+                            "orig_img_h": orig_img_h,
+                            "orig_img_w": orig_img_w,
+                            "pred_boxes": all_boxes,
+                            "pred_masks": all_masks,
+                            "pred_scores": all_scores,
+                            "original_image_path": img_path,
+                        }
+                        
+                        # Count before NMS
+                        masks_before_nms = len(all_boxes)
+                        print(f"\n🔄 Applying BBox NMS deduplication to {masks_before_nms} total masks...")
+                        
+                        # Remove overlaps using Bounding Box NMS only
+                        combined_output = remove_overlapping_masks(combined_output, bbox_iou_thresh=0.5)
+                        final_masks = len(combined_output.get("pred_boxes", []))
+                        MASKS_FOUND_COUNT = final_masks
+                        
+                        # Calculate duplicates removed
+                        duplicates_removed = masks_before_nms - final_masks
+                        print(f"✅ Final: {masks_before_nms} → {final_masks} unique masks ({duplicates_removed} duplicates removed)")
+                        
+                        # Save combined output with unique filename based on batch
+                        import time
+                        batch_id = int(time.time() * 1000) % 100000
+                        combined_output_dir = os.path.join(sam_output_dir, f"batch_combined_{batch_id}")
+                        os.makedirs(combined_output_dir, exist_ok=True)
+                        combined_json_path = os.path.join(combined_output_dir, "sam3_output.json")
+                        combined_image_path = os.path.join(combined_output_dir, "sam3_output.png")
+                        combined_output["output_image_path"] = combined_image_path
+                        
+                        with open(combined_json_path, "w") as f:
+                            json.dump(combined_output, f, indent=2)
+                        
+                        # Render visualization
+                        try:
+                            viz_img = visualize(combined_output)
+                            viz_img.save(combined_image_path)
+                        except Exception as e:
+                            print(f"⚠️ Viz error: {e}")
+                            import shutil
+                            shutil.copy(img_path, combined_image_path)
+                        
+                        PATH_TO_LATEST_OUTPUT_JSON = combined_json_path
+                        LATEST_SAM3_TEXT_PROMPT = ", ".join([p[0] for p in successful_prompts])
+                        
+                        prompt_summary = ", ".join([f"'{p}': {n}" for p, n in successful_prompts])
+                        
+                        # Show deduplication stats
+                        dedup_info = ""
+                        if duplicates_removed > 0:
+                            dedup_info = f"\n🔄 DEDUPLICATION: {duplicates_removed} duplicate masks removed via NMS (same objects detected by multiple prompts)."
+                            print(f"🔄 NMS removed {duplicates_removed} duplicate masks ({masks_before_nms} → {final_masks})")
+                        
+                        # ============================================================
+                        # BATCHED CONFIDENCE ASSESSMENT (if > 10 masks)
+                        # ============================================================
+                        confidence_info = ""
+                        mask_confidences = {}
+                        final_mask_confidences = {}
+                        BATCH_THRESHOLD = 10
+                        UNCERTAIN_THRESHOLD = 10  # If MEDIUM+LOW > this, use smart clustering
+                        
+                        if final_masks > BATCH_THRESHOLD:
+                            print(f"\n🔍 Running batched confidence assessment ({final_masks} masks > {BATCH_THRESHOLD})...")
+                            
+                            # Step 1: Initial batch assessment
+                            mask_confidences = batch_assess_confidence(
+                                combined_output=combined_output,
+                                img_path=img_path,
+                                initial_query=initial_text_prompt,
+                                sam_output_dir=sam_output_dir,
+                                llm_generate_fn=send_generate_request,
+                                batch_size=BATCH_THRESHOLD,
+                            )
+                            
+                            # Step 2: Count MEDIUM/LOW - if too many, use smart clustering
+                            if mask_confidences:
+                                med_low_count = sum(1 for c in mask_confidences.values() if c in ["MEDIUM", "LOW"])
+                                
+                                if med_low_count > UNCERTAIN_THRESHOLD:
+                                    print(f"\n⚠️ Too many uncertain masks ({med_low_count} > {UNCERTAIN_THRESHOLD})")
+                                    print(f"🔍 Running smart clustering assessment...")
+                                    
+                                    # Use smart clustering for better assessment
+                                    final_mask_confidences = smart_confidence_assessment(
+                                        combined_output=combined_output,
+                                        img_path=img_path,
+                                        initial_query=initial_text_prompt,
+                                        sam_output_dir=sam_output_dir,
+                                        initial_confidences=mask_confidences,
+                                        llm_generate_fn=send_generate_request,
+                                        uncertain_threshold=UNCERTAIN_THRESHOLD,
+                                    )
+                                else:
+                                    final_mask_confidences = mask_confidences
+                            else:
+                                final_mask_confidences = {}
+                            
+                            if final_mask_confidences:
+                                # Build confidence summary for the main LLM
+                                high_masks = sorted([i+1 for i, c in final_mask_confidences.items() if c == "HIGH"])
+                                med_masks = sorted([i+1 for i, c in final_mask_confidences.items() if c == "MEDIUM"])
+                                low_masks = sorted([i+1 for i, c in final_mask_confidences.items() if c == "LOW"])
+                                
+                                confidence_info = f"\n\n📊 PRE-ASSESSED CONFIDENCES:"
+                                if high_masks:
+                                    confidence_info += f"\n   ✅ HIGH (confirmed): {high_masks}"
+                                if med_masks:
+                                    confidence_info += f"\n   ⚠️ MEDIUM (need examination): {med_masks}"
+                                if low_masks:
+                                    confidence_info += f"\n   ❌ LOW (rejected): {low_masks}"
+                                
+                                # Guidance based on confidences
+                                if high_masks and not med_masks:
+                                    confidence_info += f"\n\n🎯 All {len(high_masks)} HIGH confidence masks are confirmed. You can select them directly."
+                                elif med_masks:
+                                    confidence_info += f"\n\n⚠️ {len(med_masks)} masks need examination. Consider calling examine_each_mask for them."
+                                if low_masks:
+                                    confidence_info += f"\n❌ {len(low_masks)} LOW confidence masks should be EXCLUDED from selection."
+                        
+                        sam3_output_text_message = f"✅ SUCCESS: Found {final_masks} UNIQUE masks from prompts: {prompt_summary}.{dedup_info}{confidence_info}"
+                        
+                        # Build a comprehensive analysis prompt
+                        # If we have pre-assessed confidences, include guidance
+                        pre_assess_guidance = ""
+                        if final_mask_confidences:
+                            high_list = sorted([i+1 for i, c in final_mask_confidences.items() if c == "HIGH"])
+                            med_list = sorted([i+1 for i, c in final_mask_confidences.items() if c == "MEDIUM"])
+                            low_list = sorted([i+1 for i, c in final_mask_confidences.items() if c == "LOW"])
+                            
+                            if high_list or med_list or low_list:
+                                pre_assess_guidance = f"""
+📊 PRE-ASSESSED CONFIDENCES (use these to speed up your analysis):
+"""
+                                if high_list:
+                                    pre_assess_guidance += f"   ✅ HIGH (confirmed, select these): {high_list}\n"
+                                if med_list:
+                                    pre_assess_guidance += f"   ⚠️ MEDIUM (verify before selecting): {med_list}\n"
+                                if low_list:
+                                    pre_assess_guidance += f"   ❌ LOW (exclude these): {low_list}\n"
+                        
+                        analysis_instruction = f"""
+═══════════════════════════════════════════════════════════════════════════════
+🎯 MASKS FOUND - NOW ANALYZE THEM
+═══════════════════════════════════════════════════════════════════════════════
+
+{final_masks} masks were detected. The masked image is shown below.
+{pre_assess_guidance}
+YOUR TASK NOW (follow these steps EXACTLY):
+
+1. If PRE-ASSESSED confidences are provided above:
+   - HIGH confidence masks: You can select these directly
+   - MEDIUM confidence masks: Verify they match the query before selecting
+   - LOW confidence masks: EXCLUDE these from selection
+
+2. For query "{initial_text_prompt}", identify which mask(s) match
+
+3. CALL select_masks_and_return([mask_numbers]) with the matching masks
+   OR call report_no_mask() if NONE of the masks match the query
+
+⚠️ DO NOT call segment_phrase_batch again! This is a ONE-SHOT system.
+   Analyze the existing masks and SELECT the right ones.
+═══════════════════════════════════════════════════════════════════════════════
+"""
+                        
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call_id,
+                            "content": json.dumps({
+                                "message": sam3_output_text_message,
+                                "num_masks": final_masks,
+                                "output_image_path": combined_image_path,
+                                "successful_prompts": successful_prompts,
+                                "masks_found": True,
+                            }),
+                        })
+                        messages.append({
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": analysis_instruction},
+                                {"type": "image", "image": combined_image_path},
+                            ],
+                        })
+                    
+                    print("\n\n>>> sam3_output_text_message:\n", sam3_output_text_message)
 
 
         elif tool_call["name"] == "examine_each_mask":
@@ -916,9 +1572,6 @@ def agent_inference(
                     f"SAM3 output file not found: {PATH_TO_LATEST_OUTPUT_JSON}"
                 )
             current_outputs = json.load(open(PATH_TO_LATEST_OUTPUT_JSON, "r"))
-            # Ensure original_image_path is present (required for visualization)
-            if "original_image_path" not in current_outputs:
-                current_outputs["original_image_path"] = img_path
             num_masks = len(current_outputs.get("pred_masks", []))
             masks_to_keep = []
 
@@ -967,7 +1620,7 @@ def agent_inference(
                     )
                 checking_response = send_generate_request(
                     iterative_checking_messages,
-                    tools=None  # Iterative checking doesn't use tools
+                    tools=None,  # Iterative checking doesn't use tools
                 )
 
                 # Normalize response to string (handle dict/list responses)
@@ -1019,8 +1672,6 @@ def agent_inference(
                     current_outputs["pred_scores"][i] for i in masks_to_keep
                 ],
                 "pred_masks": [current_outputs["pred_masks"][i] for i in masks_to_keep],
-                # Keep track of the visualization path so downstream prompts always have a real image
-                "output_image_path": "",  # populated below
             }
 
             image_w_check_masks = visualize(updated_outputs)
@@ -1032,7 +1683,6 @@ def agent_inference(
                     "/", "_"
                 ),
             )
-            updated_outputs["output_image_path"] = image_w_check_masks_path
             image_w_check_masks.save(image_w_check_masks_path)
             # save the updated json outputs and append to message history
             messages.append({
@@ -1096,9 +1746,6 @@ def agent_inference(
                     f"SAM3 output file not found: {PATH_TO_LATEST_OUTPUT_JSON}"
                 )
             current_outputs = json.load(open(PATH_TO_LATEST_OUTPUT_JSON, "r"))
-            # Ensure original_image_path is present (required for visualization)
-            if "original_image_path" not in current_outputs:
-                current_outputs["original_image_path"] = img_path
             
             # Extract filter parameters (all optional)
             color = tool_call["parameters"].get("color")
@@ -1142,7 +1789,6 @@ def agent_inference(
                 ".png",
                 f"_attribute_filter.png".replace("/", "_"),
             )
-            filtered_outputs["output_image_path"] = image_w_filtered_masks_path
             image_w_filtered_masks.save(image_w_filtered_masks_path)
             
             # Update PATH_TO_LATEST_OUTPUT_JSON
@@ -1202,9 +1848,6 @@ def agent_inference(
                     f"SAM3 output file not found: {PATH_TO_LATEST_OUTPUT_JSON}"
                 )
             current_outputs = json.load(open(PATH_TO_LATEST_OUTPUT_JSON, "r"))
-            # Ensure original_image_path is present (required for visualization)
-            if "original_image_path" not in current_outputs:
-                current_outputs["original_image_path"] = img_path
 
             assert list(tool_call["parameters"].keys()) == ["final_answer_masks"]
             masks_to_keep = tool_call["parameters"]["final_answer_masks"]
