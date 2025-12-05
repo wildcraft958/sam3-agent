@@ -52,7 +52,7 @@ HF_CACHE_DIR = "/root/.cache/huggingface"  # Standard HuggingFace cache location
 # For 30B model: Use tensor parallelism (2-4 GPUs) to avoid OOM
 # Note: B200 and H200 may not be available in all regions. If unavailable, use H100 or A100.
 GPU_TYPE = "A100-80GB"  # A100 80GB recommended for 30B model
-NUM_GPUS = 2  # Use 2 GPUs with tensor parallelism to avoid OOM (increase to 3-4 if still OOM)
+NUM_GPUS = 1  # Use 2 GPUs with tensor parallelism to avoid OOM (increase to 3-4 if still OOM)
 
 # Build GPU string for Modal
 if NUM_GPUS == 1:
@@ -338,7 +338,7 @@ def vllm_server():
             "python", "-m", "vllm.entrypoints.openai.api_server",
             "--model", MODEL_ID,
             "--trust-remote-code",
-            "--dtype", "bfloat16",
+            "--dtype", "float16",
             "--gpu-memory-utilization", "0.85",  # Reduced from 0.95 to avoid OOM
             "--max-model-len", "32768",  # Reduced from 60K to 32K to save memory (increase if needed)
             "--limit-mm-per-prompt", '{"image": 4}',  # Increased to 4 for examine_each_mask (needs 3 images: raw, masked, zoomed)
