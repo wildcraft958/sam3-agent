@@ -796,7 +796,15 @@ class SAM3SegmentRequest(BaseModel):
                 "model": "Qwen/Qwen3-VL-30B-A3B-Instruct",
                 "api_key": ""
             },
-            "debug": True
+            "debug": True,
+            "confidence_threshold": 0.5,
+            "pyramidal_config": {
+                "tile_size": 512,
+                "overlap_ratio": 0.15,
+                "scales": [1.0, 0.5],
+                "batch_size": 16,
+                "iou_threshold": 0.5
+            }
         }
     })
     
@@ -2481,6 +2489,7 @@ Now analyze the image and query."""
         llm_config: Dict[str, Any],
         debug: bool = False,
         confidence_threshold: float = None,
+        pyramidal_config: Dict[str, Any] = None,
     ) -> Dict[str, Any]:
         """
         Core GPU inference method - LLM provider agnostic.
@@ -2495,14 +2504,23 @@ Now analyze the image and query."""
                 - base_url: API endpoint URL (required) - any OpenAI-compatible endpoint
                 - model: Model name/identifier (required) - any model name
                 - api_key: API key (required, can be empty string for backends without auth)
-            - name: Name for output files (optional, defaults to model name)
-            - max_tokens: Maximum tokens (optional, defaults to 4096)
+                - name: Name for output files (optional, defaults to model name)
+                - max_tokens: Maximum tokens (optional, defaults to 4096)
             debug: whether to return a visualization image (base64)
             confidence_threshold: Optional confidence threshold (0.0-1.0). If None, uses processor's default (0.4)
+            pyramidal_config: Optional pyramidal processing configuration dict:
+                - tile_size: Tile size for pyramidal processing (default: 512)
+                - overlap_ratio: Overlap ratio between tiles (default: 0.15)
+                - scales: Scale factors for multi-scale detection (default: [1.0, 0.5])
+                - batch_size: Batch size for inference (default: 16)
+                - iou_threshold: IoU threshold for NMS deduplication (default: 0.5)
         
         Returns:
             Dict with status, regions, summary, and optional debug visualization
         """
+        # Ensure io module is available locally (avoids scoping issues)
+        import io as _io
+        
         try:
             from sam3.agent.client_llm import (
                 send_generate_request as send_generate_request_orig,
@@ -2548,15 +2566,17 @@ Now analyze the image and query."""
             )
 
             # Use pyramidal batch SAM3 instead of raw SAM3
+            # Use provided config or sensible defaults
+            effective_pyramidal_config = pyramidal_config or {
+                "tile_size": 512,
+                "overlap_ratio": 0.15,
+                "scales": [1.0, 0.5],
+                "batch_size": 16,
+                "iou_threshold": 0.5,
+            }
             call_sam_service = partial(
                 self.call_sam_service_pyramidal,
-                pyramidal_config={
-                    "tile_size": 512,
-                    "overlap_ratio": 0.15,
-                    "scales": [1.0, 0.5],
-                    "batch_size": 16,
-                    "iou_threshold": 0.5,
-                },
+                pyramidal_config=effective_pyramidal_config,
             )
 
             with tempfile.TemporaryDirectory() as temp_dir:
@@ -2565,7 +2585,7 @@ Now analyze the image and query."""
                 
                 try:
                     # Open image and convert to RGB if needed
-                    pil_img = PILImage.open(io.BytesIO(image_bytes))
+                    pil_img = PILImage.open(_io.BytesIO(image_bytes))
                     
                     # Convert to RGB if needed (handles RGBA, P, LA modes)
                     if pil_img.mode in ('RGBA', 'LA', 'P'):
@@ -2609,8 +2629,7 @@ Now analyze the image and query."""
                     # Debug visualization image - convert PIL Image to base64
                     debug_image_b64 = None
                     if debug and rendered_final_output:
-                        import io
-                        buffer = io.BytesIO()
+                        buffer = _io.BytesIO()
                         rendered_final_output.save(buffer, format="PNG")
                         debug_image_b64 = base64.b64encode(buffer.getvalue()).decode("ascii")
 
@@ -2982,6 +3001,7 @@ Set `debug=true` to receive a visualization image in the response.
             
             # Convert Pydantic models to dicts
             llm_config_dict = request.llm_config.model_dump()
+            pyramidal_config_dict = request.pyramidal_config.model_dump() if request.pyramidal_config else None
             
             print(f"📞 Calling sam3_segment with prompt: '{request.prompt}'")
             result = SAM3Model().infer.remote(
@@ -2990,6 +3010,7 @@ Set `debug=true` to receive a visualization image in the response.
                 llm_config=llm_config_dict,
                 debug=request.debug,
                 confidence_threshold=request.confidence_threshold,
+                pyramidal_config=pyramidal_config_dict,
             )
             return JSONResponse(content=result)
             
