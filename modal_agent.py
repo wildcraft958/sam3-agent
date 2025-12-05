@@ -1919,7 +1919,7 @@ Now analyze the image and query."""
                     call_sam_service=call_sam_service,
                     debug=debug,
                     output_dir=output_dir,
-                    max_generations=15,  # Limit LLM API calls to 7
+                    max_generations=10,  # Limit LLM API calls to 7
                 )
 
                 if not final_output_dict:
