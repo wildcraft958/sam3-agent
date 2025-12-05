@@ -48,7 +48,6 @@ def parse_tool_calls_from_text(text: str) -> list:
         # "filter_masks_by_spatial_position",  # Disabled - spatial filtering done in LLM thinking
         # "segment_phrase_in_region", 
         "filter_masks_by_attributes",
-        "segment_with_lisat",  # LISAT segmentation fallback
         # "filter_masks_by_relative_position"  # Disabled - relative filtering done in LLM thinking
         # "segment_phrase_with_tiling"  # Commented out - not currently active
     ]
@@ -351,23 +350,6 @@ TOOLS = [
             }
         }
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "segment_with_lisat",
-            "description": "Use LISAT (Large Language Instructed Segmentation Assistant) as an alternative segmentation method. This tool uses a different model that may succeed when SAM3 fails. Should be used when segment_phrase has been attempted multiple times without success.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "text_prompt": {
-                        "type": "string",
-                        "description": "A descriptive prompt for what to segment. Can be more detailed than SAM3 prompts, including attributes like color, size, location."
-                    }
-                },
-                "required": ["text_prompt"]
-            }
-        }
-    },
     # DISABLED: Relative position filtering is now done in LLM thinking process
     # The LLM reasons about mask positions relative to other objects/masks
     # and directly selects appropriate masks using select_masks_and_return
@@ -458,166 +440,6 @@ def count_images(messages):
                 ):
                     total += 1
     return total
-
-
-def call_lisat_segmentation(image_path, text_prompt, modal_url, max_new_tokens=256):
-    """
-    Call LISAT segmentation service via Modal endpoint.
-    
-    Args:
-        image_path: Path to the image file
-        text_prompt: Text prompt for segmentation
-        modal_url: Modal deployment URL
-        max_new_tokens: Maximum tokens for response
-        
-    Returns:
-        Dict with segmentation results in SAM3 format
-    """
-    try:
-        # Read and encode image to base64
-        with open(image_path, "rb") as img_file:
-            image_bytes = img_file.read()
-            image_b64 = base64.b64encode(image_bytes).decode('utf-8')
-        
-        # Prepare request
-        payload = {
-            "prompt": text_prompt,
-            "image_base64": image_b64,
-            "max_new_tokens": max_new_tokens
-        }
-        
-        print(f"🔍 Calling LISAT API with prompt: {text_prompt}")
-        
-        # Call LISAT API
-        response = requests.post(
-            modal_url,
-            json=payload,
-            headers={"Content-Type": "application/json"},
-            timeout=120  # 2 minute timeout
-        )
-        
-        if response.status_code != 200:
-            raise ValueError(f"LISAT API returned status {response.status_code}: {response.text}")
-        
-        result = response.json()
-        print(f"✓ LISAT API returned successfully")
-        
-        # New LISAT output format: {'text', 'has_seg', 'mask_base64', 'mask_shape'}
-        if not result.get("has_seg", False) or "mask_base64" not in result:
-            print("⚠ LISAT returned no segmentation")
-            return None
-        
-        # Decode mask from base64
-        mask_b64 = result["mask_base64"]
-        mask_bytes = base64.b64decode(mask_b64)
-        mask_array = np.frombuffer(mask_bytes, dtype=np.uint8)
-        mask_img = cv2.imdecode(mask_array, cv2.IMREAD_GRAYSCALE)
-        
-        if mask_img is None:
-            print("❌ Failed to decode mask image")
-            return None
-        
-        # Extract bounding boxes from mask using cv2
-        # Find all unique non-zero values in the mask (each represents a different object)
-        unique_values = np.unique(mask_img)
-        unique_values = unique_values[unique_values > 0]  # Remove background (0)
-        
-        if len(unique_values) == 0:
-            print("⚠ No objects found in mask")
-            return None
-        
-        # Load original image to get dimensions
-        original_image = Image.open(image_path)
-        orig_img_w, orig_img_h = original_image.size
-        
-        pred_boxes = []
-        pred_masks = []
-        pred_scores = []
-        
-        # Process each unique object in the mask
-        for obj_id in unique_values:
-            # Create binary mask for this object
-            binary_mask = (mask_img == obj_id).astype(np.uint8) * 255
-            
-            # Extract bounding box using numpy (handles disconnected regions better)
-            # This approach finds ALL pixels with this object ID, regardless of connectivity
-            coords = np.where(binary_mask > 0)
-            
-            if len(coords[0]) == 0:
-                print(f"⚠ No pixels found for object ID {obj_id}")
-                continue
-            
-            # Get bounding box coordinates (y, x format from np.where)
-            y_min, y_max = coords[0].min(), coords[0].max()
-            x_min, x_max = coords[1].min(), coords[1].max()
-            
-            # Convert to (x, y, w, h) format
-            x, y = x_min, y_min
-            w = x_max - x_min + 1  # +1 to include the max pixel
-            h = y_max - y_min + 1
-            
-            # Validate with contours to ensure mask quality
-            contours, _ = cv2.findContours(binary_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            if len(contours) > 0:
-                # Verify contours exist (quality check)
-                contour_area = sum(cv2.contourArea(c) for c in contours)
-                if contour_area < 10:  # Minimum area threshold
-                    print(f"⚠ Contour area too small for object ID {obj_id}: {contour_area} pixels")
-                    continue
-            else:
-                print(f"⚠ No valid contours found for object ID {obj_id}")
-                continue
-            
-            # Normalize coordinates to [0, 1]
-            x_norm = x / orig_img_w
-            y_norm = y / orig_img_h
-            w_norm = w / orig_img_w
-            h_norm = h / orig_img_h
-            
-            # Store in XYWH format (normalized)
-            pred_boxes.append([x_norm, y_norm, w_norm, h_norm])
-            
-            print(f"✓ Object {obj_id}: BBox=({x}, {y}, {w}, {h}), Area={contour_area:.0f}px")
-            
-            # Convert mask to RLE format (SAM3 format)
-            # For simplicity, store as binary array; SAM3 visualizer can handle it
-            from sam3.train.masks_ops import rle_encode
-            mask_tensor = torch.from_numpy(binary_mask).unsqueeze(0)
-            rle_mask = rle_encode(mask_tensor)
-            pred_masks.append(rle_mask[0])  # Get first (and only) mask
-            
-            # Assign score of 1.0 (high confidence)
-            pred_scores.append(1.0)
-        
-        if len(pred_boxes) == 0:
-            print("⚠ No valid bounding boxes extracted")
-            return None
-        
-        print(f"✓ Extracted {len(pred_boxes)} masks from LISAT output")
-        
-        # Convert LISAT format to SAM3 format
-        sam3_format = {
-            "original_image_path": image_path,
-            "orig_img_h": orig_img_h,
-            "orig_img_w": orig_img_w,
-            "pred_boxes": pred_boxes,
-            "pred_masks": pred_masks,
-            "pred_scores": pred_scores,
-        }
-        
-        return sam3_format
-        
-    except requests.exceptions.Timeout:
-        print("❌ LISAT API call timed out")
-        return None
-    except requests.exceptions.RequestException as e:
-        print(f"❌ LISAT API call failed: {e}")
-        return None
-    except Exception as e:
-        print(f"❌ Error in LISAT segmentation: {e}")
-        import traceback
-        traceback.print_exc()
-        return None
 
 
 def _prune_messages_for_next_round(
@@ -741,9 +563,6 @@ def agent_inference(
     # Track tool call history for fallback logic
     recent_tool_calls = []  # Track last 3 tool calls
     sam3_segmentation_count = 0  # Count SAM3 segmentation attempts
-    lisat_attempts = 0  # Count LISAT attempts
-    lisat_used_prompts = set()  # Track LISAT prompts to avoid repeats
-    LISAT_MODAL_URL = "https://srinjoy59--lisat-seg-api-infer.modal.run"
 
     # debug setup
     debug_folder_path = None
@@ -943,21 +762,15 @@ def agent_inference(
             sam3_segmentation_count += 1
             print(f"📊 SAM3 segmentation attempt #{sam3_segmentation_count}")
         
-        # Count LISAT segmentation attempts
-        if function_name == "segment_with_lisat":
-            lisat_attempts += 1
-            print(f"📊 LISAT segmentation attempt #{lisat_attempts}")
-        
         if PATH_TO_LATEST_OUTPUT_JSON == "":
-            # The first tool call must be segment_phrase, segment_with_lisat, or report_no_mask
+            # The first tool call must be segment_phrase or report_no_mask
             # Note: segment_phrase_in_region and segment_phrase_with_tiling have been disabled
             assert (
                 tool_call["name"] == "segment_phrase"
                 # or tool_call["name"] == "segment_phrase_with_tiling"  # DISABLED
                 # or tool_call["name"] == "segment_phrase_in_region"  # DISABLED
-                or tool_call["name"] == "segment_with_lisat"
                 or tool_call["name"] == "report_no_mask"
-            ), f"First tool call must be segment_phrase, segment_with_lisat, or report_no_mask, got {tool_call['name']}"
+            ), f"First tool call must be segment_phrase or report_no_mask, got {tool_call['name']}"
 
         if tool_call["name"] == "segment_phrase":
             print("🔍 Calling segment_phrase tool...")
@@ -1012,11 +825,10 @@ def agent_inference(
                     print("❌ No masks generated by SAM3, reporting no mask to Qwen.")
                     
                     # Deterministic count tracking - inject into message
-                    attempt_status = f"\n\n📊 ATTEMPT TRACKING:\n- SAM3 attempts: {sam3_segmentation_count}/3\n- LISAT attempts: {lisat_attempts}/3\n- Total attempts: {sam3_segmentation_count + lisat_attempts}/6"
+                    attempt_status = f"\n\n📊 ATTEMPT TRACKING:\n- SAM3 attempts: {sam3_segmentation_count}/3"
                     
-                    # Check if we should suggest LISAT as alternative
-                    if sam3_segmentation_count >= 3 and lisat_attempts == 0:
-                        sam3_output_text_message = f"The segment_phrase tool did not generate any masks for the text_prompt '{current_text_prompt}'.{attempt_status}\n\n⚠️ You have exhausted all 3 SAM3 attempts. It's time to try a different approach. Please use the segment_with_lisat tool as an alternative segmentation method. LISAT uses a different model that may succeed where SAM3 has failed. Include relevant attributes from the original query ('{initial_text_prompt}') such as color, size, or location in your prompt to LISAT."
+                    if sam3_segmentation_count >= 3:
+                        sam3_output_text_message = f"The segment_phrase tool did not generate any masks for the text_prompt '{current_text_prompt}'.{attempt_status}\n\n⚠️ You have exhausted all 3 SAM3 attempts without finding any matching objects. Please call report_no_mask to conclude that no matching objects exist in the image."
                     else:
                         sam3_output_text_message = f"The segment_phrase tool did not generate any masks for the text_prompt '{current_text_prompt}'.{attempt_status}\n\nNow, please call the segment_phrase tool again with a different, perhaps more general, or more creative simple noun phrase text_prompt, while adhering to all the rules stated in the system prompt. Please be reminded that the original user query was '{initial_text_prompt}'."
                     
@@ -1028,7 +840,7 @@ def agent_inference(
                     })
                 else:
                     # Deterministic count tracking - inject into message
-                    attempt_status = f"\n\n📊 ATTEMPT TRACKING:\n- SAM3 attempts: {sam3_segmentation_count}/3\n- LISAT attempts: {lisat_attempts}/3\n- Total attempts: {sam3_segmentation_count + lisat_attempts}/6"
+                    attempt_status = f"\n\n📊 ATTEMPT TRACKING:\n- SAM3 attempts: {sam3_segmentation_count}/3"
                     
                     sam3_output_text_message = rf"The segment_phrase tool generated {num_masks} available masks.{attempt_status}\n\nAll {num_masks} available masks are rendered in this image below, now you must analyze the {num_masks} available mask(s) carefully, compare them against the raw input image and the original user query, and determine your next action. Please be reminded that the original user query was '{initial_text_prompt}'."
                     # Per Qwen3 docs: Add tool result with role: "tool"
@@ -1347,138 +1159,6 @@ def agent_inference(
                     ],
                 })
 
-
-        elif tool_call["name"] == "segment_with_lisat":
-            print("🔍 Calling segment_with_lisat tool...")
-            assert list(tool_call["parameters"].keys()) == ["text_prompt"], \
-                f"Expected ['text_prompt'], got {list(tool_call['parameters'].keys())}"
-            
-            current_text_prompt = tool_call["parameters"]["text_prompt"]
-            
-            # Check if this is beyond the 3-attempt limit for LISAT
-            if lisat_attempts >= 3:
-                print(f"❌ LISAT has been attempted 3 times already. Giving up.")
-                messages.append({
-                    "role": "assistant",
-                    "content": generated_text if generated_text else None,
-                    "tool_calls": [tool_call_data],
-                })
-                
-                final_message = f"You have attempted LISAT segmentation 3 times without success after SAM3 also failed. Unfortunately, no segmentation method was able to find the requested objects in the image. Please call report_no_mask to conclude."
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call_id,
-                    "content": json.dumps({"message": final_message, "num_masks": 0}),
-                })
-            
-            # Check if this prompt was already used with LISAT
-            elif current_text_prompt in lisat_used_prompts:
-                print(f"❌ Text prompt '{current_text_prompt}' has been used with LISAT before.")
-                messages.append({
-                    "role": "assistant",
-                    "content": generated_text if generated_text else None,
-                    "tool_calls": [tool_call_data],
-                })
-                
-                duplicate_prompt_message = f"You have previously used '{current_text_prompt}' with LISAT. Please try segment_with_lisat again with a different prompt that includes more specific attributes from the original query '{initial_text_prompt}' such as color, size, shape, or location. You have {3 - lisat_attempts} attempts remaining with LISAT."
-                messages.append({
-                    "role": "user",
-                    "content": [{"type": "text", "text": duplicate_prompt_message}],
-                })
-            
-            else:
-                # Track this LISAT attempt
-                lisat_attempts += 1
-                lisat_used_prompts.add(current_text_prompt)
-                print(f"📊 LISAT attempt #{lisat_attempts}/3")
-                
-                # Call LISAT API
-                lisat_outputs = call_lisat_segmentation(
-                    image_path=img_path,
-                    text_prompt=current_text_prompt,
-                    modal_url=LISAT_MODAL_URL,
-                )
-                
-                messages.append({
-                    "role": "assistant",
-                    "content": generated_text if generated_text else None,
-                    "tool_calls": [tool_call_data],
-                })
-                
-                if lisat_outputs is None or len(lisat_outputs.get("pred_masks", [])) == 0:
-                    print("❌ No masks generated by LISAT")
-                    
-                    remaining_attempts = 3 - lisat_attempts
-                    if remaining_attempts > 0:
-                        lisat_output_text_message = f"The segment_with_lisat tool did not generate any masks for the prompt '{current_text_prompt}'. You have {remaining_attempts} more attempts with LISAT. Try refining your prompt with more specific attributes from the original query '{initial_text_prompt}', such as adding color descriptors, size information, or location details."
-                    else:
-                        lisat_output_text_message = f"The segment_with_lisat tool did not generate any masks for the prompt '{current_text_prompt}'. You have exhausted all 3 LISAT attempts after SAM3 also failed. Please call report_no_mask to conclude that no matching objects exist in the image."
-                    
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tool_call_id,
-                        "content": json.dumps({"message": lisat_output_text_message, "num_masks": 0}),
-                    })
-                else:
-                    # Success! Save outputs and visualize
-                    num_masks = len(lisat_outputs["pred_masks"])
-                    print(f"✓ LISAT generated {num_masks} masks")
-                    
-                    # Save outputs
-                    text_prompt_for_save_path = (
-                        current_text_prompt.replace("/", "_") if "/" in current_text_prompt else current_text_prompt
-                    )
-                    image_basename = os.path.basename(img_path)
-                    image_basename_no_ext = os.path.splitext(image_basename)[0]
-                    safe_dir_name = image_basename_no_ext.replace("/", "_").replace("\\", "_")
-                    if not safe_dir_name or safe_dir_name.startswith("-"):
-                        safe_dir_name = "image_" + safe_dir_name if safe_dir_name else "image"
-                    
-                    os.makedirs(os.path.join(sam_output_dir, safe_dir_name), exist_ok=True)
-                    
-                    PATH_TO_LATEST_OUTPUT_JSON = os.path.join(
-                        sam_output_dir,
-                        safe_dir_name,
-                        rf"{text_prompt_for_save_path}_lisat.json",
-                    )
-                    lisat_output_image_path = os.path.join(
-                        sam_output_dir,
-                        safe_dir_name,
-                        rf"{text_prompt_for_save_path}_lisat.png",
-                    )
-                    
-                    lisat_outputs["output_image_path"] = lisat_output_image_path
-                    json.dump(lisat_outputs, open(PATH_TO_LATEST_OUTPUT_JSON, "w"), indent=4)
-                    
-                    # Visualize
-                    viz_image = visualize(lisat_outputs)
-                    viz_image.save(lisat_output_image_path)
-                    
-                    lisat_output_text_message = f"The segment_with_lisat tool successfully generated {num_masks} masks for the prompt '{current_text_prompt}'. All {num_masks} available masks are rendered in this image below. Now you must analyze the {num_masks} available mask(s) carefully, compare them against the raw input image and the original user query, and determine your next action. Please be reminded that the original user query was '{initial_text_prompt}'."
-                    
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tool_call_id,
-                        "content": json.dumps({
-                            "message": lisat_output_text_message,
-                            "num_masks": num_masks,
-                            "output_image_path": lisat_output_image_path,
-                        }),
-                    })
-                    
-                    # Add user message with image for visual analysis
-                    messages.append({
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": "Please analyze the masks shown in the image below."},
-                            {"type": "image", "image": lisat_output_image_path},
-                        ],
-                    })
-                    
-                    # Update LATEST_SAM3_TEXT_PROMPT to track current prompt
-                    LATEST_SAM3_TEXT_PROMPT = current_text_prompt
-                
-                print("\n\n>>> lisat_output_text_message:\n", lisat_output_text_message if 'lisat_output_text_message' in locals() else "N/A")
 
         elif tool_call["name"] == "select_masks_and_return":
             print("🔍 Calling select_masks_and_return tool...")

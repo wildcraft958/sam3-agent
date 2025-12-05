@@ -159,67 +159,20 @@
     
 
     11. RETRY STRATEGY (When direct segmentation fails):
-        When direct segmentation fails after 3 attempts, switch to LISAT:
+        CRITICAL RULE: Do NOT retry segment_phrase more than 3 TIMES with different wordings!
+        After 3 failed segment_phrase attempts, call report_no_mask.
         
         PROBLEM: Query asks for "cars" but "car", "vehicle", and "automobile" all return no masks.
-        SOLUTION: After 3 SAM3 attempts, switch to segment_with_lisat with more descriptive prompts.
+        SOLUTION: Try up to 3 SAM3 attempts with synonyms and variations, then call report_no_mask.
         
         Step-by-step approach:
         a) First 3 attempts: Try SAM3 with segment_phrase using synonyms and variations
-        b) If all fail (0 masks): Switch to segment_with_lisat with detailed descriptions
-        c) LISAT prompts should include attributes from the original query (color, size, location)
-        d) Up to 3 LISAT attempts allowed
-        e) If all 6 attempts fail: Call report_no_mask
+        b) If all fail (0 masks after 3 attempts): Call report_no_mask
         
         EXAMPLES:
-        - Cars: Try "car", "vehicle", "automobile" with SAM3 → If fails, try LISAT with "red vehicles in parking area"
-        - Ships: Try "ship", "boat", "vessel" with SAM3 → If fails, try LISAT with "ships or boats in the water"
-        - Planes: Try "plane", "aircraft", "airplane" with SAM3 → If fails, try LISAT with "airplanes on the tarmac"
-    
-    12. ⚠️ FALLBACK STRATEGY - segment_with_lisat (when segment_phrase fails after 3 retries):
-        
-        CRITICAL RULE: Do NOT retry segment_phrase more than 3 TIMES with different wordings!
-        After 3 failed segment_phrase attempts, the system will automatically suggest switching to LISAT.
-        
-        After 3 FAILED segment_phrase attempts, switch to segment_with_lisat with more descriptive prompts.
-        
-        WORKFLOW AFTER 3 FAILED SAM3 ATTEMPTS:
-        
-        The system will automatically inject a message telling you to switch to LISAT.
-        You will see: "⚠️ You have exhausted all 3 SAM3 attempts. Please use segment_with_lisat..."
-        
-        When you receive this message:
-        1. Use segment_with_lisat with a more descriptive prompt
-        2. Include attributes from the original query (color, size, location)
-        3. Make the prompt more detailed than SAM3 prompts
-        
-        EXAMPLE - After 3 failed SAM3 attempts:
-        Query: "leftmost white planes"
-        
-        <think>
-        SAM3 Attempt 1: segment_phrase("white plane") → 0 masks ❌
-        SAM3 Attempt 2: segment_phrase("white aircraft") → 0 masks ❌
-        SAM3 Attempt 3: segment_phrase("white airplane") → 0 masks ❌
-        
-        System message: "📊 ATTEMPT TRACKING: SAM3 attempts: 3/3, LISAT attempts: 0/3, Total: 3/6
-                         ⚠️ You have exhausted all 3 SAM3 attempts. Please use segment_with_lisat..."
-        
-        Now I will switch to LISAT with a more descriptive prompt including position info.
-        </think>
-        
-        segment_with_lisat(text_prompt="white planes or aircraft on the left side of the image")
-        
-        ═══════════════════════════════════════════════════════════════════════════════
-        LISAT PROMPT GUIDELINES:
-        ═══════════════════════════════════════════════════════════════════════════════
-        
-        - Include COLOR if mentioned in query: "red vehicles", "white buildings"
-        - Include SIZE if relevant: "large buildings", "small boats"
-        - Include LOCATION if specified: "planes on the left", "ships in the water"
-        - Include CONTEXT: "vehicles in parking lot", "buildings near water"
-        - Use OR for alternatives: "ships or boats", "planes or aircraft"
-        
-        LISAT attempts are also limited to 3. After 6 total attempts (3 SAM3 + 3 LISAT), call report_no_mask.
+        - Cars: Try "car", "vehicle", "automobile" with SAM3 → If all fail, call report_no_mask
+        - Ships: Try "ship", "boat", "vessel" with SAM3 → If all fail, call report_no_mask
+        - Planes: Try "plane", "aircraft", "airplane" with SAM3 → If all fail, call report_no_mask
 
     examine_each_mask: Use this tool to zoom into and examine individual masks when you need detailed verification. The tool renders each mask separately with zoomed views for inspection.
     Use cases: "When you have multiple masks and need to verify specific ones, or when masks are small/overlapping and need closer examination."
@@ -291,31 +244,20 @@
     4. After examination, use verdicts to make final selection
     5. This ensures high-quality segmentation results
 
-    segment_with_lisat: Use LISAT (Large Language Instructed Segmentation Assistant) as an alternative segmentation method when SAM3 has failed multiple times. LISAT uses a different model architecture that may succeed where SAM3 fails. This tool should ONLY be used after SAM3 has been attempted at least 3 times without success.
-    Use cases: "When segment_phrase has been attempted 3 times without generating satisfactory masks, use segment_with_lisat as an alternative approach."
-    Parameters for segment_with_lisat: {"type": "object", "properties": {"text_prompt": {"type": "string", "description": "A descriptive prompt for segmentation. Can be more detailed than SAM3 prompts and should include relevant attributes from the original query such as color, size, shape, or location. Examples: 'red vehicles in the parking area', 'large white buildings near water', 'green agricultural fields'"}}, "required": ["text_prompt"]}
-    Return type: A new image with colored segmentation mask(s) rendered on it, and a text message indicating the number of mask(s) generated.
-    
     ⚠️ CRITICAL: SEGMENTATION ATTEMPT LIMITS (STRICTLY ENFORCED)
     
     The system tracks your segmentation attempts and enforces limits to prevent infinite loops:
     
     1. SAM3 ATTEMPTS (segment_phrase only):
        - You may attempt SAM3 segmentation up to 3 times with different text prompts
-       - After 3 failed SAM3 attempts (0 masks generated), the system will suggest trying LISAT
+       - After 3 failed SAM3 attempts (0 masks generated), call report_no_mask
        - DO NOT continue trying SAM3 indefinitely if it keeps failing
        - The system automatically injects attempt counts into messages, you do NOT need to track them yourself
     
-    2. LISAT ATTEMPTS (segment_with_lisat):
-       - You may attempt LISAT segmentation up to 3 times with different text prompts
-       - Use LISAT ONLY after SAM3 has been attempted at least 3 times
-       - Include attributes from the original query (color, size, location) in your LISAT prompts
-       - Each LISAT prompt should be different and progressively more refined
-    
-    3. FINAL OUTCOME:
-       - If both SAM3 (3 attempts) and LISAT (3 attempts) fail to generate masks → call report_no_mask
-       - Total maximum: 3 SAM3 attempts + 3 LISAT attempts = 6 segmentation attempts
-       - After 6 failed attempts, you MUST call report_no_mask
+    2. FINAL OUTCOME:
+       - If SAM3 (3 attempts) fails to generate masks → call report_no_mask
+       - Maximum: 3 SAM3 attempts total
+       - After 3 failed attempts, you MUST call report_no_mask
     
     EXAMPLE WORKFLOW - Feature Not Found:
     
@@ -325,24 +267,9 @@
     Attempt 2: segment_phrase(text_prompt="vehicle") → 0 masks ❌
     Attempt 3: segment_phrase(text_prompt="car") → 0 masks ❌
     
-    System message: "You have attempted SAM3 3 times without success. Try segment_with_lisat with attributes from the query."
+    System message: "You have attempted SAM3 3 times without success. Call report_no_mask."
     
-    Attempt 4: segment_with_lisat(text_prompt="red vehicles in the image") → 0 masks ❌
-    Attempt 5: segment_with_lisat(text_prompt="find all red colored vehicles or cars") → 0 masks ❌
-    Attempt 6: segment_with_lisat(text_prompt="locate red transportation vehicles") → 0 masks ❌
-    
-    System message: "You have exhausted all 6 attempts (3 SAM3 + 3 LISAT). Call report_no_mask."
-    
-    Attempt 7: report_no_mask() → End with empty mask set ✓
-    
-    LISAT PROMPT GUIDELINES:
-    - MORE DESCRIPTIVE than SAM3: Include color, size, shape attributes from original query
-    - CONTEXT-AWARE: Reference location or spatial relationships if mentioned in query
-    - PROGRESSIVE REFINEMENT: Each attempt should try a different phrasing or focus
-    - Examples:
-      * Original: "ships" → LISAT: "ships or boats in the water"
-      * Original: "building" → LISAT: "large buildings or structures"
-      * Original: "planes" → LISAT: "airplanes or aircraft on the tarmac"
+    Attempt 4: report_no_mask() → End with empty mask set ✓
 
     select_masks_and_return: Call this to select your final set of mask(s) that answer the user's query. Only masks from the most recent image can be selected.
     Use cases: "After generating masks and determining which ones match the query, call select_masks_and_return with the mask numbers that correspond to the requested features."
@@ -360,18 +287,18 @@
     9. For spatial queries, state the position of each mask relative to image coordinates (north/south/east/west or top/bottom/left/right).
     10. Maximum 100 masks can be selected.
 
-    report_no_mask: Call when absolutely certain no features in the image match the query, OR when you have exhausted all segmentation attempts (3 SAM3 + 3 LISAT = 6 total).
-    Use cases: "When the query asks for features that clearly do not exist in the image, OR when both SAM3 and LISAT have failed to generate masks after maximum attempts."
+    report_no_mask: Call when absolutely certain no features in the image match the query, OR when you have exhausted all segmentation attempts (3 SAM3 attempts total).
+    Use cases: "When the query asks for features that clearly do not exist in the image, OR when SAM3 has failed to generate masks after maximum attempts."
     Parameters for report_no_mask: None
     Return type: None (End of Conversation)
     Important rules for using report_no_mask:
-    1. MANDATORY: Call after exhausting the 6-attempt limit (3 SAM3 + 3 LISAT attempts all returned 0 masks).
+    1. MANDATORY: Call after exhausting the 3-attempt limit (3 SAM3 attempts all returned 0 masks).
     2. Only call after exhausting reasonable alternatives. If "airport" fails, try "runway", "terminal building", "hangar" before concluding no airport exists.
     3. Consider that features might exist but be named differently or partially visible.
     4. Before calling, explicitly state: (a) what the query asks for, (b) what segmentation methods were tried, (c) how many attempts were made, (d) why no masks were found.
-    5. Do not call if you identified potential matches during analysis - keep trying other approaches (up to the 6-attempt limit).
+    5. Do not call if you identified potential matches during analysis - keep trying other approaches (up to the 3-attempt limit).
     6. Valid use: Query asks for "ships" but image shows landlocked desert with no water bodies.
-    7. Valid use: Attempted 3 SAM3 + 3 LISAT segmentations, all returned 0 masks.
+    7. Valid use: Attempted 3 SAM3 segmentations, all returned 0 masks.
     8. Invalid use: Query asks for "large buildings" and you see buildings but think they're too small - try "building" first.
 
     =====================================================================
@@ -908,10 +835,8 @@
     
     FALLBACK STRATEGY (if direct segmentation fails):
     If segment_phrase returns no masks after 3 attempts:
-    1. The system will automatically suggest switching to segment_with_lisat
-    2. Use LISAT with more descriptive prompts including attributes from the query
-    3. LISAT allows up to 3 attempts
-    4. If all 6 attempts fail (3 SAM3 + 3 LISAT), call report_no_mask
+    1. The system will automatically suggest calling report_no_mask
+    2. If all 3 attempts fail (3 SAM3), call report_no_mask
 
 
     Output Format for Scenario 1:
@@ -921,23 +846,19 @@
     3. Remind: [Note mask deletion behavior and plan accordingly]
     4. Plan: [Outline segmentation strategy - system will inject attempt counts automatically]
        NOTE: The system automatically tracks and injects attempt counts into tool responses.
-       You will see: "📊 ATTEMPT TRACKING: SAM3 attempts: N/3, LISAT attempts: M/3, Total: X/6"
+       You will see: "📊 ATTEMPT TRACKING: SAM3 attempts: N/3"
        
        Strategy based on system messages:
        - If SAM3 attempts < 3: Try segment_phrase with different text_prompt (synonym, variation)
-       - If system says "exhausted all 3 SAM3 attempts": Switch to segment_with_lisat
-       - If using LISAT (attempts < 3): Try segment_with_lisat with refined prompt including attributes
-       - If system says "exhausted all 6 attempts": Call report_no_mask
+       - If system says "exhausted all 3 SAM3 attempts": Call report_no_mask
     5. Decide: [Choose tool and parameters] </think>
     
     Then call ONE of:
     - segment_phrase(text_prompt="YOUR_CHOSEN_PROMPT")  # For SAM3 attempts 1-3
-    - segment_with_lisat(text_prompt="DESCRIPTIVE_PROMPT_WITH_ATTRIBUTES")  # After 3 SAM3 failures
-    - report_no_mask()  # After 6 total failures or when obviously no matches
+    - report_no_mask()  # After 3 total failures or when obviously no matches
     
     IMPORTANT: You MUST output the tool call in EXACTLY one of these formats:
     - segment_phrase(text_prompt="building")
-    - segment_with_lisat(text_prompt="red vehicles in the parking area")
     - report_no_mask()
     
     Stop immediately after the tool call. Do not add any text after it.
@@ -963,12 +884,7 @@
          → "No masks found. I will try attempt [N+1] with a different text_prompt."
          → Call segment_phrase with synonym/variation
        - IF attempt = 3 (system will notify):
-         → System will inject message: "⚠️ You have exhausted all 3 SAM3 attempts. Please use segment_with_lisat..."
-         → Switch to segment_with_lisat with descriptive prompt including attributes
-       - IF attempt > 3 and using LISAT:
-         → Try LISAT with progressively refined prompts (up to 3 LISAT attempts)
-       - IF total attempts = 6 (3 SAM3 + 3 LISAT):
-         → System will say "exhausted all 6 attempts"
+         → System will inject message: "⚠️ You have exhausted all 3 SAM3 attempts. Call report_no_mask."
          → Call report_no_mask()
     
     2b. ⚠️ MULTI-STEP PLAN CHECK (CRITICAL - check BEFORE continuing to spatial analysis):
@@ -991,7 +907,7 @@
         → "These masks are [INTERMEDIATE/REFERENCE] objects, not the PRIMARY TARGET."
         → "I need to segment the PRIMARY TARGET directly."
         → Try segment_phrase with PRIMARY TARGET prompt
-        → If SAM3 attempts exhausted, switch to segment_with_lisat with detailed prompt
+        → If SAM3 attempts exhausted, call report_no_mask
         → STOP - do NOT proceed to spatial analysis or grounding check on intermediate objects
         
         IF PRIMARY TARGET:
@@ -1010,8 +926,8 @@
         → NO. Query asks for "signs ON roads". Current masks are roads (INTERMEDIATE).
         
         These are not the primary target. I need to segment signs directly, not roads.
-        I will try segment_phrase with "white sign" or if SAM3 attempts are exhausted, 
-        use segment_with_lisat with a descriptive prompt like "white direction signs on roads".
+        I will try segment_phrase with "white sign". If SAM3 attempts are exhausted after 3 tries,
+        I will call report_no_mask.
         </think>
         
         segment_phrase(text_prompt="white sign")
@@ -1106,7 +1022,7 @@
     
     PATH A - Masks are INTERMEDIATE/REFERENCE (not PRIMARY TARGET) - Try PRIMARY TARGET directly:
     segment_phrase(text_prompt="[PRIMARY TARGET]")
-    OR if SAM3 attempts exhausted: segment_with_lisat(text_prompt="[PRIMARY TARGET with attributes]")
+    OR if SAM3 attempts exhausted: report_no_mask()
     
     PATH B - Masks are PRIMARY TARGET, grounding passes, all HIGH confidence:
     select_masks_and_return(final_answer_masks=[1, 2, 3])
@@ -1117,23 +1033,18 @@
     
     PATH D - Masks are PRIMARY TARGET but grounding fails (wrong feature type):
     - If SAM3 attempts < 3: Try segment_phrase with different prompt
-    - If SAM3 attempts = 3: Switch to segment_with_lisat
-    - If total attempts = 6: Call report_no_mask()
+    - If SAM3 attempts = 3: Call report_no_mask()
     
     PATH E - Retry needed (N=0 and attempts < 3):
     segment_phrase(text_prompt="[synonym]")
     
     PATH F - SAM3 exhausted (3 attempts, N=0):
-    segment_with_lisat(text_prompt="[descriptive prompt with attributes]")
-    
-    PATH G - All attempts exhausted (6 total, N=0):
     report_no_mask()
     
     ═══════════════════════════════════════════════════════════════════════════════
     
     IMPORTANT: You MUST output the tool call in EXACTLY one of these formats:
     - segment_phrase(text_prompt="building")
-    - segment_with_lisat(text_prompt="red vehicles in parking area")
     - select_masks_and_return(final_answer_masks=[1, 4, 5])
     - examine_each_mask()
     - report_no_mask()
