@@ -128,7 +128,6 @@ def vllm_server():
     from fastapi.responses import JSONResponse
     from fastapi import Request
     from starlette.requests import ClientDisconnect
-    from fastapi.middleware.cors import CORSMiddleware
     
     print(f"🚀 Initializing vLLM server with {MODEL_ID}...")
     print(f"GPU Configuration: {GPU_SPEC} ({NUM_GPUS} GPU(s))")
@@ -142,22 +141,18 @@ def vllm_server():
     os.environ["HF_HUB_CACHE"] = str(model_cache_path)
     
     # Create FastAPI app for proxy
+    from fastapi.middleware.cors import CORSMiddleware
     app = fastapi.FastAPI(title="Qwen3-VL vLLM Server")
-    # Robust CORS: allow frontend origins configured via env (default: allow all)
-    allowed_origins_raw = os.environ.get("CORS_ALLOW_ORIGINS", "*")
-    allowed_origins = (
-        ["*"]
-        if allowed_origins_raw.strip() == "*"
-        else [o.strip() for o in allowed_origins_raw.split(",") if o.strip()]
-    )
+    
+    # Add CORS middleware to allow frontend access
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=allowed_origins or ["*"],
+        allow_origins=["*"],  # Allow all origins for API access
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
-        expose_headers=["*"],
     )
+    
     http_client = httpx.AsyncClient(timeout=300.0)
     
     vllm_process = None
@@ -174,11 +169,11 @@ def vllm_server():
             "--model", MODEL_ID,
             "--trust-remote-code",
             "--dtype", "bfloat16",
-            "--gpu-memory-utilization", "0.90",  # Reduced from 0.95 to avoid OOM
+            "--gpu-memory-utilization", "0.85",  # Reduced from 0.95 to avoid OOM
             "--max-model-len", "32768",  # Reduced from 60K to 32K to save memory (increase if needed)
-            "--limit-mm-per-prompt", '{"image": 2}',  # Enforce 2-image cap per prompt (agent stays within this limit)
+            "--limit-mm-per-prompt", '{"image": 4}',  # Increased to 4 for examine_each_mask (needs 3 images: raw, masked, zoomed)
             "--enforce-eager",  # Disables CUDA graphs to save memory
-            "--max-num-seqs", "1",  # Further reduced batch size for memory efficiency
+            "--max-num-seqs", "2",  # Further reduced batch size for memory efficiency
             "--max-num-batched-tokens", "4096",  # Reduced to save memory
             "--swap-space", "4",  # Enable 4GB CPU swap space for overflow
             "--port", str(vllm_port),

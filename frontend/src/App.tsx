@@ -5,8 +5,7 @@ import SAM3ConfigForm, { SAM3Config } from './components/SAM3ConfigForm';
 import ImageVisualization from './components/ImageVisualization';
 import ResultsPanel from './components/ResultsPanel';
 import CommunicationLog from './components/CommunicationLog';
-import DiagnosticPage from './components/DiagnosticPage';
-import { segmentImage, inferImage, LLMConfig, SegmentResponse } from './utils/api';
+import { segmentImage, countImage, LLMConfig, SegmentResponse } from './utils/api';
 
 type ViewMode = 'main' | 'diagnostic';
 
@@ -16,9 +15,10 @@ function App() {
   const [imageFile, setImageFile] = useState<File | null>(null);
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [llmConfig, setLlmConfig] = useState<LLMConfig>({
-    base_url: 'https://api.openai.com/v1',
-    model: 'gpt-4o',
+    base_url: 'https://srinjoy59--qwen3-vl-vllm-server-30b-vllm-server.modal.run/v1',
+    model: 'Qwen/Qwen3-VL-30B-A3B-Instruct',
     api_key: '',
+    name: 'qwen3-vl-30b-modal',
     max_tokens: 2048,
   });
   const [prompt, setPrompt] = useState<string>('segment all objects');
@@ -76,38 +76,11 @@ function App() {
       return;
     }
 
-    if (!useInfer) {
-      const baseUrl = llmConfig.base_url?.trim();
-      if (!baseUrl) {
-        setError('Please provide an LLM base URL (e.g., your vLLM /v1 endpoint or https://api.openai.com/v1).');
-        return;
-      }
-      try {
-        const parsed = new URL(baseUrl);
-        if (!parsed.protocol.startsWith('http')) {
-          setError('LLM base URL must start with http:// or https://');
-          return;
-        }
-        if (!parsed.pathname.endsWith('/v1') && !parsed.pathname.includes('/v1/')) {
-          setError('LLM base URL must include /v1 (e.g., https://your-endpoint.modal.run/v1).');
-          return;
-        }
-        if (parsed.host.includes('sam3-agent')) {
-          setError('LLM base URL points to the SAM3 agent. Please set it to your LLM server (e.g., vLLM /v1).');
-          return;
-        }
-      } catch {
-        setError('LLM base URL is not a valid URL. Example: https://your-endpoint.modal.run/v1');
-        return;
-      }
-      if (!llmConfig.model?.trim()) {
-        setError('Please provide an LLM model name.');
-        return;
-      }
-      if (!llmConfig.api_key) {
-        setError('Please provide an API key for the LLM (or leave empty only if your backend allows).');
-        return;
-      }
+    // Only require API key for OpenAI and similar providers (not Modal vLLM)
+    const isModalVLLM = llmConfig.base_url.includes('modal.run');
+    if (!useInfer && !isModalVLLM && !llmConfig.api_key) {
+      setError('Please provide an API key');
+      return;
     }
 
     // Cancel any existing request
@@ -125,9 +98,9 @@ function App() {
 
     try {
       if (useInfer) {
-        // Use pure SAM3 inference (no LLM)
-        const inferResponse = await inferImage({
-          text_prompt: prompt,
+        // Use pure SAM3 counting (no LLM)
+        const countResponse = await countImage({
+          prompt: prompt,
           image_b64: imageBase64,
           confidence_threshold: sam3Config.confidence_threshold,
         }, signal);
@@ -137,29 +110,29 @@ function App() {
           return;
         }
 
-        // Convert infer response to segment response format for compatibility
-        if (inferResponse.status === 'success' && inferResponse.orig_img_h && inferResponse.orig_img_w) {
+        // Convert count response to segment response format for compatibility
+        if (countResponse.status === 'success' && countResponse.detections) {
           const segmentResponse: SegmentResponse = {
             status: 'success',
-            summary: `SAM3 found ${inferResponse.pred_boxes?.length || 0} regions`,
-            regions: inferResponse.pred_boxes?.map((box, idx) => ({
-              bbox: box,
-              mask: inferResponse.pred_masks?.[idx],
-              score: inferResponse.pred_scores?.[idx],
+            summary: `SAM3 found ${countResponse.count || 0} ${countResponse.object_type || 'objects'}`,
+            regions: countResponse.detections?.map((det) => ({
+              bbox: det.box,
+              mask: det.mask_rle,
+              score: det.score,
             })) || [],
             raw_sam3_json: {
-              orig_img_h: inferResponse.orig_img_h,
-              orig_img_w: inferResponse.orig_img_w,
-              pred_boxes: inferResponse.pred_boxes || [],
-              pred_masks: inferResponse.pred_masks || [],
-              pred_scores: inferResponse.pred_scores || [],
+              orig_img_h: countResponse.orig_img_h || 0,
+              orig_img_w: countResponse.orig_img_w || 0,
+              pred_boxes: countResponse.detections?.map(d => d.box) || [],
+              pred_masks: countResponse.detections?.map(d => d.mask_rle) || [],
+              pred_scores: countResponse.detections?.map(d => d.score) || [],
             },
           };
           setResponse(segmentResponse);
         } else {
           setResponse({
             status: 'error',
-            message: inferResponse.message || 'Inference failed',
+            message: countResponse.message || 'Counting failed',
           });
         }
       } else {
@@ -275,9 +248,9 @@ function App() {
                   checked={useInfer}
                   onChange={(e) => setUseInfer(e.target.checked)}
                 />
-                Use Pure SAM3 (No LLM)
+                Use Pure SAM3 Counting (No LLM)
               </label>
-              <p className="hint">Check to use SAM3 inference only (faster, no LLM costs)</p>
+              <p className="hint">Check to use SAM3 counting only (faster, no LLM costs)</p>
             </div>
           </div>
 

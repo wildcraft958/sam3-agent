@@ -1,145 +1,7 @@
 import axios from 'axios';
 
-// Storage keys for runtime endpoint override
-const STORAGE_KEY_API_ENDPOINT = 'sam3_api_endpoint';
-const STORAGE_KEY_INFER_ENDPOINT = 'sam3_infer_endpoint';
-
-// Default endpoints (build-time)
-const DEFAULT_API_ENDPOINT = 'https://srinjoy59--sam3-agent-sam3-segment.modal.run';
-const DEFAULT_INFER_ENDPOINT = 'https://srinjoy59--sam3-agent-sam3-infer.modal.run';
-
-// Validate URL format
-function isValidUrl(url: string): boolean {
-  try {
-    const parsed = new URL(url);
-    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
-  } catch {
-    return false;
-  }
-}
-
-// Get endpoint with fallback: runtime override > env var > default
-function getEndpoint(
-  envVar: string | undefined,
-  storageKey: string,
-  defaultValue: string
-): string {
-  // 1. Check localStorage for runtime override
-  if (typeof window !== 'undefined') {
-    const stored = localStorage.getItem(storageKey);
-    if (stored && stored.trim() && isValidUrl(stored.trim())) {
-      return stored.trim();
-    }
-  }
-
-  // 2. Check environment variable
-  if (envVar && envVar.trim() && isValidUrl(envVar.trim())) {
-    return envVar.trim();
-  }
-
-  // 3. Fall back to default
-  return defaultValue;
-}
-
-// Helper function to get current endpoint (checks localStorage each time for runtime changes)
-function getCurrentEndpoint(
-  envVar: string | undefined,
-  storageKey: string,
-  defaultValue: string
-): string {
-  // 1. Check localStorage for runtime override (checked each time for dynamic updates)
-  if (typeof window !== 'undefined') {
-    const stored = localStorage.getItem(storageKey);
-    if (stored && stored.trim() && isValidUrl(stored.trim())) {
-      return stored.trim();
-    }
-  }
-
-  // 2. Check environment variable
-  if (envVar && envVar.trim() && isValidUrl(envVar.trim())) {
-    return envVar.trim();
-  }
-
-  // 3. Fall back to default
-  return defaultValue;
-}
-
-// Initial endpoint values for logging (functions use dynamic lookup)
-const INITIAL_API_ENDPOINT = getCurrentEndpoint(
-  import.meta.env.VITE_API_ENDPOINT,
-  STORAGE_KEY_API_ENDPOINT,
-  DEFAULT_API_ENDPOINT
-);
-const INITIAL_INFER_ENDPOINT = getCurrentEndpoint(
-  import.meta.env.VITE_INFER_ENDPOINT,
-  STORAGE_KEY_INFER_ENDPOINT,
-  DEFAULT_INFER_ENDPOINT
-);
-
-// Export functions to get and set endpoints at runtime (always gets current value)
-export function getApiEndpoint(): string {
-  return getCurrentEndpoint(
-    import.meta.env.VITE_API_ENDPOINT,
-    STORAGE_KEY_API_ENDPOINT,
-    DEFAULT_API_ENDPOINT
-  );
-}
-
-export function getInferEndpoint(): string {
-  return getCurrentEndpoint(
-    import.meta.env.VITE_INFER_ENDPOINT,
-    STORAGE_KEY_INFER_ENDPOINT,
-    DEFAULT_INFER_ENDPOINT
-  );
-}
-
-export function setApiEndpoint(url: string): { success: boolean; error?: string } {
-  if (!isValidUrl(url)) {
-    return { success: false, error: 'Invalid URL format. Must start with http:// or https://' };
-  }
-  if (typeof window !== 'undefined') {
-    localStorage.setItem(STORAGE_KEY_API_ENDPOINT, url.trim());
-    console.log('[API Config] API endpoint updated to:', url.trim());
-    return { success: true };
-  }
-  return { success: false, error: 'localStorage not available' };
-}
-
-export function setInferEndpoint(url: string): { success: boolean; error?: string } {
-  if (!isValidUrl(url)) {
-    return { success: false, error: 'Invalid URL format. Must start with http:// or https://' };
-  }
-  if (typeof window !== 'undefined') {
-    localStorage.setItem(STORAGE_KEY_INFER_ENDPOINT, url.trim());
-    console.log('[API Config] Infer endpoint updated to:', url.trim());
-    return { success: true };
-  }
-  return { success: false, error: 'localStorage not available' };
-}
-
-export function resetEndpoints(): void {
-  if (typeof window !== 'undefined') {
-    localStorage.removeItem(STORAGE_KEY_API_ENDPOINT);
-    localStorage.removeItem(STORAGE_KEY_INFER_ENDPOINT);
-    console.log('[API Config] Endpoints reset to defaults');
-  }
-}
-
-export function getEndpointConfig() {
-  return {
-    apiEndpoint: getApiEndpoint(),
-    inferEndpoint: getInferEndpoint(),
-    apiEndpointOverride: typeof window !== 'undefined' ? localStorage.getItem(STORAGE_KEY_API_ENDPOINT) : null,
-    inferEndpointOverride: typeof window !== 'undefined' ? localStorage.getItem(STORAGE_KEY_INFER_ENDPOINT) : null,
-    envApiEndpoint: import.meta.env.VITE_API_ENDPOINT || '(not set)',
-    envInferEndpoint: import.meta.env.VITE_INFER_ENDPOINT || '(not set)',
-    defaultApiEndpoint: DEFAULT_API_ENDPOINT,
-    defaultInferEndpoint: DEFAULT_INFER_ENDPOINT,
-  };
-}
-
-// Log endpoint configuration on load
-console.log('[API Config] Endpoint Configuration:', getEndpointConfig());
+const API_ENDPOINT = import.meta.env.VITE_API_ENDPOINT || 'https://srinjoy59--sam3-agent-pyramidal-sam3-segment.modal.run';
+const COUNT_ENDPOINT = import.meta.env.VITE_COUNT_ENDPOINT || 'https://srinjoy59--sam3-agent-pyramidal-sam3-count.modal.run';
 
 export interface LLMConfig {
   base_url: string;
@@ -158,8 +20,8 @@ export interface SegmentRequest {
   confidence_threshold?: number;
 }
 
-export interface InferRequest {
-  text_prompt: string;
+export interface CountRequest {
+  prompt: string;
   image_b64?: string;
   image_url?: string;
   confidence_threshold?: number;
@@ -198,16 +60,23 @@ export interface SegmentResponse {
   traceback?: string;
 }
 
-export interface InferResponse {
+export interface CountResponse {
   status: 'success' | 'error';
+  count?: number;
+  object_type?: string;
+  confidence_summary?: {
+    high: number;
+    medium: number;
+    low: number;
+  };
+  detections?: Array<{
+    box: number[];
+    mask_rle: { counts: string | number[]; size: number[] };
+    score: number;
+    scale: number;
+  }>;
   orig_img_h?: number;
   orig_img_w?: number;
-  pred_boxes?: number[][];
-  pred_masks?: Array<{
-    counts: string | number[];
-    size: number[];
-  }>;
-  pred_scores?: number[];
   message?: string;
   traceback?: string;
 }
@@ -335,21 +204,12 @@ export async function segmentImage(
   }
 }
 
-export async function inferImage(
-  request: InferRequest,
+export async function countImage(
+  request: CountRequest,
   signal?: AbortSignal
-): Promise<InferResponse> {
-  const endpoint = getInferEndpoint();
-  const startTime = Date.now();
-  console.log('[API] Starting inferImage request', {
-    endpoint: endpoint,
-    prompt: request.text_prompt?.substring(0, 50) + '...',
-    hasImage: !!request.image_b64,
-    imageSize: request.image_b64 ? `${Math.round(request.image_b64.length / 1024)}KB` : 'N/A',
-  });
-
+): Promise<CountResponse> {
   try {
-    const response = await axios.post<InferResponse>(endpoint, request, {
+    const response = await axios.post<CountResponse>(COUNT_ENDPOINT, request, {
       headers: {
         'Content-Type': 'application/json',
       },

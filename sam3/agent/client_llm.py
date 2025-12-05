@@ -66,6 +66,9 @@ def send_generate_request(
                     image_path = c["image"]
 
                     print("image_path", image_path)
+                    if not image_path:
+                        print("Warning: Empty image path in message content, skipping.")
+                        continue
                     new_image_path = image_path.replace(
                         "?", "%3F"
                     )  # Escape ? in the path
@@ -197,6 +200,9 @@ def send_direct_request(
                     if isinstance(c, dict) and c.get("type") == "image":
                         # Convert image path to base64 format
                         image_path = c["image"]
+                        if not image_path:
+                            print("Warning: Empty image path in message content, skipping.")
+                            continue
                         new_image_path = image_path.replace("?", "%3F")
 
                         try:

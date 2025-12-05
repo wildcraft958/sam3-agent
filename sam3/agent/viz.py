@@ -38,7 +38,12 @@ def visualize(
     # Common fields
     orig_h = int(input_json["orig_img_h"])
     orig_w = int(input_json["orig_img_w"])
-    img_path = input_json["original_image_path"]
+    img_path = input_json.get("original_image_path")
+    if img_path is None:
+        raise KeyError(
+            "original_image_path is required in input_json but was not found. "
+            "Please ensure the JSON output includes 'original_image_path' when saving SAM3 results."
+        )
 
     # ---------- Mode A: Full-scene render ----------
     if zoom_in_index is None:
@@ -60,7 +65,23 @@ def visualize(
                 rle = {"size": tuple(mask_entry["size"]), "counts": mask_entry["counts"]}
             else:
                 # Old format: string counts, reconstruct size from orig_img_h/w
-                rle = {"size": (orig_h, orig_w), "counts": mask_entry}
+                rle_masks.append({"size": (orig_h, orig_w), "counts": rle})
+        binary_masks = [mask_utils.decode(rle) for rle in rle_masks]
+        
+        # Resize masks to match original image dimensions if needed (pyramidal processing fix)
+        resized_binary_masks = []
+        for mask in binary_masks:
+            if mask.shape[0] != orig_h or mask.shape[1] != orig_w:
+                # Resize mask to match original image dimensions
+                resized_mask = cv2.resize(
+                    mask.astype(np.float32),
+                    (orig_w, orig_h),  # cv2.resize uses (width, height)
+                    interpolation=cv2.INTER_NEAREST
+                )
+                resized_binary_masks.append((resized_mask > 0.5).astype(np.uint8))
+            else:
+                resized_binary_masks.append(mask)
+        binary_masks = resized_binary_masks
 
             mask = mask_utils.decode(rle)
             if mask.ndim == 3:
@@ -145,6 +166,16 @@ def visualize(
         else:
             # Old format: string counts, reconstruct size
             rle_i = {"size": (orig_h, orig_w), "counts": mask_data}
+        bin_i = mask_utils.decode(rle_i)
+        
+        # Resize mask if needed (pyramidal processing fix)
+        if bin_i.shape[0] != orig_h or bin_i.shape[1] != orig_w:
+            bin_i = cv2.resize(
+                bin_i.astype(np.float32),
+                (orig_w, orig_h),
+                interpolation=cv2.INTER_NEAREST
+            )
+            bin_i = (bin_i > 0.5).astype(np.uint8)
 
         img_bgr_i = cv2.imread(img_path)
         if img_bgr_i is None:
