@@ -621,6 +621,220 @@ class ErrorResponse(BaseModel):
 
 
 # ------------------------------------------------------------------------------
+# SAM3 API Request/Response Models (for Swagger docs)
+# ------------------------------------------------------------------------------
+
+class LLMConfig(BaseModel):
+    """LLM configuration for VLM-based processing"""
+    model_config = ConfigDict(json_schema_extra={
+        "example": {
+            "base_url": "https://rockstar4119--qwen3-vl-vllm-server-30b-vllm-server.modal.run/v1",
+            "model": "Qwen/Qwen3-VL-30B-A3B-Instruct",
+            "api_key": ""
+        }
+    })
+    
+    base_url: str = Field(..., description="Base URL of the LLM API (OpenAI-compatible)")
+    model: str = Field(..., description="Model identifier")
+    api_key: str = Field("", description="API key (can be empty for some backends)")
+    name: Optional[str] = Field(None, description="Name for output files")
+    max_tokens: Optional[int] = Field(4096, description="Maximum tokens for generation")
+
+
+class PyramidalConfig(BaseModel):
+    """Configuration for pyramidal batch processing"""
+    model_config = ConfigDict(json_schema_extra={
+        "example": {
+            "tile_size": 512,
+            "overlap_ratio": 0.15,
+            "scales": [1.0, 0.5],
+            "batch_size": 16,
+            "iou_threshold": 0.5
+        }
+    })
+    
+    tile_size: Optional[int] = Field(512, description="Tile size for pyramidal processing")
+    overlap_ratio: Optional[float] = Field(0.15, description="Overlap ratio between tiles")
+    scales: Optional[List[float]] = Field([1.0, 0.5], description="Scale factors for multi-scale detection")
+    batch_size: Optional[int] = Field(16, description="Batch size for inference")
+    iou_threshold: Optional[float] = Field(0.5, description="IoU threshold for NMS")
+
+
+class SAM3CountRequest(BaseModel):
+    """Request model for SAM3 object counting"""
+    model_config = ConfigDict(json_schema_extra={
+        "example": {
+            "prompt": "trees",
+            "image_url": "https://example.com/aerial-image.jpg",
+            "llm_config": {
+                "base_url": "https://rockstar4119--qwen3-vl-vllm-server-30b-vllm-server.modal.run/v1",
+                "model": "Qwen/Qwen3-VL-30B-A3B-Instruct",
+                "api_key": ""
+            },
+            "confidence_threshold": 0.5,
+            "max_retries": 2
+        }
+    })
+    
+    prompt: str = Field(..., description="What objects to count (e.g., 'trees', 'cars', 'buildings')")
+    image_b64: Optional[str] = Field(None, description="Base64-encoded image data")
+    image_url: Optional[str] = Field(None, description="URL to download image from")
+    llm_config: LLMConfig = Field(..., description="VLM configuration for prompt refinement")
+    confidence_threshold: Optional[float] = Field(0.5, ge=0.0, le=1.0, description="Minimum confidence threshold")
+    max_retries: Optional[int] = Field(2, ge=0, le=5, description="Maximum retry attempts for verification")
+    pyramidal_config: Optional[PyramidalConfig] = Field(None, description="Pyramidal processing configuration")
+
+
+class DetectionInfo(BaseModel):
+    """Individual detection information"""
+    id: int = Field(..., description="Detection ID")
+    score: float = Field(..., description="Confidence score")
+    box: List[float] = Field(..., description="Bounding box [x1, y1, x2, y2]")
+    pixel_area: Optional[int] = Field(None, description="Area in pixels")
+
+
+class SAM3CountResponse(BaseModel):
+    """Response model for SAM3 object counting"""
+    model_config = ConfigDict(json_schema_extra={
+        "example": {
+            "status": "success",
+            "count": 47,
+            "visual_prompt": "tree",
+            "object_type": "tree",
+            "detections": [
+                {"id": 1, "score": 0.95, "box": [100, 200, 150, 250]}
+            ]
+        }
+    })
+    
+    status: str = Field(..., description="Response status: 'success' or 'error'")
+    count: Optional[int] = Field(None, description="Total count of detected objects")
+    visual_prompt: Optional[str] = Field(None, description="Refined visual prompt used for detection")
+    object_type: Optional[str] = Field(None, description="Detected object type")
+    verification_info: Optional[Dict[str, Any]] = Field(None, description="Verification details")
+    detections: Optional[List[Dict[str, Any]]] = Field(None, description="List of detections")
+    pyramidal_stats: Optional[Dict[str, Any]] = Field(None, description="Pyramidal processing statistics")
+    message: Optional[str] = Field(None, description="Error message if status is 'error'")
+    traceback: Optional[str] = Field(None, description="Error traceback if status is 'error'")
+
+
+class SAM3AreaRequest(BaseModel):
+    """Request model for SAM3 area calculation"""
+    model_config = ConfigDict(json_schema_extra={
+        "example": {
+            "prompt": "solar panels",
+            "image_url": "https://example.com/satellite-image.jpg",
+            "llm_config": {
+                "base_url": "https://rockstar4119--qwen3-vl-vllm-server-30b-vllm-server.modal.run/v1",
+                "model": "Qwen/Qwen3-VL-30B-A3B-Instruct",
+                "api_key": ""
+            },
+            "gsd": 0.5,
+            "confidence_threshold": 0.5
+        }
+    })
+    
+    prompt: str = Field(..., description="What objects to measure (e.g., 'solar panels', 'buildings')")
+    image_b64: Optional[str] = Field(None, description="Base64-encoded image data")
+    image_url: Optional[str] = Field(None, description="URL to download image from")
+    llm_config: LLMConfig = Field(..., description="VLM configuration for prompt refinement")
+    gsd: Optional[float] = Field(None, gt=0, description="Ground Sample Distance in meters/pixel")
+    confidence_threshold: Optional[float] = Field(0.5, ge=0.0, le=1.0, description="Minimum confidence threshold")
+    max_retries: Optional[int] = Field(2, ge=0, le=5, description="Maximum retry attempts for verification")
+    pyramidal_config: Optional[PyramidalConfig] = Field(None, description="Pyramidal processing configuration")
+
+
+class IndividualArea(BaseModel):
+    """Individual object area information"""
+    id: int = Field(..., description="Object ID")
+    pixel_area: int = Field(..., description="Area in pixels")
+    real_area_m2: Optional[float] = Field(None, description="Real area in square meters (if GSD provided)")
+    score: float = Field(..., description="Confidence score")
+    box: List[float] = Field(..., description="Bounding box [x1, y1, x2, y2]")
+
+
+class SAM3AreaResponse(BaseModel):
+    """Response model for SAM3 area calculation"""
+    model_config = ConfigDict(json_schema_extra={
+        "example": {
+            "status": "success",
+            "object_count": 12,
+            "total_pixel_area": 125000,
+            "total_real_area_m2": 31250.0,
+            "coverage_percentage": 12.5
+        }
+    })
+    
+    status: str = Field(..., description="Response status: 'success' or 'error'")
+    object_count: Optional[int] = Field(None, description="Number of detected objects")
+    total_pixel_area: Optional[int] = Field(None, description="Total area in pixels")
+    total_real_area_m2: Optional[float] = Field(None, description="Total area in square meters")
+    coverage_percentage: Optional[float] = Field(None, description="Percentage of image covered")
+    individual_areas: Optional[List[Dict[str, Any]]] = Field(None, description="Individual object areas")
+    visual_prompt: Optional[str] = Field(None, description="Refined visual prompt used")
+    verification_info: Optional[Dict[str, Any]] = Field(None, description="Verification details")
+    pyramidal_stats: Optional[Dict[str, Any]] = Field(None, description="Pyramidal processing statistics")
+    message: Optional[str] = Field(None, description="Error message if status is 'error'")
+    traceback: Optional[str] = Field(None, description="Error traceback if status is 'error'")
+
+
+class SAM3SegmentRequest(BaseModel):
+    """Request model for SAM3 segmentation"""
+    model_config = ConfigDict(json_schema_extra={
+        "example": {
+            "prompt": "segment all ships in the harbor",
+            "image_url": "https://example.com/harbor-image.jpg",
+            "llm_config": {
+                "base_url": "https://rockstar4119--qwen3-vl-vllm-server-30b-vllm-server.modal.run/v1",
+                "model": "Qwen/Qwen3-VL-30B-A3B-Instruct",
+                "api_key": ""
+            },
+            "debug": True
+        }
+    })
+    
+    prompt: str = Field(..., description="Segmentation prompt (e.g., 'segment all ships')")
+    image_b64: Optional[str] = Field(None, description="Base64-encoded image data")
+    image_url: Optional[str] = Field(None, description="URL to download image from")
+    llm_config: LLMConfig = Field(..., description="LLM/VLM configuration")
+    debug: Optional[bool] = Field(False, description="Return debug visualization")
+    confidence_threshold: Optional[float] = Field(0.5, ge=0.0, le=1.0, description="Minimum confidence threshold")
+    pyramidal_config: Optional[PyramidalConfig] = Field(None, description="Pyramidal processing configuration")
+
+
+class RegionInfo(BaseModel):
+    """Segmented region information"""
+    id: int = Field(..., description="Region ID")
+    label: str = Field(..., description="Region label")
+    score: float = Field(..., description="Confidence score")
+    box: List[float] = Field(..., description="Bounding box [x1, y1, x2, y2]")
+    mask_rle: Optional[Dict[str, Any]] = Field(None, description="RLE-encoded mask")
+
+
+class SAM3SegmentResponse(BaseModel):
+    """Response model for SAM3 segmentation"""
+    model_config = ConfigDict(json_schema_extra={
+        "example": {
+            "status": "success",
+            "summary": "Detected 5 ships in the harbor",
+            "regions": [
+                {"id": 1, "label": "ship", "score": 0.95, "box": [100, 200, 300, 400]}
+            ]
+        }
+    })
+    
+    status: str = Field(..., description="Response status: 'success' or 'error'")
+    summary: Optional[str] = Field(None, description="Summary of segmentation results")
+    regions: Optional[List[Dict[str, Any]]] = Field(None, description="Segmented regions")
+    debug_image_b64: Optional[str] = Field(None, description="Debug visualization (if debug=true)")
+    raw_sam3_json: Optional[Dict[str, Any]] = Field(None, description="Raw SAM3 output")
+    llm_config: Optional[Dict[str, Any]] = Field(None, description="LLM config used")
+    pyramidal_stats: Optional[Dict[str, Any]] = Field(None, description="Pyramidal processing statistics")
+    message: Optional[str] = Field(None, description="Error message if status is 'error'")
+    traceback: Optional[str] = Field(None, description="Error traceback if status is 'error'")
+
+
+# ------------------------------------------------------------------------------
 # LLM configuration helpers
 # ------------------------------------------------------------------------------
 
@@ -2402,358 +2616,306 @@ Now analyze the image and query."""
 
 
 # ------------------------------------------------------------------------------
-# HTTP endpoints
+# FastAPI ASGI App with Swagger Documentation
 # ------------------------------------------------------------------------------
-
-from modal import fastapi_endpoint  # lightweight JSON endpoint decorator
-
-
-# ------------------------------------------------------------------------------
-# HTTP endpoint: /sam3/count (Pyramidal SAM3 Counting)
-# ------------------------------------------------------------------------------
-
 
 @app.function(timeout=900, image=image)
-@fastapi_endpoint(method="POST")
-def sam3_count(body: Dict[str, Any]) -> Dict[str, Any]:
+@modal.asgi_app()
+def fastapi_app():
     """
-    HTTP endpoint for counting objects using VLM-enhanced Pyramidal SAM3 segmentation.
+    FastAPI ASGI application with full Swagger documentation.
     
-    POST /sam3/count
-    JSON body:
-    {
-      "prompt": "trees",                   # Required: what objects to count
-      "image_b64": "...",                  # OR "image_url": "https://..."
-      "llm_config": {                      # Required: VLM configuration
-        "base_url": "https://...",
-        "model": "Qwen/Qwen3-VL-30B-A3B-Instruct",
-        "api_key": ""
-      },
-      "confidence_threshold": 0.5,         # Optional: min confidence (default: 0.5)
-      "max_retries": 2,                    # Optional: max retry attempts (default: 2)
-      "pyramidal_config": {                # Optional: pyramidal configuration
-        "tile_size": 512,
-        "overlap_ratio": 0.15,
-        "scales": [1.0, 0.5],
-        "batch_size": 16,
-        "iou_threshold": 0.5
-      }
-    }
+    Provides endpoints for:
+    - POST /sam3/count - Count objects in images
+    - POST /sam3/area - Calculate object areas
+    - POST /sam3/segment - Full segmentation with LLM
     
-    Returns:
-    {
-      "status": "success",
-      "count": 47,
-      "visual_prompt": "tree",
-      "object_type": "tree",
-      "verification_info": {
-        "attempts": [...],
-        "verified_count": 47,
-        "rejected_count": 3
-      },
-      "detections": [...],
-      "pyramidal_stats": {...}
-    }
+    Access documentation at:
+    - /docs - Swagger UI
+    - /redoc - ReDoc
+    - /openapi.json - OpenAPI schema
     """
-    # Basic validation
-    if "prompt" not in body:
-        return {"status": "error", "message": "Missing 'prompt' in request body."}
+    import io
+    import fastapi
+    from fastapi import HTTPException
+    from fastapi.middleware.cors import CORSMiddleware
+    from fastapi.responses import JSONResponse
+    import traceback as tb
     
-    if "llm_config" not in body:
-        return {
-            "status": "error",
-            "message": "Missing 'llm_config' in request body. Provide complete LLM configuration with 'base_url', 'model', and 'api_key'."
-        }
-    
-    text_prompt = body["prompt"]
-    llm_config = body["llm_config"]
-    confidence_threshold = body.get("confidence_threshold", 0.5)
-    max_retries = body.get("max_retries", 2)
-    pyramidal_config = body.get("pyramidal_config")
-    
-    # Get image bytes from either image_b64 or image_url
-    if "image_b64" in body:
-        try:
-            image_bytes = base64.b64decode(body["image_b64"])
-            print(f"✓ Decoded image from base64 ({len(image_bytes)} bytes)")
-        except Exception as e:
-            return {"status": "error", "message": f"Invalid base64 in 'image_b64': {e}."}
-    elif "image_url" in body:
-        import requests
-        try:
-            print(f"📥 Downloading image from URL: {body['image_url']}")
-            resp = requests.get(body["image_url"], timeout=30)
-            resp.raise_for_status()
-            image_bytes = resp.content
-            print(f"✓ Downloaded image ({len(image_bytes)} bytes)")
-        except Exception as e:
-            return {
-                "status": "error",
-                "message": f"Failed to download 'image_url': {e}",
-            }
-    else:
-        return {
-            "status": "error",
-            "message": "Provide either 'image_b64' or 'image_url' in the request body.",
-        }
-    
-    # Call the GPU-backed counting method
-    try:
-        print(f"📞 Calling sam3_count with prompt: '{text_prompt}'")
-        result = SAM3Model().sam3_count.remote(
-            image_bytes=image_bytes,
-            text_prompt=text_prompt,
-            llm_config=llm_config,
-            confidence_threshold=confidence_threshold,
-            pyramidal_config=pyramidal_config,
-            max_retries=max_retries,
-        )
-        print(f"✓ sam3_count returned count: {result.get('count', 0)}")
-        return result
-        
-    except Exception as e:
-        import traceback
-        error_msg = str(e)
-        traceback_str = traceback.format_exc()
-        print(f"❌ Error in sam3_count: {error_msg}")
-        print(traceback_str)
-        return {
-            "status": "error",
-            "message": error_msg,
-            "traceback": traceback_str,
-        }
+    # Create FastAPI app with documentation
+    api = fastapi.FastAPI(
+        title="SAM3 Agent API",
+        description="""
+## SAM3 Agent API - Pyramidal Image Segmentation
 
+This API provides VLM-enhanced image segmentation, counting, and area calculation
+using SAM3 (Segment Anything Model 3) with pyramidal batch processing.
 
-# ------------------------------------------------------------------------------
-# HTTP endpoint: /sam3/area (Pyramidal SAM3 Area Calculation)
-# ------------------------------------------------------------------------------
+### Features
+- **Object Counting**: Count specific objects in images with VLM verification
+- **Area Calculation**: Measure object areas with optional GSD for real-world units
+- **Full Segmentation**: Complete image segmentation with prompt refinement
 
+### Authentication
+All endpoints require an `llm_config` object with your VLM provider credentials.
+Supports any OpenAI-compatible API (OpenAI, vLLM, Anthropic, etc.)
 
-@app.function(timeout=900, image=image)
-@fastapi_endpoint(method="POST")
-def sam3_area(body: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    HTTP endpoint for calculating object areas using VLM-enhanced Pyramidal SAM3 segmentation.
-    
-    POST /sam3/area
-    JSON body:
-    {
-      "prompt": "solar panels",            # Required: what objects to measure
-      "image_b64": "...",                  # OR "image_url": "https://..."
-      "llm_config": {                      # Required: VLM configuration
-        "base_url": "https://...",
-        "model": "Qwen/Qwen3-VL-30B-A3B-Instruct",
-        "api_key": ""
-      },
-      "gsd": 0.5,                          # Required: Ground Sample Distance (m/pixel)
-      "confidence_threshold": 0.5,         # Optional: min confidence (default: 0.5)
-      "max_retries": 2,                    # Optional: max retry attempts (default: 2)
-      "pyramidal_config": {                # Optional: pyramidal configuration
-        "tile_size": 512,
-        "overlap_ratio": 0.15,
-        "scales": [1.0, 0.5],
-        "batch_size": 16,
-        "iou_threshold": 0.5
-      }
-    }
-    
-    Returns:
-    {
-      "status": "success",
-      "object_count": 12,
-      "total_pixel_area": 125000,
-      "total_real_area_m2": 31250.0,
-      "coverage_percentage": 12.5,
-      "individual_areas": [
-        {"id": 1, "pixel_area": 5000, "real_area_m2": 1250.0, "score": 0.9, "box": [...]},
-        ...
-      ],
-      "visual_prompt": "circular white tank, storage container",
-      "verification_info": {...},
-      "pyramidal_stats": {...}
-    }
-    """
-    # Basic validation
-    if "prompt" not in body:
-        return {"status": "error", "message": "Missing 'prompt' in request body."}
-    
-    if "llm_config" not in body:
-        return {
-            "status": "error",
-            "message": "Missing 'llm_config' in request body. Provide complete LLM configuration with 'base_url', 'model', and 'api_key'."
-        }
-    
-    text_prompt = body["prompt"]
-    llm_config = body["llm_config"]
-    gsd = body.get("gsd")
-    confidence_threshold = body.get("confidence_threshold", 0.5)
-    max_retries = body.get("max_retries", 2)
-    pyramidal_config = body.get("pyramidal_config")
-    
-    # Get image bytes from either image_b64 or image_url
-    if "image_b64" in body:
-        try:
-            image_bytes = base64.b64decode(body["image_b64"])
-            print(f"✓ Decoded image from base64 ({len(image_bytes)} bytes)")
-        except Exception as e:
-            return {"status": "error", "message": f"Invalid base64 in 'image_b64': {e}."}
-    elif "image_url" in body:
-        import requests
-        try:
-            print(f"📥 Downloading image from URL: {body['image_url']}")
-            resp = requests.get(body["image_url"], timeout=30)
-            resp.raise_for_status()
-            image_bytes = resp.content
-            print(f"✓ Downloaded image ({len(image_bytes)} bytes)")
-        except Exception as e:
-            return {
-                "status": "error",
-                "message": f"Failed to download 'image_url': {e}",
-            }
-    else:
-        return {
-            "status": "error",
-            "message": "Provide either 'image_b64' or 'image_url' in the request body.",
-        }
-    
-    # Call the GPU-backed area calculation method
-    try:
-        print(f"📞 Calling sam3_area with prompt: '{text_prompt}'")
-        result = SAM3Model().sam3_area.remote(
-            image_bytes=image_bytes,
-            text_prompt=text_prompt,
-            llm_config=llm_config,
-            gsd=gsd,
-            confidence_threshold=confidence_threshold,
-            pyramidal_config=pyramidal_config,
-            max_retries=max_retries,
-        )
-        print(f"✓ sam3_area returned {result.get('object_count', 0)} objects, total area: {result.get('total_real_area_m2', 0)} m²")
-        return result
-        
-    except Exception as e:
-        import traceback
-        error_msg = str(e)
-        traceback_str = traceback.format_exc()
-        print(f"❌ Error in sam3_area: {error_msg}")
-        print(traceback_str)
-        return {
-            "status": "error",
-            "message": error_msg,
-            "traceback": traceback_str,
-        }
-
-
-# ------------------------------------------------------------------------------
-# HTTP endpoint: /sam3/segment (Full agent with LLM + Pyramidal SAM3)
-# ------------------------------------------------------------------------------
-
-
-@app.function(timeout=900, image=image)
-@fastapi_endpoint(method="POST")
-def sam3_segment(body: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    HTTP endpoint for SAM3 Agent with Pyramidal Batch Processing - LLM Provider Agnostic
-    
-    Uses VLM for prompt refinement + Pyramidal Batch SAM3 for segmentation.
-    This endpoint accepts any LLM configuration via the request body.
-    No hardcoded providers - works with any OpenAI-compatible API.
-
-    POST /sam3/segment
-    JSON body:
-    {
-      "prompt": "...",                    # Required: text prompt for segmentation
-      "image_url": "https://...",         # OR "image_b64": "..." (one required)
-      "llm_config": {                     # Required: complete LLM configuration (provider-agnostic)
-        "base_url": "https://api.openai.com/v1",  # Any OpenAI-compatible endpoint
-        "model": "gpt-4o",                 # Any model name
-        "api_key": "sk-...",              # API key (can be empty for some backends)
-        "name": "openai-gpt4o",           # Optional: for output files
-        "max_tokens": 4096                 # Optional: default 4096
-      },
-      "debug": true                       # Optional: get visualization
-    }
-    
-    Example with OpenAI:
-    {
-      "prompt": "segment all objects",
-      "image_b64": "...",
-      "llm_config": {
-        "base_url": "https://api.openai.com/v1",
-        "model": "gpt-4o",
-        "api_key": "sk-your-key-here"
-      }
-    }
-    
-    Example with vLLM:
-    {
-      "prompt": "segment all objects",
-      "image_b64": "...",
-      "llm_config": {
-        "base_url": "http://localhost:8001/v1",
-        "model": "Qwen/Qwen3-VL-8B-Thinking",
-        "api_key": "",
-        "name": "vllm-local"
-      }
-    }
-    
-    Example with Anthropic (if OpenAI-compatible):
-    {
-      "prompt": "segment all objects",
-      "image_b64": "...",
-      "llm_config": {
-        "base_url": "https://api.anthropic.com/v1",
-        "model": "claude-3-opus",
-        "api_key": "sk-ant-..."
-      }
-    }
-    """
-    # Basic validation
-    if "prompt" not in body:
-        return {"status": "error", "message": "Missing 'prompt' in request body."}
-
-    if "llm_config" not in body:
-        return {"status": "error", "message": "Missing 'llm_config' in request body. Provide complete LLM configuration with 'base_url', 'model', and 'api_key'."}
-
-    prompt = body["prompt"]
-    debug = bool(body.get("debug", False))
-    llm_config = body["llm_config"]
-    confidence_threshold = body.get("confidence_threshold")
-
-    # Get image bytes from either image_b64 or image_url
-    if "image_b64" in body:
-        try:
-            image_bytes = base64.b64decode(body["image_b64"])
-        except Exception:
-            return {"status": "error", "message": "Invalid base64 in 'image_b64'."}
-    elif "image_url" in body:
-        import requests
-
-        try:
-            resp = requests.get(body["image_url"], timeout=30)
-            resp.raise_for_status()
-            image_bytes = resp.content
-        except Exception as e:
-            return {
-                "status": "error",
-                "message": f"Failed to download 'image_url': {e}",
-            }
-    else:
-        return {
-            "status": "error",
-            "message": "Provide either 'image_b64' or 'image_url' in the request body.",
-        }
-
-    # Call the GPU-backed model
-    # Use class reference directly to ensure persistent container reuse
-    result = SAM3Model().infer.remote(
-        image_bytes=image_bytes,
-        prompt=prompt,
-        llm_config=llm_config,
-        debug=debug,
-        confidence_threshold=confidence_threshold,
+### Example VLM Config
+```json
+{
+  "base_url": "https://your-vllm-server.modal.run/v1",
+  "model": "Qwen/Qwen3-VL-30B-A3B-Instruct",
+  "api_key": ""
+}
+```
+        """,
+        version="2.0.0",
+        docs_url="/docs",
+        redoc_url="/redoc",
+        openapi_url="/openapi.json",
+        openapi_tags=[
+            {"name": "Counting", "description": "Object counting endpoints"},
+            {"name": "Area", "description": "Area calculation endpoints"},
+            {"name": "Segmentation", "description": "Full segmentation endpoints"},
+            {"name": "Health", "description": "Health check endpoints"},
+        ]
     )
-    return result
+    
+    # Add CORS middleware
+    api.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    
+    # Helper function to get image bytes
+    def get_image_bytes(image_b64: Optional[str], image_url: Optional[str]) -> bytes:
+        """Get image bytes from base64 or URL with validation"""
+        import requests
+        from PIL import Image as PILImage
+        
+        image_bytes = None
+        
+        if image_b64:
+            try:
+                # Handle data URI format (data:image/jpeg;base64,...)
+                if image_b64.startswith('data:'):
+                    # Extract base64 part after the comma
+                    if ',' in image_b64:
+                        image_b64 = image_b64.split(',', 1)[1]
+                
+                image_bytes = base64.b64decode(image_b64)
+                print(f"✓ Decoded base64 image: {len(image_bytes)} bytes")
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=f"Invalid base64 in 'image_b64': {e}")
+        elif image_url:
+            try:
+                print(f"📥 Downloading image from: {image_url}")
+                resp = requests.get(image_url, timeout=30)
+                resp.raise_for_status()
+                image_bytes = resp.content
+                print(f"✓ Downloaded image: {len(image_bytes)} bytes")
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=f"Failed to download image from URL: {e}")
+        else:
+            raise HTTPException(status_code=400, detail="Provide either 'image_b64' or 'image_url'")
+        
+        # Validate image can be opened
+        if image_bytes:
+            try:
+                img = PILImage.open(io.BytesIO(image_bytes))
+                img.verify()  # Verify it's a valid image
+                print(f"✓ Valid image: {img.format} format")
+            except Exception as e:
+                # Log first 100 bytes for debugging
+                preview = image_bytes[:100] if len(image_bytes) > 100 else image_bytes
+                print(f"❌ Invalid image data. First 100 bytes: {preview}")
+                raise HTTPException(
+                    status_code=400, 
+                    detail=f"Invalid image data: {e}. Make sure you're providing a valid image file."
+                )
+        
+        return image_bytes
+    
+    # Health check endpoint
+    @api.get(
+        "/health",
+        tags=["Health"],
+        summary="Health check",
+        description="Check if the API is running"
+    )
+    async def health():
+        return {"status": "ok", "service": "sam3-agent"}
+    
+    # Count endpoint
+    @api.post(
+        "/sam3/count",
+        response_model=SAM3CountResponse,
+        tags=["Counting"],
+        summary="Count objects in an image",
+        description="""
+Count specific objects in an image using VLM-enhanced pyramidal SAM3 segmentation.
+
+The VLM refines your prompt into optimal visual keywords, then SAM3 detects and counts
+all matching objects with verification to reduce false positives.
+
+**Example prompts:**
+- "trees" - counts all trees
+- "cars in the parking lot" - counts parked cars
+- "people wearing red shirts" - counts specific people
+        """,
+        responses={
+            200: {"description": "Successful count", "model": SAM3CountResponse},
+            400: {"description": "Invalid request"},
+            500: {"description": "Server error"}
+        }
+    )
+    async def count_objects(request: SAM3CountRequest):
+        try:
+            # Get image bytes
+            image_bytes = get_image_bytes(request.image_b64, request.image_url)
+            
+            # Convert Pydantic models to dicts
+            llm_config_dict = request.llm_config.model_dump()
+            pyramidal_config_dict = request.pyramidal_config.model_dump() if request.pyramidal_config else None
+            
+            print(f"📞 Calling sam3_count with prompt: '{request.prompt}'")
+            result = SAM3Model().sam3_count.remote(
+                image_bytes=image_bytes,
+                text_prompt=request.prompt,
+                llm_config=llm_config_dict,
+                confidence_threshold=request.confidence_threshold,
+                pyramidal_config=pyramidal_config_dict,
+                max_retries=request.max_retries,
+            )
+            print(f"✓ sam3_count returned count: {result.get('count', 0)}")
+            return JSONResponse(content=result)
+            
+        except HTTPException:
+            raise
+        except Exception as e:
+            error_msg = str(e)
+            traceback_str = tb.format_exc()
+            print(f"❌ Error in sam3_count: {error_msg}")
+            return JSONResponse(
+                status_code=500,
+                content={"status": "error", "message": error_msg, "traceback": traceback_str}
+            )
+    
+    # Area endpoint
+    @api.post(
+        "/sam3/area",
+        response_model=SAM3AreaResponse,
+        tags=["Area"],
+        summary="Calculate object areas in an image",
+        description="""
+Calculate the total and individual areas of objects in an image using VLM-enhanced
+pyramidal SAM3 segmentation.
+
+Optionally provide a Ground Sample Distance (GSD) in meters/pixel to get real-world
+area measurements in square meters.
+
+**Example prompts:**
+- "solar panels" - measures solar panel coverage
+- "buildings" - measures building footprints
+- "agricultural fields" - measures crop areas
+        """,
+        responses={
+            200: {"description": "Successful area calculation", "model": SAM3AreaResponse},
+            400: {"description": "Invalid request"},
+            500: {"description": "Server error"}
+        }
+    )
+    async def calculate_area(request: SAM3AreaRequest):
+        try:
+            # Get image bytes
+            image_bytes = get_image_bytes(request.image_b64, request.image_url)
+            
+            # Convert Pydantic models to dicts
+            llm_config_dict = request.llm_config.model_dump()
+            pyramidal_config_dict = request.pyramidal_config.model_dump() if request.pyramidal_config else None
+            
+            print(f"📞 Calling sam3_area with prompt: '{request.prompt}'")
+            result = SAM3Model().sam3_area.remote(
+                image_bytes=image_bytes,
+                text_prompt=request.prompt,
+                llm_config=llm_config_dict,
+                gsd=request.gsd,
+                confidence_threshold=request.confidence_threshold,
+                pyramidal_config=pyramidal_config_dict,
+                max_retries=request.max_retries,
+            )
+            print(f"✓ sam3_area returned {result.get('object_count', 0)} objects")
+            return JSONResponse(content=result)
+            
+        except HTTPException:
+            raise
+        except Exception as e:
+            error_msg = str(e)
+            traceback_str = tb.format_exc()
+            print(f"❌ Error in sam3_area: {error_msg}")
+            return JSONResponse(
+                status_code=500,
+                content={"status": "error", "message": error_msg, "traceback": traceback_str}
+            )
+    
+    # Segment endpoint
+    @api.post(
+        "/sam3/segment",
+        response_model=SAM3SegmentResponse,
+        tags=["Segmentation"],
+        summary="Full image segmentation with LLM",
+        description="""
+Perform full image segmentation using LLM-guided SAM3 agent with pyramidal batch processing.
+
+The LLM analyzes your prompt to understand what objects to segment, then guides SAM3
+to produce accurate segmentation masks for all matching objects.
+
+**Example prompts:**
+- "segment all ships in the harbor"
+- "find and segment all vehicles on the road"
+- "segment the buildings in this aerial image"
+
+Set `debug=true` to receive a visualization image in the response.
+        """,
+        responses={
+            200: {"description": "Successful segmentation", "model": SAM3SegmentResponse},
+            400: {"description": "Invalid request"},
+            500: {"description": "Server error"}
+        }
+    )
+    async def segment_image(request: SAM3SegmentRequest):
+        try:
+            # Get image bytes
+            image_bytes = get_image_bytes(request.image_b64, request.image_url)
+            
+            # Convert Pydantic models to dicts
+            llm_config_dict = request.llm_config.model_dump()
+            
+            print(f"📞 Calling sam3_segment with prompt: '{request.prompt}'")
+            result = SAM3Model().infer.remote(
+                image_bytes=image_bytes,
+                prompt=request.prompt,
+                llm_config=llm_config_dict,
+                debug=request.debug,
+                confidence_threshold=request.confidence_threshold,
+            )
+            return JSONResponse(content=result)
+            
+        except HTTPException:
+            raise
+        except Exception as e:
+            error_msg = str(e)
+            traceback_str = tb.format_exc()
+            print(f"❌ Error in sam3_segment: {error_msg}")
+            return JSONResponse(
+                status_code=500,
+                content={"status": "error", "message": error_msg, "traceback": traceback_str}
+            )
+    
+    return api
 
 
 # ------------------------------------------------------------------------------
