@@ -20,7 +20,7 @@ def compute_mask_positions(
     Compute mask positions (centroids) for all masks.
     
     Args:
-        pred_boxes: List of normalized boxes in xywh format
+        pred_boxes: List of normalized boxes in xyxy format [x1, y1, x2, y2]
         orig_img_h: Original image height
         orig_img_w: Original image width
     
@@ -90,7 +90,7 @@ def apply_relative_filter(
     Filter masks based on their position relative to reference masks.
     
     Args:
-        pred_boxes: List of normalized boxes in xywh format
+        pred_boxes: List of normalized boxes in xyxy format [x1, y1, x2, y2]
         pred_masks: List of RLE masks
         pred_scores: List of scores
         relationship: Spatial relationship string

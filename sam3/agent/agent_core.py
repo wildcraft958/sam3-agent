@@ -684,6 +684,33 @@ def agent_inference(
         else:
             print(f"❌ All {max_retries} attempts failed: LLM returned None")
     
+    # Check if we got a valid response on first call
+    if generated_response is None:
+        print(f"\n❌ MLLM Response: None (after {max_retries} retry attempts)")
+        error_save_path = os.path.join(
+            error_save_dir,
+            f"{img_path.rsplit('/', 1)[-1].rsplit('.', 1)[0]}_error_history.json",
+        )
+        with open(error_save_path, "w") as f:
+            json.dump(messages, f, indent=4)
+        print("Saved messages history that caused error to:", error_save_path)
+        
+        error_msg = (
+            f"Generated text is None after {max_retries} retry attempts on initial LLM call. "
+            f"This indicates the LLM/VLM server is not returning valid responses.\n"
+            f"Image path: {img_path}\n"
+            f"Initial text prompt: {initial_text_prompt}\n\n"
+            f"Possible causes:\n"
+            f"1. LLM/VLM server is down or unreachable\n"
+            f"2. Model is returning structured tool_calls instead of text (check server logs)\n"
+            f"3. Model server error or timeout\n"
+            f"4. Invalid API configuration or authentication issue\n"
+            f"5. Model ran out of context window or tokens\n\n"
+            f"Check the server logs above for detailed error messages. "
+            f"Error history saved to: {error_save_path}"
+        )
+        raise ValueError(error_msg)
+    
     print(f"\n>>> MLLM Response [start]\n{generated_response}\n<<< MLLM Response [end]\n")
     
     # Handle structured tool calls or plain text response
@@ -1471,17 +1498,41 @@ YOUR TASK NOW (follow these steps EXACTLY):
             else:
                 print(f"❌ All {max_retries} attempts failed: LLM returned None")
         
-        print(f"\n>>> MLLM Response [start]\n{generated_response}\n<<< MLLM Response [end]\n")
+        # Check if we got a valid response
+        if generated_response is None:
+            print(f"\n❌ MLLM Response: None (after {max_retries} retry attempts)")
+        else:
+            print(f"\n>>> MLLM Response [start]\n{generated_response}\n<<< MLLM Response [end]\n")
+        
+        # If response is still None after retries, break the loop and raise error
+        if generated_response is None:
+            break
 
-    print("\n\n>>> SAM 3 Agent execution ended.\n\n")
+    # If we exit the loop and generated_response is still None, raise error
+    if generated_response is None:
+        print("\n\n>>> SAM 3 Agent execution ended with error.\n\n")
 
-    error_save_path = os.path.join(
-        error_save_dir,
-        f"{img_path.rsplit('/', 1)[-1].rsplit('.', 1)[0]}_error_history.json",
-    )
-    with open(error_save_path, "w") as f:
-        json.dump(messages, f, indent=4)
-    print("Saved messages history that caused error to:", error_save_path)
-    raise ValueError(
-        rf"Generated text is None, which is unexpected. Please check the Qwen server and the input parameters for image path: {img_path} and initial text prompt: {initial_text_prompt}."
-    )
+        error_save_path = os.path.join(
+            error_save_dir,
+            f"{img_path.rsplit('/', 1)[-1].rsplit('.', 1)[0]}_error_history.json",
+        )
+        with open(error_save_path, "w") as f:
+            json.dump(messages, f, indent=4)
+        print("Saved messages history that caused error to:", error_save_path)
+        
+        # Provide more detailed error message
+        error_msg = (
+            f"Generated text is None after {max_retries} retry attempts. "
+            f"This indicates the LLM/VLM server is not returning valid responses.\n"
+            f"Image path: {img_path}\n"
+            f"Initial text prompt: {initial_text_prompt}\n\n"
+            f"Possible causes:\n"
+            f"1. LLM/VLM server is down or unreachable\n"
+            f"2. Model is returning structured tool_calls instead of text (check server logs)\n"
+            f"3. Model server error or timeout\n"
+            f"4. Invalid API configuration or authentication issue\n"
+            f"5. Model ran out of context window or tokens\n\n"
+            f"Check the server logs above for detailed error messages. "
+            f"Error history saved to: {error_save_path}"
+        )
+        raise ValueError(error_msg)

@@ -23,7 +23,7 @@ def compute_mask_centroids(
     Compute centroids from normalized bounding boxes.
     
     Args:
-        pred_boxes: List of normalized boxes in xywh format [x_center, y_center, width, height]
+        pred_boxes: List of normalized boxes in xyxy format [x1, y1, x2, y2]
         orig_img_h: Original image height in pixels
         orig_img_w: Original image width in pixels
     
@@ -33,11 +33,17 @@ def compute_mask_centroids(
     if not pred_boxes:
         return np.array([]).reshape(0, 2)
     
-    boxes = np.array(pred_boxes)  # (N, 4) in normalized xywh
-    # Convert normalized xywh to pixel coordinates
-    # xywh format: [x_center, y_center, width, height] all normalized [0, 1]
-    centroids_x = boxes[:, 0] * orig_img_w
-    centroids_y = boxes[:, 1] * orig_img_h
+    boxes = np.array(pred_boxes)  # (N, 4) in normalized xyxy format [x1, y1, x2, y2]
+    # Convert normalized xyxy to pixel coordinates and compute centroids
+    # xyxy format: [x1, y1, x2, y2] all normalized [0, 1]
+    x1_pixel = boxes[:, 0] * orig_img_w
+    y1_pixel = boxes[:, 1] * orig_img_h
+    x2_pixel = boxes[:, 2] * orig_img_w
+    y2_pixel = boxes[:, 3] * orig_img_h
+    
+    # Compute centroids: center of bounding box
+    centroids_x = (x1_pixel + x2_pixel) / 2.0
+    centroids_y = (y1_pixel + y2_pixel) / 2.0
     
     centroids = np.stack([centroids_x, centroids_y], axis=1)  # (N, 2)
     return centroids
@@ -55,7 +61,7 @@ def apply_spatial_filter(
     Filter masks based on spatial criteria.
     
     Args:
-        pred_boxes: List of normalized boxes in xywh format
+        pred_boxes: List of normalized boxes in xyxy format [x1, y1, x2, y2]
         pred_masks: List of RLE masks
         pred_scores: List of scores
         spatial_criteria: One of the spatial criteria strings

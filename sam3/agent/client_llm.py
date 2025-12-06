@@ -155,23 +155,38 @@ def send_generate_request(
             
             # Return text response - tool calls will be parsed from text by agent_core
             content = message.content
+            
+            # Handle case where content is None but tool_calls might be present
             if content is None:
+                finish_reason = response.choices[0].finish_reason if response.choices else 'N/A'
                 print(f"⚠️ Warning: Response content is None")
                 print(f"   Model: {model}")
                 print(f"   Server URL: {server_url}")
-                print(f"   Request params: model={request_params['model']}, max_tokens={request_params['max_tokens']}, n={request_params['n']}")
+                print(f"   Finish reason: {finish_reason}")
                 print(f"   Message count: {len(processed_messages)}")
-                print(f"   Full response object type: {type(response)}")
-                print(f"   Response object attributes: {dir(response) if hasattr(response, '__dict__') else 'N/A'}")
-                print(f"   Message object type: {type(message)}")
-                print(f"   Message attributes: {dir(message) if hasattr(message, '__dict__') else 'N/A'}")
-                print(f"   Finish reason: {response.choices[0].finish_reason if response.choices else 'N/A'}")
-                if hasattr(message, 'tool_calls') and message.tool_calls:
-                    print(f"   Tool calls present: {len(message.tool_calls)} tool call(s)")
+                
+                # Check for tool_calls - some models return tool_calls instead of content
+                tool_calls_present = hasattr(message, 'tool_calls') and message.tool_calls
+                if tool_calls_present:
+                    print(f"   ⚠️ Tool calls present ({len(message.tool_calls)}): Model returned structured tool_calls instead of text")
                     print(f"   Tool calls: {message.tool_calls}")
-                    print(f"   Note: Content may be None when tool_calls are present")
+                    print(f"   ⚠️ This model may be using structured tool calling, but agent expects text-based tool calls")
+                    print(f"   💡 Possible solutions:")
+                    print(f"      1. Check if the model supports text-based tool calling")
+                    print(f"      2. Verify the model configuration and API compatibility")
+                    print(f"      3. Check if tool_choice parameter needs to be set differently")
+                    # Return None to trigger retry logic in agent_core
+                    return None
                 else:
-                    print(f"   No tool_calls attribute or tool_calls is empty")
+                    print(f"   ❌ No content and no tool_calls - this indicates a model error or unexpected response format")
+                    print(f"   💡 Possible causes:")
+                    print(f"      1. Model server error or timeout")
+                    print(f"      2. Model ran out of context or tokens")
+                    print(f"      3. Invalid request format")
+                    print(f"      4. Model configuration issue")
+                    if finish_reason:
+                        print(f"   Finish reason '{finish_reason}' may provide additional context")
+                    return None
             return content
         else:
             print(f"❌ Unexpected response format: {response}")

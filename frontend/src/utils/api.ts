@@ -1,7 +1,13 @@
 import axios from 'axios';
 
-const API_ENDPOINT = import.meta.env.VITE_API_ENDPOINT || 'https://srinjoy59--sam3-agent-pyramidal-sam3-segment.modal.run';
-const COUNT_ENDPOINT = import.meta.env.VITE_COUNT_ENDPOINT || 'https://srinjoy59--sam3-agent-pyramidal-sam3-count.modal.run';
+// Modal deployment base URL - can be overridden via environment variable
+const MODAL_BASE_URL = import.meta.env.VITE_MODAL_BASE_URL || 'https://rockstar4119--sam3-agent-pyramidal-v2-fastapi-app.modal.run';
+
+// API endpoints - constructed from base URL
+const API_ENDPOINT = `${MODAL_BASE_URL}/sam3/segment`;
+const COUNT_ENDPOINT = `${MODAL_BASE_URL}/sam3/count`;
+const AREA_ENDPOINT = `${MODAL_BASE_URL}/sam3/area`;
+const HEALTH_ENDPOINT = `${MODAL_BASE_URL}/health`;
 
 export interface LLMConfig {
   base_url: string;
@@ -13,7 +19,6 @@ export interface LLMConfig {
 
 export interface SegmentRequest {
   prompt: string;
-  image_b64?: string;
   image_url?: string;
   llm_config: LLMConfig;
   debug?: boolean;
@@ -22,9 +27,10 @@ export interface SegmentRequest {
 
 export interface CountRequest {
   prompt: string;
-  image_b64?: string;
   image_url?: string;
+  llm_config: LLMConfig;
   confidence_threshold?: number;
+  max_retries?: number;
 }
 
 export interface Region {
@@ -64,6 +70,7 @@ export interface CountResponse {
   status: 'success' | 'error';
   count?: number;
   object_type?: string;
+  visual_prompt?: string;
   confidence_summary?: {
     high: number;
     medium: number;
@@ -73,12 +80,48 @@ export interface CountResponse {
     box: number[];
     mask_rle: { counts: string | number[]; size: number[] };
     score: number;
-    scale: number;
+    scale?: number;
   }>;
   orig_img_h?: number;
   orig_img_w?: number;
+  verification_info?: Record<string, any>;
+  pyramidal_stats?: Record<string, any>;
   message?: string;
   traceback?: string;
+}
+
+export interface AreaRequest {
+  prompt: string;
+  image_url?: string;
+  llm_config: LLMConfig;
+  gsd?: number;
+  confidence_threshold?: number;
+  max_retries?: number;
+}
+
+export interface AreaResponse {
+  status: 'success' | 'error';
+  object_count?: number;
+  total_pixel_area?: number;
+  total_real_area_m2?: number;
+  coverage_percentage?: number;
+  individual_areas?: Array<{
+    id: number;
+    pixel_area: number;
+    real_area_m2?: number;
+    score: number;
+    box: number[];
+  }>;
+  visual_prompt?: string;
+  verification_info?: Record<string, any>;
+  pyramidal_stats?: Record<string, any>;
+  message?: string;
+  traceback?: string;
+}
+
+export interface HealthResponse {
+  status: string;
+  service: string;
 }
 
 export async function segmentImage(
@@ -159,6 +202,67 @@ export async function countImage(
     return {
       status: 'error',
       message: error instanceof Error ? error.message : 'Unknown error',
+    };
+  }
+}
+
+export async function calculateArea(
+  request: AreaRequest,
+  signal?: AbortSignal
+): Promise<AreaResponse> {
+  try {
+    const response = await axios.post<AreaResponse>(AREA_ENDPOINT, request, {
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      timeout: 600000, // 10 minutes timeout (matches Modal backend timeout)
+      signal, // Add abort signal support
+    });
+    return response.data;
+  } catch (error) {
+    if (axios.isAxiosError(error)) {
+      // Handle cancellation
+      if (error.code === 'ERR_CANCELED' || error.message === 'canceled') {
+        return {
+          status: 'error',
+          message: 'Request was cancelled by user',
+        };
+      }
+      // Handle timeout specifically
+      if (error.code === 'ECONNABORTED' || error.message.includes('timeout')) {
+        return {
+          status: 'error',
+          message: 'Request timed out. The backend is still processing. Please check Modal logs or try again.',
+        };
+      }
+      return {
+        status: 'error',
+        message: error.response?.data?.message || error.message || 'Network error',
+      };
+    }
+    return {
+      status: 'error',
+      message: error instanceof Error ? error.message : 'Unknown error',
+    };
+  }
+}
+
+export async function checkHealth(): Promise<HealthResponse> {
+  try {
+    const response = await axios.get<HealthResponse>(HEALTH_ENDPOINT, {
+      timeout: 5000, // 5 seconds for health check
+    });
+    return response.data;
+  } catch (error) {
+    if (axios.isAxiosError(error)) {
+      return {
+        status: 'error',
+        service: 'sam3-agent',
+      };
+    }
+    return {
+      status: 'error',
+      service: 'sam3-agent',
     };
   }
 }

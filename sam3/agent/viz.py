@@ -43,7 +43,12 @@ def visualize(
 
     # ---------- Mode A: Full-scene render ----------
     if zoom_in_index is None:
-        boxes = np.array(input_json["pred_boxes"])
+        # Convert normalized boxes [x1, y1, x2, y2] to pixel coordinates
+        # Visualizer expects XYXY_ABS format (absolute pixel coordinates)
+        boxes_norm = np.array(input_json["pred_boxes"])  # Normalized [x1, y1, x2, y2]
+        boxes = boxes_norm.copy()
+        boxes[:, [0, 2]] *= orig_w  # x1, x2 in pixels
+        boxes[:, [1, 3]] *= orig_h  # y1, y2 in pixels
         # Handle both old format (string) and new format (dict with counts/size)
         rle_masks = []
         for rle in input_json["pred_masks"]:
@@ -123,7 +128,11 @@ def visualize(
         )
 
         # (2) Single-instance render with the same color
-        boxes_i = np.array([input_json["pred_boxes"][idx]])
+        # Convert normalized box [x1, y1, x2, y2] to pixel coordinates
+        box_norm = np.array(input_json["pred_boxes"][idx])  # Normalized [x1, y1, x2, y2]
+        boxes_i = box_norm.copy().reshape(1, -1)
+        boxes_i[:, [0, 2]] *= orig_w  # x1, x2 in pixels
+        boxes_i[:, [1, 3]] *= orig_h  # y1, y2 in pixels
         # Handle both old format (string) and new format (dict with counts/size)
         mask_data = input_json["pred_masks"][idx]
         if isinstance(mask_data, dict) and "counts" in mask_data and "size" in mask_data:

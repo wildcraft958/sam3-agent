@@ -6,7 +6,6 @@ import os
 import torch
 from PIL import Image
 
-from sam3.model.box_ops import box_xyxy_to_xywh
 from sam3.train.masks_ops import rle_encode
 
 from .helpers.mask_overlap_removal import remove_overlapping_masks
@@ -25,6 +24,7 @@ def sam3_inference(processor, image_path, text_prompt):
     )
 
     # format and assemble outputs
+    # Output boxes in normalized xyxy format [x1, y1, x2, y2]
     pred_boxes_xyxy = torch.stack(
         [
             inference_state["boxes"][:, 0] / orig_img_w,
@@ -34,7 +34,7 @@ def sam3_inference(processor, image_path, text_prompt):
         ],
         dim=-1,
     )  # normalized in range [0, 1]
-    pred_boxes_xywh = box_xyxy_to_xywh(pred_boxes_xyxy).tolist()
+    pred_boxes_xyxy_list = pred_boxes_xyxy.tolist()
     pred_masks = rle_encode(inference_state["masks"].squeeze(1))
     # Preserve full RLE structure (counts + size) instead of extracting only counts
     # This ensures the JSON is self-contained and the mask structure is preserved
@@ -45,7 +45,7 @@ def sam3_inference(processor, image_path, text_prompt):
     outputs = {
         "orig_img_h": orig_img_h,
         "orig_img_w": orig_img_w,
-        "pred_boxes": pred_boxes_xywh,
+        "pred_boxes": pred_boxes_xyxy_list,
         "pred_masks": pred_masks,
         "pred_scores": inference_state["scores"].tolist(),
     }

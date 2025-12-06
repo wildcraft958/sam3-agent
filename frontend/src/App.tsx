@@ -5,7 +5,7 @@ import SAM3ConfigForm, { SAM3Config } from './components/SAM3ConfigForm';
 import ImageVisualization from './components/ImageVisualization';
 import ResultsPanel from './components/ResultsPanel';
 import CommunicationLog from './components/CommunicationLog';
-import { segmentImage, countImage, LLMConfig, SegmentResponse } from './utils/api';
+import { segmentImage, countImage, checkHealth, LLMConfig, SegmentResponse } from './utils/api';
 
 function App() {
   const [imageBase64, setImageBase64] = useState<string | null>(null);
@@ -26,6 +26,7 @@ function App() {
   const [sam3Config, setSam3Config] = useState<SAM3Config>({
     confidence_threshold: 0.4,
   });
+  const [apiHealth, setApiHealth] = useState<'checking' | 'healthy' | 'unhealthy' | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
 
   const handleImageSelect = (base64: string, file: File) => {
@@ -57,6 +58,20 @@ function App() {
       });
     }
   };
+
+  // Check API health on mount
+  useEffect(() => {
+    const checkApiHealth = async () => {
+      setApiHealth('checking');
+      try {
+        const health = await checkHealth();
+        setApiHealth(health.status === 'ok' ? 'healthy' : 'unhealthy');
+      } catch {
+        setApiHealth('unhealthy');
+      }
+    };
+    checkApiHealth();
+  }, []);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -95,10 +110,13 @@ function App() {
 
     try {
       if (useInfer) {
-        // Use pure SAM3 counting (no LLM)
+        // Use SAM3 counting endpoint (still requires llm_config for VLM verification)
+        // Convert base64 to data URI format
+        const imageUrl = imageBase64 ? `data:image/jpeg;base64,${imageBase64}` : undefined;
         const countResponse = await countImage({
           prompt: prompt,
-          image_b64: imageBase64,
+          image_url: imageUrl,
+          llm_config: llmConfig,
           confidence_threshold: sam3Config.confidence_threshold,
         }, signal);
 
@@ -134,9 +152,11 @@ function App() {
         }
       } else {
         // Use full agent with LLM
+        // Convert base64 to data URI format
+        const imageUrl = imageBase64 ? `data:image/jpeg;base64,${imageBase64}` : undefined;
         const segmentResponse = await segmentImage({
           prompt,
-          image_b64: imageBase64,
+          image_url: imageUrl,
           llm_config: llmConfig,
           debug: true,
           confidence_threshold: sam3Config.confidence_threshold,
@@ -172,8 +192,55 @@ function App() {
   return (
     <div className="app">
       <header className="app-header">
-        <h1>SAM3 Agent Visualization</h1>
-        <p>Upload an image and visualize segmentation results with masks and bounding boxes</p>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div>
+            <h1>SAM3 Agent Visualization</h1>
+            <p>Upload an image and visualize segmentation results with masks and bounding boxes</p>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+            {apiHealth === 'checking' && (
+              <span style={{ fontSize: '0.875rem', color: 'var(--text-secondary)' }}>
+                Checking API...
+              </span>
+            )}
+            {apiHealth === 'healthy' && (
+              <span style={{ 
+                fontSize: '0.875rem', 
+                color: 'var(--success)',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '0.25rem'
+              }}>
+                <span style={{ 
+                  width: '8px', 
+                  height: '8px', 
+                  borderRadius: '50%', 
+                  backgroundColor: 'var(--success)',
+                  display: 'inline-block'
+                }}></span>
+                API Connected
+              </span>
+            )}
+            {apiHealth === 'unhealthy' && (
+              <span style={{ 
+                fontSize: '0.875rem', 
+                color: 'var(--error)',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '0.25rem'
+              }}>
+                <span style={{ 
+                  width: '8px', 
+                  height: '8px', 
+                  borderRadius: '50%', 
+                  backgroundColor: 'var(--error)',
+                  display: 'inline-block'
+                }}></span>
+                API Unavailable
+              </span>
+            )}
+          </div>
+        </div>
       </header>
 
       <div className="app-container">
@@ -206,9 +273,9 @@ function App() {
                   checked={useInfer}
                   onChange={(e) => setUseInfer(e.target.checked)}
                 />
-                Use Pure SAM3 Counting (No LLM)
+                Use SAM3 Counting Endpoint
               </label>
-              <p className="hint">Check to use SAM3 counting only (faster, no LLM costs)</p>
+              <p className="hint">Check to use SAM3 counting endpoint (optimized for counting tasks, still uses VLM for verification)</p>
             </div>
           </div>
 

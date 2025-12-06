@@ -9,7 +9,8 @@ A React + Vite frontend application for visualizing SAM3 segmentation results wi
 - 📊 **Results Display**: View segmentation results, regions, and scores
 - 🔍 **Internal Data**: Explore raw SAM3 JSON data and communication logs
 - ⚙️ **LLM Configuration**: Configure LLM settings (OpenAI, Anthropic, vLLM, etc.)
-- 🚀 **Dual Mode**: Full agent mode (with LLM) or pure SAM3 inference mode
+- 🚀 **Dual Mode**: Full agent mode (with LLM) or SAM3 counting endpoint
+- 💚 **Health Check**: Real-time API connectivity status indicator
 
 ## Setup
 
@@ -64,10 +65,15 @@ vercel
 
 ### Environment Variables (Optional)
 
-You can set these in Vercel dashboard:
+You can set these in Vercel dashboard or create a `.env` file:
 
-- `VITE_API_ENDPOINT`: Custom API endpoint URL (defaults to Modal endpoint)
-- `VITE_INFER_ENDPOINT`: Custom inference endpoint URL
+- `VITE_MODAL_BASE_URL`: Base URL for Modal SAM3 Agent API (defaults to `https://rockstar4119--sam3-agent-pyramidal-v2-fastapi-app.modal.run`)
+
+The frontend automatically constructs endpoints from the base URL:
+- `${VITE_MODAL_BASE_URL}/sam3/segment` - Full segmentation with LLM
+- `${VITE_MODAL_BASE_URL}/sam3/count` - Object counting
+- `${VITE_MODAL_BASE_URL}/sam3/area` - Area calculation
+- `${VITE_MODAL_BASE_URL}/health` - Health check
 
 ## Usage
 
@@ -110,12 +116,15 @@ frontend/
 
 ## API Endpoints
 
-The frontend connects to Modal endpoints:
+The frontend connects to Modal FastAPI endpoints:
 
-- **Full Agent**: `https://aryan-don357--sam3-agent-sam3-segment.modal.run`
-- **Pure SAM3**: `https://aryan-don357--sam3-agent-sam3-infer.modal.run`
+- **Base URL**: `https://rockstar4119--sam3-agent-pyramidal-v2-fastapi-app.modal.run`
+- **Segmentation**: `/sam3/segment` - Full segmentation with LLM guidance
+- **Counting**: `/sam3/count` - Object counting with VLM verification
+- **Area Calculation**: `/sam3/area` - Area measurement with optional GSD
+- **Health Check**: `/health` - API health status
 
-These can be overridden with environment variables.
+The base URL can be overridden with the `VITE_MODAL_BASE_URL` environment variable.
 
 ## Technologies
 

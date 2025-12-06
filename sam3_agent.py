@@ -656,7 +656,7 @@ class PyramidalConfig(BaseModel):
             "overlap_ratio": 0.15,
             "scales": [1.0, 0.5],
             "batch_size": 16,
-            "iou_threshold": 0.7
+            "iou_threshold": 0.5
         }
     })
     
@@ -664,7 +664,7 @@ class PyramidalConfig(BaseModel):
     overlap_ratio: Optional[float] = Field(0.15, description="Overlap ratio between tiles")
     scales: Optional[List[float]] = Field([1.0, 0.5], description="Scale factors for multi-scale detection")
     batch_size: Optional[int] = Field(16, description="Batch size for inference")
-    iou_threshold: Optional[float] = Field(0.7, description="IoU threshold for NMS")
+    iou_threshold: Optional[float] = Field(0.5, description="IoU threshold for NMS")
 
 
 class SAM3CountRequest(BaseModel):
@@ -672,7 +672,7 @@ class SAM3CountRequest(BaseModel):
     model_config = ConfigDict(json_schema_extra={
         "example": {
             "prompt": "trees",
-            "image_b64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+            "image_url": "https://example.com/aerial-image.jpg",
             "llm_config": {
                 "base_url": "https://rockstar4119--qwen3-vl-vllm-server-30b-vllm-server.modal.run/v1",
                 "model": "Qwen/Qwen3-VL-30B-A3B-Instruct",
@@ -681,23 +681,9 @@ class SAM3CountRequest(BaseModel):
             "confidence_threshold": 0.5,
             "max_retries": 2
         },
-        "examples": {
-            "base64_image": {
-                "summary": "Using base64-encoded image",
-                "value": {
-                    "prompt": "trees",
-                    "image_b64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
-                    "llm_config": {
-                        "base_url": "https://rockstar4119--qwen3-vl-vllm-server-30b-vllm-server.modal.run/v1",
-                        "model": "Qwen/Qwen3-VL-30B-A3B-Instruct",
-                        "api_key": ""
-                    },
-                    "confidence_threshold": 0.5,
-                    "max_retries": 2
-                }
-            },
-            "url_image": {
-                "summary": "Using image URL",
+        "examples": [
+            {
+                "summary": "Using HTTP URL",
                 "value": {
                     "prompt": "trees",
                     "image_url": "https://example.com/aerial-image.jpg",
@@ -709,13 +695,26 @@ class SAM3CountRequest(BaseModel):
                     "confidence_threshold": 0.5,
                     "max_retries": 2
                 }
+            },
+            {
+                "summary": "Using data URI (base64-encoded image)",
+                "value": {
+                    "prompt": "trees",
+                    "image_url": "data:image/jpeg;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+                    "llm_config": {
+                        "base_url": "https://rockstar4119--qwen3-vl-vllm-server-30b-vllm-server.modal.run/v1",
+                        "model": "Qwen/Qwen3-VL-30B-A3B-Instruct",
+                        "api_key": ""
+                    },
+                    "confidence_threshold": 0.5,
+                    "max_retries": 2
+                }
             }
-        }
+        ]
     })
     
     prompt: str = Field(..., description="What objects to count (e.g., 'trees', 'cars', 'buildings')")
-    image_b64: Optional[str] = Field(None, description="Base64-encoded image data")
-    image_url: Optional[str] = Field(None, description="URL to download image from")
+    image_url: Optional[str] = Field(None, description="Image URL (HTTP/HTTPS URL or data URI format: data:image/<type>;base64,<base64_string>)")
     llm_config: LLMConfig = Field(..., description="VLM configuration for prompt refinement")
     confidence_threshold: Optional[float] = Field(0.5, ge=0.0, le=1.0, description="Minimum confidence threshold")
     max_retries: Optional[int] = Field(2, ge=0, le=5, description="Maximum retry attempts for verification")
@@ -760,7 +759,7 @@ class SAM3AreaRequest(BaseModel):
     model_config = ConfigDict(json_schema_extra={
         "example": {
             "prompt": "solar panels",
-            "image_b64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+            "image_url": "https://example.com/satellite-image.jpg",
             "llm_config": {
                 "base_url": "https://rockstar4119--qwen3-vl-vllm-server-30b-vllm-server.modal.run/v1",
                 "model": "Qwen/Qwen3-VL-30B-A3B-Instruct",
@@ -769,23 +768,9 @@ class SAM3AreaRequest(BaseModel):
             "gsd": 0.5,
             "confidence_threshold": 0.5
         },
-        "examples": {
-            "base64_image": {
-                "summary": "Using base64-encoded image",
-                "value": {
-                    "prompt": "solar panels",
-                    "image_b64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
-                    "llm_config": {
-                        "base_url": "https://rockstar4119--qwen3-vl-vllm-server-30b-vllm-server.modal.run/v1",
-                        "model": "Qwen/Qwen3-VL-30B-A3B-Instruct",
-                        "api_key": ""
-                    },
-                    "gsd": 0.5,
-                    "confidence_threshold": 0.5
-                }
-            },
-            "url_image": {
-                "summary": "Using image URL",
+        "examples": [
+            {
+                "summary": "Using HTTP URL",
                 "value": {
                     "prompt": "solar panels",
                     "image_url": "https://example.com/satellite-image.jpg",
@@ -797,13 +782,26 @@ class SAM3AreaRequest(BaseModel):
                     "gsd": 0.5,
                     "confidence_threshold": 0.5
                 }
+            },
+            {
+                "summary": "Using data URI (base64-encoded image)",
+                "value": {
+                    "prompt": "solar panels",
+                    "image_url": "data:image/jpeg;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+                    "llm_config": {
+                        "base_url": "https://rockstar4119--qwen3-vl-vllm-server-30b-vllm-server.modal.run/v1",
+                        "model": "Qwen/Qwen3-VL-30B-A3B-Instruct",
+                        "api_key": ""
+                    },
+                    "gsd": 0.5,
+                    "confidence_threshold": 0.5
+                }
             }
-        }
+        ]
     })
     
     prompt: str = Field(..., description="What objects to measure (e.g., 'solar panels', 'buildings')")
-    image_b64: Optional[str] = Field(None, description="Base64-encoded image data")
-    image_url: Optional[str] = Field(None, description="URL to download image from")
+    image_url: Optional[str] = Field(None, description="Image URL (HTTP/HTTPS URL or data URI format: data:image/<type>;base64,<base64_string>)")
     llm_config: LLMConfig = Field(..., description="VLM configuration for prompt refinement")
     gsd: Optional[float] = Field(None, gt=0, description="Ground Sample Distance in meters/pixel")
     confidence_threshold: Optional[float] = Field(0.5, ge=0.0, le=1.0, description="Minimum confidence threshold")
@@ -850,7 +848,7 @@ class SAM3SegmentRequest(BaseModel):
     model_config = ConfigDict(json_schema_extra={
         "example": {
             "prompt": "segment all ships in the harbor",
-            "image_b64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+            "image_url": "https://example.com/harbor-image.jpg",
             "llm_config": {
                 "base_url": "https://rockstar4119--qwen3-vl-vllm-server-30b-vllm-server.modal.run/v1",
                 "model": "Qwen/Qwen3-VL-30B-A3B-Instruct",
@@ -863,33 +861,12 @@ class SAM3SegmentRequest(BaseModel):
                 "overlap_ratio": 0.15,
                 "scales": [1.0, 0.5],
                 "batch_size": 16,
-                "iou_threshold": 0.7
+                "iou_threshold": 0.5
             }
         },
-        "examples": {
-            "base64_image": {
-                "summary": "Using base64-encoded image",
-                "value": {
-                    "prompt": "segment all ships in the harbor",
-                    "image_b64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
-                    "llm_config": {
-                        "base_url": "https://rockstar4119--qwen3-vl-vllm-server-30b-vllm-server.modal.run/v1",
-                        "model": "Qwen/Qwen3-VL-30B-A3B-Instruct",
-                        "api_key": ""
-                    },
-                    "debug": True,
-                    "confidence_threshold": 0.5,
-                    "pyramidal_config": {
-                        "tile_size": 512,
-                        "overlap_ratio": 0.15,
-                        "scales": [1.0, 0.5],
-                        "batch_size": 16,
-                        "iou_threshold": 0.7
-                    }
-                }
-            },
-            "url_image": {
-                "summary": "Using image URL",
+        "examples": [
+            {
+                "summary": "Using HTTP URL",
                 "value": {
                     "prompt": "segment all ships in the harbor",
                     "image_url": "https://example.com/harbor-image.jpg",
@@ -905,16 +882,36 @@ class SAM3SegmentRequest(BaseModel):
                         "overlap_ratio": 0.15,
                         "scales": [1.0, 0.5],
                         "batch_size": 16,
-                        "iou_threshold": 0.7
+                        "iou_threshold": 0.5
+                    }
+                }
+            },
+            {
+                "summary": "Using data URI (base64-encoded image)",
+                "value": {
+                    "prompt": "segment all ships in the harbor",
+                    "image_url": "data:image/jpeg;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+                    "llm_config": {
+                        "base_url": "https://rockstar4119--qwen3-vl-vllm-server-30b-vllm-server.modal.run/v1",
+                        "model": "Qwen/Qwen3-VL-30B-A3B-Instruct",
+                        "api_key": ""
+                    },
+                    "debug": True,
+                    "confidence_threshold": 0.5,
+                    "pyramidal_config": {
+                        "tile_size": 512,
+                        "overlap_ratio": 0.15,
+                        "scales": [1.0, 0.5],
+                        "batch_size": 16,
+                        "iou_threshold": 0.5
                     }
                 }
             }
-        }
+        ]
     })
     
     prompt: str = Field(..., description="Segmentation prompt (e.g., 'segment all ships')")
-    image_b64: Optional[str] = Field(None, description="Base64-encoded image data")
-    image_url: Optional[str] = Field(None, description="URL to download image from")
+    image_url: Optional[str] = Field(None, description="Image URL (HTTP/HTTPS URL or data URI format: data:image/<type>;base64,<base64_string>)")
     llm_config: LLMConfig = Field(..., description="LLM/VLM configuration")
     debug: Optional[bool] = Field(False, description="Return debug visualization")
     confidence_threshold: Optional[float] = Field(0.5, ge=0.0, le=1.0, description="Minimum confidence threshold")
@@ -1388,7 +1385,7 @@ Output ONLY the alternative keyword (2-3 words max), nothing else:"""
                 "overlap_ratio": 0.15,
                 "scales": [1.0, 0.5],
                 "batch_size": 16,
-                "iou_threshold": 0.7,
+                "iou_threshold": 0.5,
             }
             if pyramidal_config:
                 config.update(pyramidal_config)
@@ -1408,7 +1405,7 @@ Output ONLY the alternative keyword (2-3 words max), nothing else:"""
             if result["status"] != "success":
                 return result
             
-            # Convert to expected output format (normalized boxes in xywh)
+            # Convert to expected output format (normalized boxes in xyxy)
             orig_w = result["orig_img_w"]
             orig_h = result["orig_img_h"]
             detections = result["detections"]
@@ -1420,12 +1417,8 @@ Output ONLY the alternative keyword (2-3 words max), nothing else:"""
             for det in detections:
                 box = det["box"]  # [x1, y1, x2, y2] in pixels
                 x1, y1, x2, y2 = box
-                # Normalize to [0, 1] and convert to xywh (center x, center y, width, height)
-                cx = ((x1 + x2) / 2) / orig_w
-                cy = ((y1 + y2) / 2) / orig_h
-                w = (x2 - x1) / orig_w
-                h = (y2 - y1) / orig_h
-                pred_boxes.append([cx, cy, w, h])
+                # Normalize to [0, 1] keeping [x1, y1, x2, y2] format
+                pred_boxes.append([x1 / orig_w, y1 / orig_h, x2 / orig_w, y2 / orig_h])
                 pred_masks.append(det["mask_rle"])
                 pred_scores.append(det["score"])
             
@@ -1760,7 +1753,7 @@ Output ONLY the alternative keyword (2-3 words max), nothing else:"""
         tile_size: int = 512,
         overlap_ratio: float = 0.15,
         scales: Optional[List[float]] = None,
-        iou_threshold: float = 0.7,
+        iou_threshold: float = 0.5,
         confidence_threshold: float = 0.5,
         batch_size: int = 16,
     ) -> Dict[str, Any]:
@@ -1779,7 +1772,7 @@ Output ONLY the alternative keyword (2-3 words max), nothing else:"""
             tile_size: Size of each tile (default: 512)
             overlap_ratio: Overlap between tiles (default: 0.15)
             scales: List of scales for pyramid (default: [1.0, 0.5])
-            iou_threshold: IoU threshold for NMS (default: 0.7)
+            iou_threshold: IoU threshold for NMS (default: 0.5)
             confidence_threshold: Minimum confidence threshold (default: 0.5)
             batch_size: Batch size for processing tiles (default: 16)
             
@@ -2018,7 +2011,7 @@ Output ONLY the alternative keyword (2-3 words max), nothing else:"""
         tile_size: int = 512,
         overlap_ratio: float = 0.15,
         scales: Optional[List[float]] = None,
-        iou_threshold: float = 0.7,
+        iou_threshold: float = 0.5,
         confidence_threshold: float = 0.5,
         batch_size: int = 16,
     ) -> Dict[str, Any]:
@@ -2062,7 +2055,7 @@ Output ONLY the alternative keyword (2-3 words max), nothing else:"""
                 - overlap_ratio: Overlap between tiles (default: 0.15)
                 - scales: List of scales (default: [1.0, 0.5])
                 - batch_size: Batch size (default: 16)
-                - iou_threshold: NMS IoU threshold (default: 0.7)
+                - iou_threshold: NMS IoU threshold (default: 0.5)
             max_retries: Maximum retry attempts with rephrased prompts (default: 2)
         
         Returns:
@@ -2091,7 +2084,7 @@ Output ONLY the alternative keyword (2-3 words max), nothing else:"""
             "overlap_ratio": 0.15,
             "scales": [1.0, 0.5],
             "batch_size": 16,
-            "iou_threshold": 0.7,
+            "iou_threshold": 0.5,
         }
         if pyramidal_config:
             config.update(pyramidal_config)
@@ -2229,7 +2222,7 @@ Output ONLY the alternative keyword (2-3 words max), nothing else:"""
                 - overlap_ratio: Overlap between tiles (default: 0.15)
                 - scales: List of scales (default: [1.0, 0.5])
                 - batch_size: Batch size (default: 16)
-                - iou_threshold: NMS IoU threshold (default: 0.7)
+                - iou_threshold: NMS IoU threshold (default: 0.5)
             max_retries: Maximum retry attempts with rephrased prompts (default: 2)
         
         Returns:
@@ -2258,7 +2251,7 @@ Output ONLY the alternative keyword (2-3 words max), nothing else:"""
             "overlap_ratio": 0.15,
             "scales": [1.0, 0.5],
             "batch_size": 16,
-            "iou_threshold": 0.7,
+            "iou_threshold": 0.5,
         }
         if pyramidal_config:
             config.update(pyramidal_config)
@@ -2530,7 +2523,7 @@ Now analyze the image and query."""
             "overlap_ratio": 0.15,
             "scales": [1.0, 0.5],
             "batch_size": 16,
-            "iou_threshold": 0.7,
+            "iou_threshold": 0.5,
         }
         if pyramidal_config:
             config.update(pyramidal_config)
@@ -2569,20 +2562,16 @@ Now analyze the image and query."""
             orig_h = result["orig_img_h"]
             detections = result["detections"]
             
-            # Convert detections to expected format (normalized boxes in xywh)
+            # Convert detections to expected format (normalized boxes in xyxy)
             pred_boxes = []
             pred_masks = []
             pred_scores = []
             
             for det in detections:
                 box = det["box"]  # [x1, y1, x2, y2] in pixels
-                # Normalize to [0, 1] and convert to xywh
                 x1, y1, x2, y2 = box
-                cx = ((x1 + x2) / 2) / orig_w
-                cy = ((y1 + y2) / 2) / orig_h
-                w = (x2 - x1) / orig_w
-                h = (y2 - y1) / orig_h
-                pred_boxes.append([cx, cy, w, h])
+                # Normalize to [0, 1] keeping [x1, y1, x2, y2] format
+                pred_boxes.append([x1 / orig_w, y1 / orig_h, x2 / orig_w, y2 / orig_h])
                 
                 # Mask is already in RLE format
                 pred_masks.append(det["mask_rle"])
@@ -2675,7 +2664,7 @@ Now analyze the image and query."""
                 - overlap_ratio: Overlap ratio between tiles (default: 0.15)
                 - scales: Scale factors for multi-scale detection (default: [1.0, 0.5])
                 - batch_size: Batch size for inference (default: 16)
-                - iou_threshold: IoU threshold for NMS deduplication (default: 0.7)
+                - iou_threshold: IoU threshold for NMS deduplication (default: 0.5)
         
         Returns:
             Dict with status, regions, summary, and optional debug visualization
@@ -2734,7 +2723,7 @@ Now analyze the image and query."""
                 "overlap_ratio": 0.15,
                 "scales": [1.0, 0.5],
                 "batch_size": 16,
-                "iou_threshold": 0.7,
+                "iou_threshold": 0.5,
             }
             call_sam_service = partial(
                 self.call_sam_service_pyramidal,
@@ -2960,26 +2949,33 @@ Supports any OpenAI-compatible API (OpenAI, vLLM, Anthropic, etc.)
     )
     
     # Helper function to get image bytes
-    def get_image_bytes(image_b64: Optional[str], image_url: Optional[str]) -> bytes:
-        """Get image bytes from base64 or URL with validation"""
+    def get_image_bytes(image_url: Optional[str]) -> bytes:
+        """Get image bytes from image_url (supports HTTP/HTTPS URLs and data URIs) with validation"""
         import requests
         from PIL import Image as PILImage
         
+        if not image_url:
+            raise HTTPException(status_code=400, detail="'image_url' is required")
+        
         image_bytes = None
         
-        if image_b64:
+        # Check if it's a data URI (data:image/...;base64,...)
+        if image_url.startswith('data:'):
             try:
-                # Handle data URI format (data:image/jpeg;base64,...)
-                if image_b64.startswith('data:'):
-                    # Extract base64 part after the comma
-                    if ',' in image_b64:
-                        image_b64 = image_b64.split(',', 1)[1]
+                # Extract base64 part after the comma
+                if ',' in image_url:
+                    base64_part = image_url.split(',', 1)[1]
+                else:
+                    raise HTTPException(status_code=400, detail="Invalid data URI format: missing base64 data")
                 
-                image_bytes = base64.b64decode(image_b64)
-                print(f"✓ Decoded base64 image: {len(image_bytes)} bytes")
+                image_bytes = base64.b64decode(base64_part)
+                print(f"✓ Decoded base64 image from data URI: {len(image_bytes)} bytes")
             except Exception as e:
-                raise HTTPException(status_code=400, detail=f"Invalid base64 in 'image_b64': {e}")
-        elif image_url:
+                if isinstance(e, HTTPException):
+                    raise
+                raise HTTPException(status_code=400, detail=f"Invalid base64 data in 'image_url': {e}")
+        else:
+            # Assume it's an HTTP/HTTPS URL
             try:
                 print(f"📥 Downloading image from: {image_url}")
                 resp = requests.get(image_url, timeout=30)
@@ -2988,8 +2984,6 @@ Supports any OpenAI-compatible API (OpenAI, vLLM, Anthropic, etc.)
                 print(f"✓ Downloaded image: {len(image_bytes)} bytes")
             except Exception as e:
                 raise HTTPException(status_code=400, detail=f"Failed to download image from URL: {e}")
-        else:
-            raise HTTPException(status_code=400, detail="Provide either 'image_b64' or 'image_url'")
         
         # Validate image can be opened
         if image_bytes:
@@ -3045,7 +3039,7 @@ all matching objects with verification to reduce false positives.
     async def count_objects(request: SAM3CountRequest):
         try:
             # Get image bytes
-            image_bytes = get_image_bytes(request.image_b64, request.image_url)
+            image_bytes = get_image_bytes(request.image_url)
             
             # Convert Pydantic models to dicts
             llm_config_dict = request.llm_config.model_dump()
@@ -3101,7 +3095,7 @@ area measurements in square meters.
     async def calculate_area(request: SAM3AreaRequest):
         try:
             # Get image bytes
-            image_bytes = get_image_bytes(request.image_b64, request.image_url)
+            image_bytes = get_image_bytes(request.image_url)
             
             # Convert Pydantic models to dicts
             llm_config_dict = request.llm_config.model_dump()
@@ -3159,7 +3153,7 @@ Set `debug=true` to receive a visualization image in the response.
     async def segment_image(request: SAM3SegmentRequest):
         try:
             # Get image bytes
-            image_bytes = get_image_bytes(request.image_b64, request.image_url)
+            image_bytes = get_image_bytes(request.image_url)
             
             # Convert Pydantic models to dicts
             llm_config_dict = request.llm_config.model_dump()

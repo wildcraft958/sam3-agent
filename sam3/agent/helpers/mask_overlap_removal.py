@@ -12,7 +12,20 @@ except Exception:
 
 
 def bbox_iou(box1, box2):
-    """Calculate IoU between two boxes [x1, y1, x2, y2]."""
+    """
+    Calculate IoU between two boxes in [x1, y1, x2, y2] format (normalized or absolute).
+    
+    Args:
+        box1: [x1, y1, x2, y2] bounding box
+        box2: [x1, y1, x2, y2] bounding box
+    
+    Returns:
+        IoU value between 0 and 1
+    """
+    # Validate boxes have 4 elements
+    if len(box1) != 4 or len(box2) != 4:
+        return 0.0
+    
     x1 = max(box1[0], box2[0])
     y1 = max(box1[1], box2[1])
     x2 = min(box1[2], box2[2])
