@@ -678,7 +678,7 @@ class SAM3CountRequest(BaseModel):
                 "model": "Qwen/Qwen3-VL-30B-A3B-Instruct",
                 "api_key": ""
             },
-            "confidence_threshold": 0.5,
+            "confidence_threshold": 0.3,
             "max_retries": 2
         },
         "examples": [
@@ -692,7 +692,7 @@ class SAM3CountRequest(BaseModel):
                         "model": "Qwen/Qwen3-VL-30B-A3B-Instruct",
                         "api_key": ""
                     },
-                    "confidence_threshold": 0.5,
+                    "confidence_threshold": 0.3,
                     "max_retries": 2
                 }
             },
@@ -706,7 +706,7 @@ class SAM3CountRequest(BaseModel):
                         "model": "Qwen/Qwen3-VL-30B-A3B-Instruct",
                         "api_key": ""
                     },
-                    "confidence_threshold": 0.5,
+                    "confidence_threshold": 0.3,
                     "max_retries": 2
                 }
             }
@@ -716,7 +716,7 @@ class SAM3CountRequest(BaseModel):
     prompt: str = Field(..., description="What objects to count (e.g., 'trees', 'cars', 'buildings')")
     image_url: Optional[str] = Field(None, description="Image URL (HTTP/HTTPS URL or data URI format: data:image/<type>;base64,<base64_string>)")
     llm_config: LLMConfig = Field(..., description="VLM configuration for prompt refinement")
-    confidence_threshold: Optional[float] = Field(0.5, ge=0.0, le=1.0, description="Minimum confidence threshold")
+    confidence_threshold: Optional[float] = Field(0.3, ge=0.0, le=1.0, description="Minimum confidence threshold")
     max_retries: Optional[int] = Field(2, ge=0, le=5, description="Maximum retry attempts for verification")
     pyramidal_config: Optional[PyramidalConfig] = Field(None, description="Pyramidal processing configuration")
 
@@ -766,7 +766,7 @@ class SAM3AreaRequest(BaseModel):
                 "api_key": ""
             },
             "gsd": 0.5,
-            "confidence_threshold": 0.5
+            "confidence_threshold": 0.3
         },
         "examples": [
             {
@@ -780,7 +780,7 @@ class SAM3AreaRequest(BaseModel):
                         "api_key": ""
                     },
                     "gsd": 0.5,
-                    "confidence_threshold": 0.5
+                    "confidence_threshold": 0.3
                 }
             },
             {
@@ -794,7 +794,7 @@ class SAM3AreaRequest(BaseModel):
                         "api_key": ""
                     },
                     "gsd": 0.5,
-                    "confidence_threshold": 0.5
+                    "confidence_threshold": 0.3
                 }
             }
         ]
@@ -804,7 +804,7 @@ class SAM3AreaRequest(BaseModel):
     image_url: Optional[str] = Field(None, description="Image URL (HTTP/HTTPS URL or data URI format: data:image/<type>;base64,<base64_string>)")
     llm_config: LLMConfig = Field(..., description="VLM configuration for prompt refinement")
     gsd: Optional[float] = Field(None, gt=0, description="Ground Sample Distance in meters/pixel")
-    confidence_threshold: Optional[float] = Field(0.5, ge=0.0, le=1.0, description="Minimum confidence threshold")
+    confidence_threshold: Optional[float] = Field(0.3, ge=0.0, le=1.0, description="Minimum confidence threshold")
     max_retries: Optional[int] = Field(2, ge=0, le=5, description="Maximum retry attempts for verification")
     pyramidal_config: Optional[PyramidalConfig] = Field(None, description="Pyramidal processing configuration")
 
@@ -855,7 +855,7 @@ class SAM3SegmentRequest(BaseModel):
                 "api_key": ""
             },
             "debug": True,
-            "confidence_threshold": 0.5,
+            "confidence_threshold": 0.3,
             "pyramidal_config": {
                 "tile_size": 512,
                 "overlap_ratio": 0.15,
@@ -876,7 +876,7 @@ class SAM3SegmentRequest(BaseModel):
                         "api_key": ""
                     },
                     "debug": True,
-                    "confidence_threshold": 0.5,
+                    "confidence_threshold": 0.3,
                     "pyramidal_config": {
                         "tile_size": 512,
                         "overlap_ratio": 0.15,
@@ -897,7 +897,7 @@ class SAM3SegmentRequest(BaseModel):
                         "api_key": ""
                     },
                     "debug": True,
-                    "confidence_threshold": 0.5,
+                    "confidence_threshold": 0.3,
                     "pyramidal_config": {
                         "tile_size": 512,
                         "overlap_ratio": 0.15,
@@ -914,7 +914,7 @@ class SAM3SegmentRequest(BaseModel):
     image_url: Optional[str] = Field(None, description="Image URL (HTTP/HTTPS URL or data URI format: data:image/<type>;base64,<base64_string>)")
     llm_config: LLMConfig = Field(..., description="LLM/VLM configuration")
     debug: Optional[bool] = Field(False, description="Return debug visualization")
-    confidence_threshold: Optional[float] = Field(0.5, ge=0.0, le=1.0, description="Minimum confidence threshold")
+    confidence_threshold: Optional[float] = Field(0.3, ge=0.0, le=1.0, description="Minimum confidence threshold")
     pyramidal_config: Optional[PyramidalConfig] = Field(None, description="Pyramidal processing configuration")
 
 
@@ -1042,7 +1042,7 @@ class SAM3Model:
         bpe_path = "/root/sam3/assets/bpe_simple_vocab_16e6.txt.gz"
         self.model = build_sam3_image_model(bpe_path=bpe_path)
         # Use lower confidence threshold (0.25) to get more results, can be adjusted per request
-        self.processor = Sam3Processor(self.model, confidence_threshold=0.4)
+        self.processor = Sam3Processor(self.model, confidence_threshold=0.3)
         print(f"SAM3 model loaded successfully with confidence threshold: {self.processor.confidence_threshold}")
 
     # --------------------------------------------------------------------------
@@ -1754,7 +1754,7 @@ Output ONLY the alternative keyword (2-3 words max), nothing else:"""
         overlap_ratio: float = 0.15,
         scales: Optional[List[float]] = None,
         iou_threshold: float = 0.5,
-        confidence_threshold: float = 0.5,
+        confidence_threshold: float = 0.3,
         batch_size: int = 16,
     ) -> Dict[str, Any]:
         """
@@ -1773,7 +1773,7 @@ Output ONLY the alternative keyword (2-3 words max), nothing else:"""
             overlap_ratio: Overlap between tiles (default: 0.15)
             scales: List of scales for pyramid (default: [1.0, 0.5])
             iou_threshold: IoU threshold for NMS (default: 0.5)
-            confidence_threshold: Minimum confidence threshold (default: 0.5)
+            confidence_threshold: Minimum confidence threshold (default: 0.3)
             batch_size: Batch size for processing tiles (default: 16)
             
         Returns:
@@ -2012,7 +2012,7 @@ Output ONLY the alternative keyword (2-3 words max), nothing else:"""
         overlap_ratio: float = 0.15,
         scales: Optional[List[float]] = None,
         iou_threshold: float = 0.5,
-        confidence_threshold: float = 0.5,
+        confidence_threshold: float = 0.3,
         batch_size: int = 16,
     ) -> Dict[str, Any]:
         """Modal wrapper around the local pyramidal inference implementation."""
@@ -2033,7 +2033,7 @@ Output ONLY the alternative keyword (2-3 words max), nothing else:"""
         image_bytes: bytes,
         text_prompt: str,
         llm_config: Dict[str, Any],
-        confidence_threshold: float = 0.5,
+        confidence_threshold: float = 0.3,
         pyramidal_config: Dict[str, Any] = None,
         max_retries: int = 2,
     ) -> Dict[str, Any]:
@@ -2049,7 +2049,7 @@ Output ONLY the alternative keyword (2-3 words max), nothing else:"""
                 - base_url: API endpoint URL
                 - model: Model name
                 - api_key: API key (can be empty)
-            confidence_threshold: Minimum confidence threshold (default: 0.5)
+            confidence_threshold: Minimum confidence threshold (default: 0.3)
             pyramidal_config: Optional pyramidal configuration:
                 - tile_size: Size of each tile (default: 512)
                 - overlap_ratio: Overlap between tiles (default: 0.15)
@@ -2199,7 +2199,7 @@ Output ONLY the alternative keyword (2-3 words max), nothing else:"""
         text_prompt: str,
         llm_config: Dict[str, Any],
         gsd: float = None,
-        confidence_threshold: float = 0.5,
+        confidence_threshold: float = 0.3,
         pyramidal_config: Dict[str, Any] = None,
         max_retries: int = 2,
     ) -> Dict[str, Any]:
@@ -2216,7 +2216,7 @@ Output ONLY the alternative keyword (2-3 words max), nothing else:"""
                 - model: Model name
                 - api_key: API key (can be empty)
             gsd: Ground Sample Distance in meters/pixel (required for real-world area)
-            confidence_threshold: Minimum confidence threshold (default: 0.5)
+            confidence_threshold: Minimum confidence threshold (default: 0.3)
             pyramidal_config: Optional pyramidal configuration:
                 - tile_size: Size of each tile (default: 512)
                 - overlap_ratio: Overlap between tiles (default: 0.15)
@@ -2658,7 +2658,7 @@ Now analyze the image and query."""
                 - name: Name for output files (optional, defaults to model name)
                 - max_tokens: Maximum tokens (optional, defaults to 4096)
             debug: whether to return a visualization image (base64)
-            confidence_threshold: Optional confidence threshold (0.0-1.0). If None, uses processor's default (0.4)
+            confidence_threshold: Optional confidence threshold (0.0-1.0). If None, uses processor's default (0.3)
             pyramidal_config: Optional pyramidal processing configuration dict:
                 - tile_size: Tile size for pyramidal processing (default: 512)
                 - overlap_ratio: Overlap ratio between tiles (default: 0.15)
