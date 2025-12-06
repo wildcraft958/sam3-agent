@@ -656,7 +656,7 @@ class PyramidalConfig(BaseModel):
             "overlap_ratio": 0.15,
             "scales": [1.0, 0.5],
             "batch_size": 16,
-            "iou_threshold": 0.5
+            "iou_threshold": 0.7
         }
     })
     
@@ -664,7 +664,7 @@ class PyramidalConfig(BaseModel):
     overlap_ratio: Optional[float] = Field(0.15, description="Overlap ratio between tiles")
     scales: Optional[List[float]] = Field([1.0, 0.5], description="Scale factors for multi-scale detection")
     batch_size: Optional[int] = Field(16, description="Batch size for inference")
-    iou_threshold: Optional[float] = Field(0.5, description="IoU threshold for NMS")
+    iou_threshold: Optional[float] = Field(0.7, description="IoU threshold for NMS")
 
 
 class SAM3CountRequest(BaseModel):
@@ -672,7 +672,7 @@ class SAM3CountRequest(BaseModel):
     model_config = ConfigDict(json_schema_extra={
         "example": {
             "prompt": "trees",
-            "image_url": "https://example.com/aerial-image.jpg",
+            "image_b64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
             "llm_config": {
                 "base_url": "https://rockstar4119--qwen3-vl-vllm-server-30b-vllm-server.modal.run/v1",
                 "model": "Qwen/Qwen3-VL-30B-A3B-Instruct",
@@ -680,6 +680,36 @@ class SAM3CountRequest(BaseModel):
             },
             "confidence_threshold": 0.5,
             "max_retries": 2
+        },
+        "examples": {
+            "base64_image": {
+                "summary": "Using base64-encoded image",
+                "value": {
+                    "prompt": "trees",
+                    "image_b64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+                    "llm_config": {
+                        "base_url": "https://rockstar4119--qwen3-vl-vllm-server-30b-vllm-server.modal.run/v1",
+                        "model": "Qwen/Qwen3-VL-30B-A3B-Instruct",
+                        "api_key": ""
+                    },
+                    "confidence_threshold": 0.5,
+                    "max_retries": 2
+                }
+            },
+            "url_image": {
+                "summary": "Using image URL",
+                "value": {
+                    "prompt": "trees",
+                    "image_url": "https://example.com/aerial-image.jpg",
+                    "llm_config": {
+                        "base_url": "https://rockstar4119--qwen3-vl-vllm-server-30b-vllm-server.modal.run/v1",
+                        "model": "Qwen/Qwen3-VL-30B-A3B-Instruct",
+                        "api_key": ""
+                    },
+                    "confidence_threshold": 0.5,
+                    "max_retries": 2
+                }
+            }
         }
     })
     
@@ -730,7 +760,7 @@ class SAM3AreaRequest(BaseModel):
     model_config = ConfigDict(json_schema_extra={
         "example": {
             "prompt": "solar panels",
-            "image_url": "https://example.com/satellite-image.jpg",
+            "image_b64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
             "llm_config": {
                 "base_url": "https://rockstar4119--qwen3-vl-vllm-server-30b-vllm-server.modal.run/v1",
                 "model": "Qwen/Qwen3-VL-30B-A3B-Instruct",
@@ -738,6 +768,36 @@ class SAM3AreaRequest(BaseModel):
             },
             "gsd": 0.5,
             "confidence_threshold": 0.5
+        },
+        "examples": {
+            "base64_image": {
+                "summary": "Using base64-encoded image",
+                "value": {
+                    "prompt": "solar panels",
+                    "image_b64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+                    "llm_config": {
+                        "base_url": "https://rockstar4119--qwen3-vl-vllm-server-30b-vllm-server.modal.run/v1",
+                        "model": "Qwen/Qwen3-VL-30B-A3B-Instruct",
+                        "api_key": ""
+                    },
+                    "gsd": 0.5,
+                    "confidence_threshold": 0.5
+                }
+            },
+            "url_image": {
+                "summary": "Using image URL",
+                "value": {
+                    "prompt": "solar panels",
+                    "image_url": "https://example.com/satellite-image.jpg",
+                    "llm_config": {
+                        "base_url": "https://rockstar4119--qwen3-vl-vllm-server-30b-vllm-server.modal.run/v1",
+                        "model": "Qwen/Qwen3-VL-30B-A3B-Instruct",
+                        "api_key": ""
+                    },
+                    "gsd": 0.5,
+                    "confidence_threshold": 0.5
+                }
+            }
         }
     })
     
@@ -790,7 +850,7 @@ class SAM3SegmentRequest(BaseModel):
     model_config = ConfigDict(json_schema_extra={
         "example": {
             "prompt": "segment all ships in the harbor",
-            "image_url": "https://example.com/harbor-image.jpg",
+            "image_b64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
             "llm_config": {
                 "base_url": "https://rockstar4119--qwen3-vl-vllm-server-30b-vllm-server.modal.run/v1",
                 "model": "Qwen/Qwen3-VL-30B-A3B-Instruct",
@@ -803,7 +863,51 @@ class SAM3SegmentRequest(BaseModel):
                 "overlap_ratio": 0.15,
                 "scales": [1.0, 0.5],
                 "batch_size": 16,
-                "iou_threshold": 0.5
+                "iou_threshold": 0.7
+            }
+        },
+        "examples": {
+            "base64_image": {
+                "summary": "Using base64-encoded image",
+                "value": {
+                    "prompt": "segment all ships in the harbor",
+                    "image_b64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+                    "llm_config": {
+                        "base_url": "https://rockstar4119--qwen3-vl-vllm-server-30b-vllm-server.modal.run/v1",
+                        "model": "Qwen/Qwen3-VL-30B-A3B-Instruct",
+                        "api_key": ""
+                    },
+                    "debug": True,
+                    "confidence_threshold": 0.5,
+                    "pyramidal_config": {
+                        "tile_size": 512,
+                        "overlap_ratio": 0.15,
+                        "scales": [1.0, 0.5],
+                        "batch_size": 16,
+                        "iou_threshold": 0.7
+                    }
+                }
+            },
+            "url_image": {
+                "summary": "Using image URL",
+                "value": {
+                    "prompt": "segment all ships in the harbor",
+                    "image_url": "https://example.com/harbor-image.jpg",
+                    "llm_config": {
+                        "base_url": "https://rockstar4119--qwen3-vl-vllm-server-30b-vllm-server.modal.run/v1",
+                        "model": "Qwen/Qwen3-VL-30B-A3B-Instruct",
+                        "api_key": ""
+                    },
+                    "debug": True,
+                    "confidence_threshold": 0.5,
+                    "pyramidal_config": {
+                        "tile_size": 512,
+                        "overlap_ratio": 0.15,
+                        "scales": [1.0, 0.5],
+                        "batch_size": 16,
+                        "iou_threshold": 0.7
+                    }
+                }
             }
         }
     })
@@ -1284,7 +1388,7 @@ Output ONLY the alternative keyword (2-3 words max), nothing else:"""
                 "overlap_ratio": 0.15,
                 "scales": [1.0, 0.5],
                 "batch_size": 16,
-                "iou_threshold": 0.5,
+                "iou_threshold": 0.7,
             }
             if pyramidal_config:
                 config.update(pyramidal_config)
@@ -1514,14 +1618,57 @@ Output ONLY the alternative keyword (2-3 words max), nothing else:"""
         
         return intersection / union if union > 0 else 0
 
-    def _apply_nms(self, detections, iou_threshold: float):
+    def _calculate_mask_iou(self, mask_rle1: Dict, mask_rle2: Dict) -> float:
+        """
+        Calculate Intersection over Union between two RLE-encoded masks.
+        More accurate than box-based IoU for irregular shapes.
+        
+        Args:
+            mask_rle1, mask_rle2: RLE-encoded mask dicts with 'counts' and 'size'
+            
+        Returns:
+            IoU value (0-1), or -1 on error (caller should fallback to box IoU)
+        """
+        import numpy as np
+        import pycocotools.mask as mask_utils
+        
+        try:
+            # Prepare RLE for decoding (handle string counts from JSON serialization)
+            def prepare_rle(rle):
+                if isinstance(rle, dict) and 'counts' in rle:
+                    rle_copy = rle.copy()
+                    if isinstance(rle_copy['counts'], str):
+                        rle_copy['counts'] = rle_copy['counts'].encode('utf-8')
+                    return rle_copy
+                return rle
+            
+            rle1 = prepare_rle(mask_rle1)
+            rle2 = prepare_rle(mask_rle2)
+            
+            # Check size compatibility
+            if rle1.get('size') != rle2.get('size'):
+                return -1  # Signal caller to fallback to box IoU
+            
+            # Use pycocotools for efficient IoU calculation
+            iou = mask_utils.iou([rle1], [rle2], [False])[0][0]
+            return float(iou)
+            
+        except Exception as e:
+            # Log error and signal caller to fallback
+            print(f"⚠ Mask IoU calculation failed: {e}, falling back to box IoU")
+            return -1
+
+    def _apply_nms(self, detections, iou_threshold: float, use_mask_iou: bool = True):
         """
         Apply Non-Maximum Suppression to remove duplicate detections.
         Prefers higher scores, then finer scales.
         
         Args:
-            detections: List of detection dicts with 'box', 'score', 'scale', 'mask'
+            detections: List of detection dicts with 'box', 'score', 'scale', 'mask_rle'
             iou_threshold: IoU threshold for suppression
+            use_mask_iou: If True, use mask-based IoU (more accurate for irregular shapes).
+                          Falls back to box-based IoU if masks unavailable or on error.
+                          Default: True for better accuracy.
             
         Returns:
             Filtered list of detections
@@ -1539,10 +1686,25 @@ Output ONLY the alternative keyword (2-3 words max), nothing else:"""
         while detections:
             current = detections.pop(0)
             keep.append(current)
-            detections = [
-                d for d in detections
-                if self._calculate_iou(current['box'], d['box']) < iou_threshold
-            ]
+            
+            # Filter remaining detections based on IoU
+            remaining = []
+            for d in detections:
+                iou = -1  # Default: will trigger box fallback
+                
+                # Try mask-based IoU if enabled and masks available
+                if use_mask_iou and 'mask_rle' in current and 'mask_rle' in d:
+                    iou = self._calculate_mask_iou(current['mask_rle'], d['mask_rle'])
+                
+                # Fallback to box-based IoU if mask IoU failed or not available
+                if iou < 0:
+                    iou = self._calculate_iou(current['box'], d['box'])
+                
+                # Keep detection if IoU is below threshold
+                if iou < iou_threshold:
+                    remaining.append(d)
+            
+            detections = remaining
         
         return keep
 
@@ -1598,7 +1760,7 @@ Output ONLY the alternative keyword (2-3 words max), nothing else:"""
         tile_size: int = 512,
         overlap_ratio: float = 0.15,
         scales: Optional[List[float]] = None,
-        iou_threshold: float = 0.5,
+        iou_threshold: float = 0.7,
         confidence_threshold: float = 0.5,
         batch_size: int = 16,
     ) -> Dict[str, Any]:
@@ -1617,7 +1779,7 @@ Output ONLY the alternative keyword (2-3 words max), nothing else:"""
             tile_size: Size of each tile (default: 512)
             overlap_ratio: Overlap between tiles (default: 0.15)
             scales: List of scales for pyramid (default: [1.0, 0.5])
-            iou_threshold: IoU threshold for NMS (default: 0.5)
+            iou_threshold: IoU threshold for NMS (default: 0.7)
             confidence_threshold: Minimum confidence threshold (default: 0.5)
             batch_size: Batch size for processing tiles (default: 16)
             
@@ -1856,7 +2018,7 @@ Output ONLY the alternative keyword (2-3 words max), nothing else:"""
         tile_size: int = 512,
         overlap_ratio: float = 0.15,
         scales: Optional[List[float]] = None,
-        iou_threshold: float = 0.5,
+        iou_threshold: float = 0.7,
         confidence_threshold: float = 0.5,
         batch_size: int = 16,
     ) -> Dict[str, Any]:
@@ -1900,7 +2062,7 @@ Output ONLY the alternative keyword (2-3 words max), nothing else:"""
                 - overlap_ratio: Overlap between tiles (default: 0.15)
                 - scales: List of scales (default: [1.0, 0.5])
                 - batch_size: Batch size (default: 16)
-                - iou_threshold: NMS IoU threshold (default: 0.5)
+                - iou_threshold: NMS IoU threshold (default: 0.7)
             max_retries: Maximum retry attempts with rephrased prompts (default: 2)
         
         Returns:
@@ -1929,7 +2091,7 @@ Output ONLY the alternative keyword (2-3 words max), nothing else:"""
             "overlap_ratio": 0.15,
             "scales": [1.0, 0.5],
             "batch_size": 16,
-            "iou_threshold": 0.5,
+            "iou_threshold": 0.7,
         }
         if pyramidal_config:
             config.update(pyramidal_config)
@@ -2067,7 +2229,7 @@ Output ONLY the alternative keyword (2-3 words max), nothing else:"""
                 - overlap_ratio: Overlap between tiles (default: 0.15)
                 - scales: List of scales (default: [1.0, 0.5])
                 - batch_size: Batch size (default: 16)
-                - iou_threshold: NMS IoU threshold (default: 0.5)
+                - iou_threshold: NMS IoU threshold (default: 0.7)
             max_retries: Maximum retry attempts with rephrased prompts (default: 2)
         
         Returns:
@@ -2096,7 +2258,7 @@ Output ONLY the alternative keyword (2-3 words max), nothing else:"""
             "overlap_ratio": 0.15,
             "scales": [1.0, 0.5],
             "batch_size": 16,
-            "iou_threshold": 0.5,
+            "iou_threshold": 0.7,
         }
         if pyramidal_config:
             config.update(pyramidal_config)
@@ -2368,7 +2530,7 @@ Now analyze the image and query."""
             "overlap_ratio": 0.15,
             "scales": [1.0, 0.5],
             "batch_size": 16,
-            "iou_threshold": 0.5,
+            "iou_threshold": 0.7,
         }
         if pyramidal_config:
             config.update(pyramidal_config)
@@ -2513,7 +2675,7 @@ Now analyze the image and query."""
                 - overlap_ratio: Overlap ratio between tiles (default: 0.15)
                 - scales: Scale factors for multi-scale detection (default: [1.0, 0.5])
                 - batch_size: Batch size for inference (default: 16)
-                - iou_threshold: IoU threshold for NMS deduplication (default: 0.5)
+                - iou_threshold: IoU threshold for NMS deduplication (default: 0.7)
         
         Returns:
             Dict with status, regions, summary, and optional debug visualization
@@ -2572,7 +2734,7 @@ Now analyze the image and query."""
                 "overlap_ratio": 0.15,
                 "scales": [1.0, 0.5],
                 "batch_size": 16,
-                "iou_threshold": 0.5,
+                "iou_threshold": 0.7,
             }
             call_sam_service = partial(
                 self.call_sam_service_pyramidal,
@@ -2697,7 +2859,7 @@ Now analyze the image and query."""
                         "regions": regions,
                         "debug_image_b64": debug_image_b64,
                         "raw_sam3_json": raw_json,
-                        "agent_history": agent_history,  # Include agent history for debugging
+                        # "agent_history": agent_history,  # Include agent history for debugging
                         "llm_config": {
                             "name": llm_config["name"],
                             "model": llm_config["model"],
