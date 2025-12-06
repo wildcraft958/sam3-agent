@@ -1955,7 +1955,7 @@ Output ONLY the alternative keyword (2-3 words max), nothing else:"""
                         stats.setdefault("tile_errors", []).append({
                             "tile_idx": i,
                             "scale": scale,
-                            "offset": tile_offsets[i],
+                            "offset": list(tile_offsets[i]),
                             "error": str(e),
                         })
                         continue
