@@ -94,7 +94,7 @@ image = (
         "pandas",
         "scipy",
         "fastapi",  # Required for fastapi_endpoint decorator
-        "requests",  # For downloading images from URLs
+        "httpx",  # For downloading images from URLs (better headers, redirect handling)
         "pydantic",  # For VLM response validation
     )
     .env({"PYTHONPATH": "/root/sam3"})
@@ -150,7 +150,7 @@ class VLMInterface:
         Returns:
             Generated text response or None on error
         """
-        import requests
+        import httpx
         from PIL import Image
         
         # Handle image input
@@ -185,22 +185,22 @@ class VLMInterface:
             headers["Authorization"] = f"Bearer {self.api_key}"
         
         try:
-            response = requests.post(
-                self.endpoint,
-                json=payload,
-                headers=headers,
-                timeout=self.timeout
-            )
-            
-            if response.status_code == 200:
-                result = response.json()
-                return result["choices"][0]["message"]["content"]
-            else:
-                print(f"❌ vLLM API Error: {response.status_code}")
-                print(f"Response: {response.text[:500]}")
-                return None
+            with httpx.Client(timeout=self.timeout) as client:
+                response = client.post(
+                    self.endpoint,
+                    json=payload,
+                    headers=headers
+                )
+                
+                if response.status_code == 200:
+                    result = response.json()
+                    return result["choices"][0]["message"]["content"]
+                else:
+                    print(f"❌ vLLM API Error: {response.status_code}")
+                    print(f"Response: {response.text[:500]}")
+                    return None
         
-        except requests.exceptions.Timeout:
+        except httpx.TimeoutException:
             print(f"❌ Request timeout after {self.timeout}s")
             return None
         except Exception as e:
@@ -714,7 +714,7 @@ class SAM3CountRequest(BaseModel):
     })
     
     prompt: str = Field(..., description="What objects to count (e.g., 'trees', 'cars', 'buildings')")
-    image_url: Optional[str] = Field(None, description="Image URL (HTTP/HTTPS URL or data URI format: data:image/<type>;base64,<base64_string>)")
+    image_url: Optional[str] = Field(None, description="Image URL (REQUIRED) - HTTP/HTTPS URL or data URI format: data:image/<type>;base64,<base64_string>. Supports image hosting services, but some may return 403 Forbidden errors.")
     llm_config: LLMConfig = Field(..., description="VLM configuration for prompt refinement")
     confidence_threshold: Optional[float] = Field(0.3, ge=0.0, le=1.0, description="Minimum confidence threshold")
     max_retries: Optional[int] = Field(2, ge=0, le=5, description="Maximum retry attempts for verification")
@@ -801,7 +801,7 @@ class SAM3AreaRequest(BaseModel):
     })
     
     prompt: str = Field(..., description="What objects to measure (e.g., 'solar panels', 'buildings')")
-    image_url: Optional[str] = Field(None, description="Image URL (HTTP/HTTPS URL or data URI format: data:image/<type>;base64,<base64_string>)")
+    image_url: Optional[str] = Field(None, description="Image URL (REQUIRED) - HTTP/HTTPS URL or data URI format: data:image/<type>;base64,<base64_string>. Supports image hosting services, but some may return 403 Forbidden errors.")
     llm_config: LLMConfig = Field(..., description="VLM configuration for prompt refinement")
     gsd: Optional[float] = Field(None, gt=0, description="Ground Sample Distance in meters/pixel")
     confidence_threshold: Optional[float] = Field(0.3, ge=0.0, le=1.0, description="Minimum confidence threshold")
@@ -911,7 +911,7 @@ class SAM3SegmentRequest(BaseModel):
     })
     
     prompt: str = Field(..., description="Segmentation prompt (e.g., 'segment all ships')")
-    image_url: Optional[str] = Field(None, description="Image URL (HTTP/HTTPS URL or data URI format: data:image/<type>;base64,<base64_string>)")
+    image_url: Optional[str] = Field(None, description="Image URL (REQUIRED) - HTTP/HTTPS URL or data URI format: data:image/<type>;base64,<base64_string>. Supports image hosting services, but some may return 403 Forbidden errors.")
     llm_config: LLMConfig = Field(..., description="LLM/VLM configuration")
     debug: Optional[bool] = Field(False, description="Return debug visualization")
     confidence_threshold: Optional[float] = Field(0.3, ge=0.0, le=1.0, description="Minimum confidence threshold")
@@ -2951,7 +2951,7 @@ Supports any OpenAI-compatible API (OpenAI, vLLM, Anthropic, etc.)
     # Helper function to get image bytes
     def get_image_bytes(image_url: Optional[str]) -> bytes:
         """Get image bytes from image_url (supports HTTP/HTTPS URLs and data URIs) with validation"""
-        import requests
+        import httpx
         from PIL import Image as PILImage
         
         if not image_url:
@@ -2978,12 +2978,36 @@ Supports any OpenAI-compatible API (OpenAI, vLLM, Anthropic, etc.)
             # Assume it's an HTTP/HTTPS URL
             try:
                 print(f"📥 Downloading image from: {image_url}")
-                resp = requests.get(image_url, timeout=30)
-                resp.raise_for_status()
-                image_bytes = resp.content
+                with httpx.Client(follow_redirects=True, timeout=30.0) as client:
+                    resp = client.get(image_url)
+                    
+                    # Check status code directly instead of using raise_for_status()
+                    if resp.status_code == 403:
+                        raise HTTPException(
+                            status_code=403,
+                            detail=f"Forbidden: Image hosting service blocked the request. URL: {image_url}. Solution: Use data URI format (data:image/...;base64,...) instead."
+                        )
+                    elif resp.status_code >= 400:
+                        raise HTTPException(
+                            status_code=resp.status_code,
+                            detail=f"Failed to download image from URL (HTTP {resp.status_code}): {resp.text[:200]}"
+                        )
+                    
+                    image_bytes = resp.content
                 print(f"✓ Downloaded image: {len(image_bytes)} bytes")
+            except HTTPException:
+                # Re-raise HTTPExceptions (403, 408, etc.) as-is
+                raise
+            except httpx.TimeoutException:
+                raise HTTPException(
+                    status_code=408,
+                    detail=f"Request timeout: Failed to download image from URL within 30 seconds: {image_url}"
+                )
             except Exception as e:
-                raise HTTPException(status_code=400, detail=f"Failed to download image from URL: {e}")
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Failed to download image from URL: {e}"
+                )
         
         # Validate image can be opened
         if image_bytes:
@@ -3025,6 +3049,12 @@ Count specific objects in an image using VLM-enhanced pyramidal SAM3 segmentatio
 The VLM refines your prompt into optimal visual keywords, then SAM3 detects and counts
 all matching objects with verification to reduce false positives.
 
+**Image URL Requirements:**
+- `image_url` is required (despite being marked Optional for backwards compatibility)
+- Supports HTTP/HTTPS URLs and data URIs (data:image/...;base64,...)
+- Some image hosting services may return 403 Forbidden - use data URIs as fallback
+- Image must be a valid image format (JPEG, PNG, etc.)
+
 **Example prompts:**
 - "trees" - counts all trees
 - "cars in the parking lot" - counts parked cars
@@ -3032,8 +3062,10 @@ all matching objects with verification to reduce false positives.
         """,
         responses={
             200: {"description": "Successful count", "model": SAM3CountResponse},
-            400: {"description": "Invalid request"},
-            500: {"description": "Server error"}
+            400: {"description": "Bad request - Missing image_url, invalid image URL format, invalid image data, base64 decode errors, or missing required fields"},
+            403: {"description": "Forbidden - Image hosting service blocked the request (403 Client Error). Solution: Use data URI format (data:image/...;base64,...) instead of HTTP URL"},
+            408: {"description": "Request timeout - Failed to download image from URL within 30 seconds"},
+            500: {"description": "Server error - Internal processing error during segmentation or VLM verification"}
         }
     )
     async def count_objects(request: SAM3CountRequest):
@@ -3081,6 +3113,12 @@ pyramidal SAM3 segmentation.
 Optionally provide a Ground Sample Distance (GSD) in meters/pixel to get real-world
 area measurements in square meters.
 
+**Image URL Requirements:**
+- `image_url` is required (despite being marked Optional for backwards compatibility)
+- Supports HTTP/HTTPS URLs and data URIs (data:image/...;base64,...)
+- Some image hosting services may return 403 Forbidden - use data URIs as fallback
+- Image must be a valid image format (JPEG, PNG, etc.)
+
 **Example prompts:**
 - "solar panels" - measures solar panel coverage
 - "buildings" - measures building footprints
@@ -3088,8 +3126,10 @@ area measurements in square meters.
         """,
         responses={
             200: {"description": "Successful area calculation", "model": SAM3AreaResponse},
-            400: {"description": "Invalid request"},
-            500: {"description": "Server error"}
+            400: {"description": "Bad request - Missing image_url, invalid image URL format, invalid image data, base64 decode errors, missing required fields, or invalid GSD (must be > 0)"},
+            403: {"description": "Forbidden - Image hosting service blocked the request (403 Client Error). Solution: Use data URI format (data:image/...;base64,...) instead of HTTP URL"},
+            408: {"description": "Request timeout - Failed to download image from URL within 30 seconds"},
+            500: {"description": "Server error - Internal processing error during segmentation, VLM verification, or area calculation"}
         }
     )
     async def calculate_area(request: SAM3AreaRequest):
@@ -3137,6 +3177,12 @@ Perform full image segmentation using LLM-guided SAM3 agent with pyramidal batch
 The LLM analyzes your prompt to understand what objects to segment, then guides SAM3
 to produce accurate segmentation masks for all matching objects.
 
+**Image URL Requirements:**
+- `image_url` is required (despite being marked Optional for backwards compatibility)
+- Supports HTTP/HTTPS URLs and data URIs (data:image/...;base64,...)
+- Some image hosting services may return 403 Forbidden - use data URIs as fallback
+- Image must be a valid image format (JPEG, PNG, etc.)
+
 **Example prompts:**
 - "segment all ships in the harbor"
 - "find and segment all vehicles on the road"
@@ -3146,8 +3192,10 @@ Set `debug=true` to receive a visualization image in the response.
         """,
         responses={
             200: {"description": "Successful segmentation", "model": SAM3SegmentResponse},
-            400: {"description": "Invalid request"},
-            500: {"description": "Server error"}
+            400: {"description": "Bad request - Missing image_url, invalid image URL format, invalid image data, base64 decode errors, or missing required fields"},
+            403: {"description": "Forbidden - Image hosting service blocked the request (403 Client Error). Solution: Use data URI format (data:image/...;base64,...) instead of HTTP URL"},
+            408: {"description": "Request timeout - Failed to download image from URL within 30 seconds"},
+            500: {"description": "Server error - Internal processing error during segmentation or LLM agent execution"}
         }
     )
     async def segment_image(request: SAM3SegmentRequest):

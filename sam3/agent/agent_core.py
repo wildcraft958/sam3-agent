@@ -22,7 +22,6 @@ from .helpers.pyramidal_tiling import (
 )
 import re
 import base64
-import requests
 import numpy as np
 from io import BytesIO
 import torch
