@@ -994,6 +994,7 @@ class SAM3SegmentRequest(BaseModel):
     confidence_threshold: Optional[float] = Field(0.3, ge=0.0, le=1.0, description="Minimum confidence threshold")
     pyramidal_config: Optional[PyramidalConfig] = Field(None, description="Pyramidal processing configuration")
     include_obb: Optional[bool] = Field(False, description="Include oriented bounding boxes (OBB) in response")
+    obb_as_polygon: Optional[bool] = Field(False, description="Return OBB as polygon coordinates instead of parametric format [cx, cy, w, h, angle]")
 
 
 class RegionInfo(BaseModel):
@@ -1655,16 +1656,52 @@ Output ONLY the alternative keyword (2-3 words max), nothing else:"""
             return None
 
     @staticmethod
-    def _obb_to_polygon(obb: List[float]) -> Optional[List[List[float]]]:
+    def _normalize_obb(obb: List[float], image_width: int, image_height: int) -> Optional[List[float]]:
+        """
+        Normalize OBB parametric representation with respect to image dimensions.
+        
+        Args:
+            obb: [cx, cy, w, h, angle] in pixel coordinates
+            image_width: Image width in pixels
+            image_height: Image height in pixels
+            
+        Returns:
+            Normalized OBB as [cx/width, cy/height, w/width, h/height, angle] or None if invalid
+        """
+        if obb is None or len(obb) != 5:
+            return None
+        
+        if image_width <= 0 or image_height <= 0:
+            return None
+        
+        try:
+            cx, cy, w, h, angle = obb
+            return [
+                float(cx) / image_width,
+                float(cy) / image_height,
+                float(w) / image_width,
+                float(h) / image_height,
+                float(angle)  # Angle remains unchanged
+            ]
+        except Exception as e:
+            print(f"⚠ Error normalizing OBB: {e}")
+            return None
+
+    @staticmethod
+    def _obb_to_polygon(obb: List[float], image_width: Optional[int] = None, image_height: Optional[int] = None) -> Optional[List[List[float]]]:
         """
         Convert OBB parametric representation to polygon coordinates.
         
         Args:
-            obb: [cx, cy, w, h, angle] in degrees
+            obb: [cx, cy, w, h, angle] in degrees (normalized or pixel coordinates)
+            image_width: Optional image width for normalization (if None, returns pixel coordinates)
+            image_height: Optional image height for normalization (if None, returns pixel coordinates)
             
         Returns:
             Polygon as list of 4 corner points: [[x1, y1], [x2, y2], [x3, y3], [x4, y4]]
-            or None if obb is None or invalid
+            Coordinates are normalized to [0, 1] if image_width and image_height are provided,
+            otherwise in pixel coordinates.
+            Returns None if obb is None or invalid
         """
         import numpy as np
         
@@ -1702,6 +1739,11 @@ Output ONLY the alternative keyword (2-3 words max), nothing else:"""
             
             # Translate to center position
             polygon = rotated_corners + np.array([cx, cy])
+            
+            # Normalize polygon coordinates if image dimensions provided
+            if image_width is not None and image_height is not None and image_width > 0 and image_height > 0:
+                polygon[:, 0] = polygon[:, 0] / image_width
+                polygon[:, 1] = polygon[:, 1] / image_height
             
             # Convert to list of lists
             return polygon.tolist()
@@ -2570,11 +2612,16 @@ Output ONLY the alternative keyword (2-3 words max), nothing else:"""
             for det in verified_detections:
                 if 'mask_rle' in det:
                     obb = self._generate_obb_from_mask_rle(det['mask_rle'], image_shape)
-                    det['obb'] = obb
-                    # Convert to polygon if requested
+                    # Normalize OBB and polygon if requested
                     if obb_as_polygon and obb is not None:
-                        obb_polygon = self._obb_to_polygon(obb)
+                        # Normalize OBB parametric format
+                        normalized_obb = self._normalize_obb(obb, orig_w, orig_h)
+                        det['obb'] = normalized_obb
+                        # Convert to normalized polygon
+                        obb_polygon = self._obb_to_polygon(obb, orig_w, orig_h)
                         det['obb_polygon'] = obb_polygon
+                    else:
+                        det['obb'] = obb
         
         return {
             "status": "success",
@@ -2782,11 +2829,16 @@ Output ONLY the alternative keyword (2-3 words max), nothing else:"""
                 # Generate OBB if requested
                 if include_obb and mask_rle:
                     obb = self._generate_obb_from_mask_rle(mask_rle, image_shape)
-                    area_info["obb"] = obb
-                    # Convert to polygon if requested
+                    # Normalize OBB and polygon if requested
                     if obb_as_polygon and obb is not None:
-                        obb_polygon = self._obb_to_polygon(obb)
+                        # Normalize OBB parametric format
+                        normalized_obb = self._normalize_obb(obb, orig_w, orig_h)
+                        area_info["obb"] = normalized_obb
+                        # Convert to normalized polygon
+                        obb_polygon = self._obb_to_polygon(obb, orig_w, orig_h)
                         area_info["obb_polygon"] = obb_polygon
+                    else:
+                        area_info["obb"] = obb
                 
                 individual_areas.append(area_info)
                 print(f"  Object {idx+1}: {area_m2:.2f} m² ({pixel_area} pixels)")
@@ -3288,11 +3340,16 @@ Now analyze the image and query."""
                             mask_rle = region.get("mask") or region.get("mask_rle")
                             if mask_rle:
                                 obb = self._generate_obb_from_mask_rle(mask_rle, image_shape)
-                                region["obb"] = obb
-                                # Convert to polygon if requested
+                                # Normalize OBB and polygon if requested
                                 if obb_as_polygon and obb is not None:
-                                    obb_polygon = self._obb_to_polygon(obb)
+                                    # Normalize OBB parametric format
+                                    normalized_obb = self._normalize_obb(obb, orig_w, orig_h)
+                                    region["obb"] = normalized_obb
+                                    # Convert to normalized polygon
+                                    obb_polygon = self._obb_to_polygon(obb, orig_w, orig_h)
                                     region["obb_polygon"] = obb_polygon
+                                else:
+                                    region["obb"] = obb
 
                     # Ensure all data is JSON-serializable before returning
                     raw_json = make_json_serializable(raw_json)

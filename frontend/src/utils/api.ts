@@ -1,7 +1,7 @@
 import axios from 'axios';
 
 // Modal deployment base URL - can be overridden via environment variable
-const MODAL_BASE_URL = import.meta.env.VITE_MODAL_BASE_URL || 'https://rockstar4119--sam3-agent-pyramidal-v2-fastapi-app.modal.run';
+const MODAL_BASE_URL = import.meta.env.VITE_MODAL_BASE_URL || 'https://animerj958--sam3-agent-pyramidal-v2-fastapi-app.modal.run';
 
 // API endpoints - constructed from base URL
 const API_ENDPOINT = `${MODAL_BASE_URL}/sam3/segment`;
