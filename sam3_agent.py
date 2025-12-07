@@ -741,6 +741,7 @@ class DetectionInfo(BaseModel):
     score: float = Field(..., description="Confidence score")
     box: List[float] = Field(..., description="Bounding box [x1, y1, x2, y2]")
     pixel_area: Optional[int] = Field(None, description="Area in pixels")
+    obb: Optional[List[float]] = Field(None, description="Oriented bounding box [cx, cy, w, h, angle] in degrees")
 
 
 class SAM3CountResponse(BaseModel):
@@ -830,6 +831,7 @@ class IndividualArea(BaseModel):
     real_area_m2: Optional[float] = Field(None, description="Real area in square meters (if GSD provided)")
     score: float = Field(..., description="Confidence score")
     box: List[float] = Field(..., description="Bounding box [x1, y1, x2, y2]")
+    obb: Optional[List[float]] = Field(None, description="Oriented bounding box [cx, cy, w, h, angle] in degrees")
 
 
 class SAM3AreaResponse(BaseModel):
@@ -938,6 +940,7 @@ class RegionInfo(BaseModel):
     label: str = Field(..., description="Region label")
     score: float = Field(..., description="Confidence score")
     box: List[float] = Field(..., description="Bounding box [x1, y1, x2, y2]")
+    obb: Optional[List[float]] = Field(None, description="Oriented bounding box [cx, cy, w, h, angle] in degrees")
     mask_rle: Optional[Dict[str, Any]] = Field(None, description="RLE-encoded mask")
 
 
@@ -1362,6 +1365,100 @@ Output ONLY the alternative keyword (2-3 words max), nothing else:"""
         except Exception as e:
             print(f"⚠ Error calculating mask area: {e}")
             return 0.0
+
+    @staticmethod
+    def _generate_obb_from_mask_rle(
+        mask_rle: Dict,
+        image_shape: Tuple[int, int],
+        min_contour_area: int = 10,
+        min_obb_size: float = 5.0
+    ) -> Optional[List[float]]:
+        """
+        Generate OBB from RLE-encoded mask.
+        
+        Args:
+            mask_rle: RLE-encoded mask dict with 'counts' and 'size'
+            image_shape: (height, width) of original image
+            min_contour_area: Minimum contour area in pixels
+            min_obb_size: Minimum OBB width/height in pixels
+            
+        Returns:
+            OBB as [cx, cy, w, h, angle] or None if invalid
+            Format: [center_x, center_y, width, height, angle_in_degrees]
+            Angle is normalized to 0-180 degrees
+        """
+        import numpy as np
+        import cv2
+        import pycocotools.mask as mask_utils
+        
+        try:
+            # Decode RLE to binary mask
+            mask_rle_for_decode = mask_rle
+            if isinstance(mask_rle, dict) and 'counts' in mask_rle:
+                counts = mask_rle['counts']
+                if isinstance(counts, str):
+                    mask_rle_for_decode = mask_rle.copy()
+                    mask_rle_for_decode['counts'] = counts.encode('utf-8')
+            
+            mask_binary = mask_utils.decode(mask_rle_for_decode)
+            
+            # Handle mask dimensions
+            if mask_binary.ndim > 2:
+                mask_binary = mask_binary.squeeze()
+            if mask_binary.ndim == 3:
+                mask_binary = mask_binary[:, :, 0] if mask_binary.shape[2] == 1 else mask_binary.max(axis=2)
+            
+            # Resize mask if needed to match image shape
+            if mask_binary.shape[:2] != image_shape:
+                from scipy.ndimage import zoom
+                zoom_factors = (
+                    image_shape[0] / mask_binary.shape[0],
+                    image_shape[1] / mask_binary.shape[1]
+                )
+                mask_binary = zoom(mask_binary.astype(float), zoom_factors, order=0) > 0.5
+            
+            # Binarize
+            mask_binary = (mask_binary > 0.5).astype(np.uint8)
+            
+            if mask_binary.sum() == 0:
+                return None
+            
+            # Find contours
+            cnts, _ = cv2.findContours(
+                mask_binary,
+                cv2.RETR_EXTERNAL,
+                cv2.CHAIN_APPROX_SIMPLE
+            )
+            
+            if len(cnts) == 0:
+                return None
+            
+            # Get largest contour
+            cnt = max(cnts, key=cv2.contourArea)
+            
+            if cv2.contourArea(cnt) < min_contour_area:
+                return None
+            
+            # Compute OBB
+            rect = cv2.minAreaRect(cnt)
+            (cx, cy), (w, h), angle = rect
+            
+            # Normalize angle (OpenCV returns angle where width may be < height)
+            if w < h:
+                angle = angle + 90
+                w, h = h, w
+            
+            angle = angle % 180
+            
+            # Validate OBB size
+            if w < min_obb_size or h < min_obb_size:
+                return None
+            
+            return [float(cx), float(cy), float(w), float(h), float(angle)]
+            
+        except Exception as e:
+            print(f"⚠ Error generating OBB from mask: {e}")
+            return None
 
     @modal.method()
     def sam3_infer_only(

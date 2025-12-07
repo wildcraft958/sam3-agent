@@ -124,6 +124,15 @@ export interface HealthResponse {
   service: string;
 }
 
+// Helper functions to get endpoints (for runtime configuration support)
+function getApiEndpoint(): string {
+  return API_ENDPOINT;
+}
+
+function getInferEndpoint(): string {
+  return COUNT_ENDPOINT;
+}
+
 export async function segmentImage(
   request: SegmentRequest,
   signal?: AbortSignal
@@ -133,8 +142,8 @@ export async function segmentImage(
   console.log('[API] Starting segmentImage request', {
     endpoint: endpoint,
     prompt: request.prompt?.substring(0, 50) + '...',
-    hasImage: !!request.image_b64,
-    imageSize: request.image_b64 ? `${Math.round(request.image_b64.length / 1024)}KB` : 'N/A',
+    hasImage: !!request.image_url,
+    imageSize: request.image_url ? (request.image_url.startsWith('data:') ? `${Math.round((request.image_url.length - request.image_url.indexOf(',') - 1) * 3 / 4 / 1024)}KB` : 'URL') : 'N/A',
   });
 
   try {
@@ -251,6 +260,15 @@ export async function countImage(
   request: CountRequest,
   signal?: AbortSignal
 ): Promise<CountResponse> {
+  const endpoint = COUNT_ENDPOINT;
+  const startTime = Date.now();
+  console.log('[API] Starting countImage request', {
+    endpoint: endpoint,
+    prompt: request.prompt?.substring(0, 50) + '...',
+    hasImage: !!request.image_url,
+    imageSize: request.image_url ? (request.image_url.startsWith('data:') ? `${Math.round((request.image_url.length - request.image_url.indexOf(',') - 1) * 3 / 4 / 1024)}KB` : 'URL') : 'N/A',
+  });
+
   try {
     const response = await axios.post<CountResponse>(COUNT_ENDPOINT, request, {
       headers: {
@@ -261,15 +279,15 @@ export async function countImage(
     });
     
     const duration = Date.now() - startTime;
-    console.log('[API] inferImage request succeeded', {
+    console.log('[API] countImage request succeeded', {
       duration: `${duration}ms`,
       status: response.data.status,
-      boxesCount: response.data.pred_boxes?.length || 0,
-      masksCount: response.data.pred_masks?.length || 0,
+      count: response.data.count || 0,
+      detectionsCount: response.data.detections?.length || 0,
     });
 
     if (response.data.status === 'error') {
-      console.error('[API] inferImage returned error status', {
+      console.error('[API] countImage returned error status', {
         message: response.data.message,
         traceback: response.data.traceback,
       });
@@ -287,7 +305,7 @@ export async function countImage(
                          (!error.response && error.request);
       
       if (isCorsError) {
-        console.error('[API] CORS error detected in inferImage', {
+        console.error('[API] CORS error detected in countImage', {
           endpoint: endpoint,
           error: error.message,
           code: error.code,
@@ -301,7 +319,7 @@ export async function countImage(
 
       // Handle cancellation
       if (error.code === 'ERR_CANCELED' || error.message === 'canceled') {
-        console.log('[API] inferImage request cancelled by user');
+        console.log('[API] countImage request cancelled by user');
         return {
           status: 'error',
           message: 'Request was cancelled by user',
@@ -310,7 +328,7 @@ export async function countImage(
       
       // Handle timeout specifically
       if (error.code === 'ECONNABORTED' || error.message.includes('timeout')) {
-        console.error('[API] inferImage request timed out', {
+        console.error('[API] countImage request timed out', {
           endpoint: endpoint,
           duration: `${duration}ms`,
         });
@@ -322,7 +340,7 @@ export async function countImage(
 
       // Network errors
       if (error.code === 'ERR_NETWORK' || error.code === 'ECONNREFUSED') {
-        console.error('[API] Network error in inferImage', {
+        console.error('[API] Network error in countImage', {
           endpoint: endpoint,
           code: error.code,
           message: error.message,
@@ -333,7 +351,7 @@ export async function countImage(
         };
       }
 
-      console.error('[API] inferImage request failed', {
+      console.error('[API] countImage request failed', {
         endpoint: endpoint,
         status: error.response?.status,
         statusText: error.response?.statusText,
@@ -349,7 +367,7 @@ export async function countImage(
       };
     }
 
-    console.error('[API] Unexpected error in inferImage', {
+    console.error('[API] Unexpected error in countImage', {
       error: error instanceof Error ? error.message : String(error),
       errorType: error?.constructor?.name,
     });

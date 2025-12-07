@@ -93,8 +93,10 @@ def _process_single_batch(
     start_idx = batch_mask_indices[0]
     end_idx = batch_mask_indices[-1]
     
-    # Create visualization for this batch
-    batch_viz_path = os.path.join(sam_output_dir, f"batch_{batch_idx}_viz.png")
+    # Create visualization for this batch (use process ID for uniqueness)
+    import os as os_module
+    process_id = os_module.getpid()
+    batch_viz_path = os.path.join(sam_output_dir, f"batch_{batch_idx}_p{process_id}_viz.png")
     visualize_mask_subset(combined_output, batch_mask_indices, batch_viz_path)
     
     # Create the confidence assessment prompt
@@ -142,7 +144,14 @@ Assess each mask now:"""
                 if match:
                     mask_num = int(match.group(1))
                     confidence = match.group(2).upper()
-                    batch_confidences[mask_num - 1] = confidence
+                    # Convert 1-based mask number to 0-based index and validate bounds
+                    mask_idx = mask_num - 1
+                    if 0 <= mask_idx < len(batch_mask_indices):
+                        # Map to actual mask index in combined_output
+                        actual_mask_idx = batch_mask_indices[mask_idx]
+                        batch_confidences[actual_mask_idx] = confidence
+                    else:
+                        print(f"    ⚠️ Mask number {mask_num} out of range for batch (1-{len(batch_mask_indices)})")
             
             return {"batch_idx": batch_idx, "confidences": batch_confidences, "success": True}
         else:
@@ -254,9 +263,17 @@ def batch_assess_confidence(
                 print(f"  ❌ Batch {batch_idx + 1}/{num_batches} exception: {e}")
     
     # Combine all results
+    successful_results = 0
     for result in results:
         if result["success"]:
             confidences.update(result["confidences"])
+            successful_results += 1
+    
+    # Validate that at least some results succeeded
+    if successful_results == 0 and num_batches > 0:
+        print(f"\n  ⚠️ WARNING: All {num_batches} batches failed. No confidence assessments available.")
+    elif successful_results < num_batches:
+        print(f"\n  ⚠️ WARNING: Only {successful_results}/{num_batches} batches succeeded.")
     
     print(f"\n  ✅ All {num_batches} batches completed. Assessed {len(confidences)}/{num_masks} masks")
     
@@ -448,8 +465,10 @@ def assess_cluster_with_crop(
     """
     boxes = combined_output.get("pred_boxes", [])
     
-    # Create crop for this cluster
-    crop_path = os.path.join(sam_output_dir, f"cluster_{cluster_id}_crop.png")
+    # Create crop for this cluster (use process ID for uniqueness)
+    import os as os_module
+    process_id = os_module.getpid()
+    crop_path = os.path.join(sam_output_dir, f"cluster_{cluster_id}_p{process_id}_crop.png")
     try:
         crop_path, crop_box = create_cluster_crop(img_path, boxes, cluster_indices, crop_path)
     except Exception as e:
@@ -458,7 +477,7 @@ def assess_cluster_with_crop(
         crop_path = img_path
     
     # Create a mini-visualization showing the cluster masks
-    cluster_viz_path = os.path.join(sam_output_dir, f"cluster_{cluster_id}_viz.png")
+    cluster_viz_path = os.path.join(sam_output_dir, f"cluster_{cluster_id}_p{process_id}_viz.png")
     try:
         visualize_mask_subset(combined_output, cluster_indices, cluster_viz_path)
     except Exception as e:
@@ -515,9 +534,16 @@ Be strict - only HIGH if confident. Assess now:"""
                 if match:
                     mask_num = int(match.group(1))
                     confidence = match.group(2).upper()
-                    # Only store if mask is in this cluster
+                    # Only store if mask is in this cluster and index is valid
                     if mask_num in mask_nums:
-                        confidences[mask_num - 1] = confidence
+                        mask_idx = mask_num - 1
+                        # Find the actual mask index in cluster_indices
+                        try:
+                            cluster_local_idx = mask_nums.index(mask_num)
+                            actual_mask_idx = cluster_indices[cluster_local_idx]
+                            confidences[actual_mask_idx] = confidence
+                        except (ValueError, IndexError):
+                            print(f"    ⚠️ Mask number {mask_num} out of range for cluster")
     except Exception as e:
         print(f"    ❌ Error assessing cluster {cluster_id}: {e}")
     
@@ -637,6 +663,11 @@ def smart_confidence_assessment(
     # Get boxes for uncertain masks only
     uncertain_boxes = [boxes[i] for i in uncertain_masks]
     
+    # Validate that we have boxes to cluster
+    if not uncertain_boxes:
+        print(f"   ⚠️ No uncertain boxes to cluster. Returning initial confidences.")
+        return initial_confidences
+    
     # Cluster the uncertain boxes
     clusters = cluster_boxes_by_proximity(uncertain_boxes, distance_threshold=0.15)
     
@@ -684,8 +715,18 @@ def smart_confidence_assessment(
                 print(f"   ❌ Cluster {cluster_id + 1}/{num_clusters} exception: {e}")
     
     # Combine all results
+    successful_clusters = 0
     for result in results:
-        final_confidences.update(result["confidences"])
+        if result.get("confidences"):
+            final_confidences.update(result["confidences"])
+            successful_clusters += 1
+    
+    # Validate that at least some clusters succeeded
+    if successful_clusters == 0 and num_clusters > 0:
+        print(f"\n   ⚠️ WARNING: All {num_clusters} clusters failed. Using initial confidences as fallback.")
+        return initial_confidences
+    elif successful_clusters < num_clusters:
+        print(f"\n   ⚠️ WARNING: Only {successful_clusters}/{num_clusters} clusters succeeded.")
     
     # Summarize final results
     final_high = sum(1 for c in final_confidences.values() if c == "HIGH")
@@ -1747,8 +1788,12 @@ DO NOT try to segment again. Analyze the existing masks shown in the image above
                                 max_workers=MAX_WORKERS,
                             )
                             
+                            # Early return if no confidence assessments were obtained
+                            if not mask_confidences:
+                                print(f"\n⚠️ No confidence assessments obtained. Skipping smart clustering.")
+                                final_mask_confidences = {}
                             # Step 2: Count MEDIUM/LOW - if too many, use smart clustering (also parallel)
-                            if mask_confidences:
+                            elif mask_confidences:
                                 med_low_count = sum(1 for c in mask_confidences.values() if c in ["MEDIUM", "LOW"])
                                 
                                 if med_low_count > UNCERTAIN_THRESHOLD:
