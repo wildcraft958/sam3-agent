@@ -3724,7 +3724,7 @@ Set `debug=true` to receive a visualization image in the response.
             # Get image bytes
             image_bytes = get_image_bytes(request.image_url)
             
-            # Convert Pydantic models to dicts
+             # Convert Pydantic models to dicts
             llm_config_dict = request.llm_config.model_dump()
             pyramidal_config_dict = request.pyramidal_config.model_dump() if request.pyramidal_config else None
             
@@ -3736,8 +3736,8 @@ Set `debug=true` to receive a visualization image in the response.
                 debug=request.debug,
                 confidence_threshold=request.confidence_threshold,
                 pyramidal_config=pyramidal_config_dict,
-                include_obb=request.include_obb,
-                obb_as_polygon=request.obb_as_polygon,
+                include_obb=True,
+                obb_as_polygon=True,
             )
             return JSONResponse(content=result)
             
