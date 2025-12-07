@@ -207,18 +207,73 @@ class VLMInterface:
                 )
                 
                 if response.status_code == 200:
-                    result = response.json()
-                    return result["choices"][0]["message"]["content"]
+                    try:
+                        result = response.json()
+                        # Validate response structure before accessing nested keys
+                        if not isinstance(result, dict):
+                            print(f"❌ vLLM API Error: Invalid response format (expected dict, got {type(result).__name__})")
+                            return None
+                        
+                        choices = result.get("choices", [])
+                        if not choices or not isinstance(choices, list) or len(choices) == 0:
+                            print(f"❌ vLLM API Error: No choices in response")
+                            print(f"Response: {response.text[:1000]}")
+                            return None
+                        
+                        message = choices[0].get("message", {})
+                        if not isinstance(message, dict):
+                            print(f"❌ vLLM API Error: Invalid message format in response")
+                            return None
+                        
+                        content = message.get("content")
+                        if content is None:
+                            print(f"❌ vLLM API Error: No content in message")
+                            print(f"Response: {response.text[:1000]}")
+                            return None
+                        
+                        return content
+                    except (json.JSONDecodeError, KeyError, TypeError) as e:
+                        print(f"❌ vLLM API Error: Failed to parse response JSON: {e}")
+                        print(f"Response: {response.text[:1000]}")
+                        return None
                 else:
-                    print(f"❌ vLLM API Error: {response.status_code}")
-                    print(f"Response: {response.text[:500]}")
+                    # Enhanced error messages for different status codes
+                    error_msg = f"❌ vLLM API Error: {response.status_code}"
+                    if response.status_code == 404:
+                        error_msg += " Response: " + response.text
+                        print(error_msg)
+                        print(f"   Endpoint: {self.endpoint}")
+                        print(f"   Model: {self.model}")
+                        print(f"   This may indicate the vLLM server is stopped or the endpoint is incorrect.")
+                    else:
+                        print(error_msg)
+                        print(f"Response: {response.text[:1000]}")
                     return None
         
         except httpx.TimeoutException:
             print(f"❌ Request timeout after {self.timeout}s")
+            print(f"   Endpoint: {self.endpoint}")
+            return None
+        except httpx.ConnectError as e:
+            print(f"❌ Connection error: {e}")
+            print(f"   Endpoint: {self.endpoint}")
+            print(f"   This may indicate the vLLM server is unreachable or stopped.")
+            return None
+        except httpx.HTTPStatusError as e:
+            print(f"❌ HTTP status error: {e}")
+            print(f"   Endpoint: {self.endpoint}")
+            if e.response is not None:
+                print(f"   Response: {e.response.text[:1000]}")
+            return None
+        except httpx.RequestError as e:
+            print(f"❌ Request error: {e}")
+            print(f"   Endpoint: {self.endpoint}")
             return None
         except Exception as e:
             print(f"❌ API Exception: {e}")
+            print(f"   Endpoint: {self.endpoint}")
+            import traceback
+            print(f"   Traceback: {traceback.format_exc()[:500]}")
             return None
 
 
@@ -733,6 +788,7 @@ class SAM3CountRequest(BaseModel):
     confidence_threshold: Optional[float] = Field(0.3, ge=0.0, le=1.0, description="Minimum confidence threshold")
     max_retries: Optional[int] = Field(2, ge=0, le=5, description="Maximum retry attempts for verification")
     pyramidal_config: Optional[PyramidalConfig] = Field(None, description="Pyramidal processing configuration")
+    include_obb: Optional[bool] = Field(False, description="Include oriented bounding boxes (OBB) in response")
 
 
 class DetectionInfo(BaseModel):
@@ -822,6 +878,7 @@ class SAM3AreaRequest(BaseModel):
     confidence_threshold: Optional[float] = Field(0.3, ge=0.0, le=1.0, description="Minimum confidence threshold")
     max_retries: Optional[int] = Field(2, ge=0, le=5, description="Maximum retry attempts for verification")
     pyramidal_config: Optional[PyramidalConfig] = Field(None, description="Pyramidal processing configuration")
+    include_obb: Optional[bool] = Field(False, description="Include oriented bounding boxes (OBB) in response")
 
 
 class IndividualArea(BaseModel):
@@ -932,6 +989,7 @@ class SAM3SegmentRequest(BaseModel):
     debug: Optional[bool] = Field(False, description="Return debug visualization")
     confidence_threshold: Optional[float] = Field(0.3, ge=0.0, le=1.0, description="Minimum confidence threshold")
     pyramidal_config: Optional[PyramidalConfig] = Field(None, description="Pyramidal processing configuration")
+    include_obb: Optional[bool] = Field(False, description="Include oriented bounding boxes (OBB) in response")
 
 
 class RegionInfo(BaseModel):
@@ -1084,8 +1142,10 @@ class SAM3Model:
         """
         from PIL import Image
         import io
+        import re
         
         image = Image.open(io.BytesIO(image_bytes)).convert('RGB')
+        image_type = image.mode  # Get image type (RGB, RGBA, etc.)
         
         REFINEMENT_TEMPLATE = """You are a visual descriptor for object segmentation on satellite images. You ONLY describe what objects look like, you NEVER count or answer questions. NEVER INCLUDE NUMBERS IN ANY FORM.
 
@@ -1110,34 +1170,83 @@ Now extract the visual descriptor:"""
         
         prompt = REFINEMENT_TEMPLATE.format(query=user_query)
         
+        def _extract_meaningful_fallback(query: str) -> str:
+            """Extract meaningful object name from query, avoiding generic words."""
+            # Generic words to avoid
+            generic_words = {'image', 'how', 'what', 'where', 'when', 'why', 'which', 'who', 
+                           'many', 'much', 'count', 'find', 'show', 'detect', 'identify',
+                           'are', 'is', 'the', 'a', 'an', 'in', 'on', 'at', 'to', 'for',
+                           'of', 'with', 'from', 'by', 'this', 'that', 'these', 'those'}
+            
+            # Remove question words and common verbs
+            query_lower = query.lower().strip()
+            
+            # Try to extract nouns (words that are capitalized or after common question patterns)
+            # Pattern: "How many X" or "Count the X" or "Find all X"
+            patterns = [
+                r'(?:how many|count|find|detect|identify|show|locate)\s+(?:the\s+)?([a-z]+(?:\s+[a-z]+){0,2})',
+                r'(?:what|which)\s+([a-z]+(?:\s+[a-z]+){0,2})',
+                r'([a-z]+(?:\s+[a-z]+){0,2})\s+(?:in|on|at|from)',
+            ]
+            
+            for pattern in patterns:
+                match = re.search(pattern, query_lower)
+                if match:
+                    candidate = match.group(1).strip()
+                    words = candidate.split()
+                    # Filter out generic words
+                    meaningful_words = [w for w in words if w not in generic_words]
+                    if meaningful_words:
+                        return ' '.join(meaningful_words[:3])  # Max 3 words
+            
+            # Fallback: take all words except generic ones
+            words = query_lower.split()
+            meaningful_words = [w for w in words if w not in generic_words and len(w) > 2]
+            if meaningful_words:
+                return ' '.join(meaningful_words[:3])
+            
+            # Last resort: return "object"
+            return "object"
+        
         try:
             response = vlm.query(image, prompt, max_tokens=64, temperature=0.3)
             
             if response is None:
                 print("⚠ VLM returned None for prompt refinement, using fallback")
-                print(f"   Original query: {user_query}")
-                return user_query.strip().lower().split()[0] if user_query.strip() else "object"
+                print(f"   Image Type: {image_type}")
+                print(f"   Question: {user_query}")
+                fallback = _extract_meaningful_fallback(user_query)
+                print(f"   Using fallback prompt: '{fallback}'")
+                return fallback
             
             # Extract the visual prompt (first line, strip whitespace)
             visual_prompt = response.strip().split('\n')[0].strip()
             # Remove quotes if present
             visual_prompt = visual_prompt.strip('"\'')
             
-            if not visual_prompt:
-                print("⚠ Empty VLM response, using fallback")
-                print(f"   Original query: {user_query}")
-                print(f"   Full VLM response: {response[:200]}")
-                return user_query.strip().lower().split()[0] if user_query.strip() else "object"
+            # Validate that prompt is not generic
+            generic_words = {'image', 'how', 'what', 'where', 'when', 'why', 'which', 'who'}
+            if not visual_prompt or visual_prompt.lower() in generic_words:
+                print("⚠ VLM response is generic or empty, using fallback")
+                print(f"   Image Type: {image_type}")
+                print(f"   Question: {user_query}")
+                print(f"   VLM response: {response[:200]}")
+                fallback = _extract_meaningful_fallback(user_query)
+                print(f"   Using fallback prompt: '{fallback}'")
+                return fallback
             
             print(f"✓ VLM refined prompt: '{user_query}' → '{visual_prompt}'")
             return visual_prompt
             
         except Exception as e:
             print(f"⚠ Error in prompt refinement: {e}")
-            print(f"   Original query: {user_query}")
+            print(f"   Image Type: {image_type}")
+            print(f"   Question: {user_query}")
             import traceback
             print(f"   Traceback: {traceback.format_exc()[:500]}")
-            return user_query.strip().lower().split()[0] if user_query.strip() else "object"
+            fallback = _extract_meaningful_fallback(user_query)
+            print(f"   Using fallback prompt: '{fallback}'")
+            return fallback
 
     def _verify_detections_with_vlm(self, image, detections: List[Dict], 
                                      query: str, visual_prompt: str, vlm: VLMInterface) -> List[Dict]:
@@ -1235,7 +1344,8 @@ Answer ONLY: yes or no"""
         return verified
 
     def _rephrase_prompt_with_vlm(self, image_bytes: bytes, original_query: str, 
-                                   previous_prompt: str, vlm: VLMInterface) -> str:
+                                   previous_prompt: str, vlm: VLMInterface, 
+                                   attempt: int = 0, used_prompts: set = None) -> str:
         """
         Generate alternative prompt when no detections found.
         
@@ -1244,14 +1354,21 @@ Answer ONLY: yes or no"""
             original_query: Original user query
             previous_prompt: Previous visual prompt that found nothing
             vlm: VLMInterface instance
+            attempt: Current attempt number (for generating diverse fallbacks)
+            used_prompts: Set of prompts already tried (to avoid duplicates)
             
         Returns:
             Alternative visual prompt (synonym/variation)
         """
         from PIL import Image
         import io
+        import re
+        
+        if used_prompts is None:
+            used_prompts = set()
         
         image = Image.open(io.BytesIO(image_bytes)).convert('RGB')
+        image_type = image.mode  # Get image type (RGB, RGBA, etc.)
         
         REPHRASE_TEMPLATE = """You are a visual descriptor for object segmentation. Generate alternative keywords (max 2-3 words).
 
@@ -1276,41 +1393,113 @@ Output ONLY the alternative keyword (2-3 words max), nothing else:"""
             previous_prompt=previous_prompt
         )
         
+        def _generate_diverse_fallback(prev_prompt: str, orig_query: str, attempt_num: int) -> str:
+            """Generate diverse fallback prompts to avoid infinite loops."""
+            words = prev_prompt.split()
+            
+            # Strategy 1: Try variations based on attempt number
+            if attempt_num == 0:
+                # First fallback: use last word if multiple words
+                if len(words) > 1:
+                    return words[-1]
+                else:
+                    # Try to extract object from original query
+                    query_lower = orig_query.lower()
+                    # Look for patterns like "storage tanks" -> "tank"
+                    patterns = [
+                        r'(\w+)\s+tanks?',
+                        r'(\w+)\s+buildings?',
+                        r'(\w+)\s+planes?',
+                        r'(\w+)\s+cars?',
+                    ]
+                    for pattern in patterns:
+                        match = re.search(pattern, query_lower)
+                        if match:
+                            return match.group(1)
+                    return prev_prompt + "s"  # Try plural
+            elif attempt_num == 1:
+                # Second fallback: try first word or add descriptor
+                if len(words) > 1:
+                    return words[0]
+                else:
+                    # Try to add a common descriptor
+                    descriptors = ["large", "small", "circular", "rectangular"]
+                    for desc in descriptors:
+                        candidate = f"{desc} {prev_prompt}"
+                        if candidate not in used_prompts:
+                            return candidate
+                    return prev_prompt
+            else:
+                # Third+ fallback: try removing modifiers or using base word
+                if len(words) > 1:
+                    # Remove first word (likely a modifier)
+                    return ' '.join(words[1:])
+                else:
+                    # Last resort: return base word with variation
+                    return prev_prompt
+        
         try:
             response = vlm.query(image, prompt, max_tokens=64, temperature=0.5)
             
             if response is None:
                 print("⚠ VLM returned None for rephrase, using fallback")
-                print(f"   Original query: {original_query}")
+                print(f"   Image Type: {image_type}")
+                print(f"   Question: {original_query}")
                 print(f"   Previous prompt: {previous_prompt}")
-                return previous_prompt  # Return same prompt as fallback
+                fallback = _generate_diverse_fallback(previous_prompt, original_query, attempt)
+                # Ensure we don't return the same prompt
+                if fallback.lower() == previous_prompt.lower() or fallback in used_prompts:
+                    # Force a different variation
+                    words = previous_prompt.split()
+                    if len(words) > 1:
+                        fallback = words[-1] if words[-1] != previous_prompt else words[0]
+                    else:
+                        fallback = previous_prompt + "s"
+                used_prompts.add(fallback)
+                print(f"   Using fallback prompt: '{fallback}'")
+                return fallback
             
             # Extract the alternative prompt
             alternative = response.strip().split('\n')[0].strip()
             alternative = alternative.strip('"\'')
             
+            # Validate that alternative is different from previous
             if not alternative or alternative.lower() == previous_prompt.lower():
                 print("⚠ VLM rephrase same as previous, using variation")
-                print(f"   Original query: {original_query}")
+                print(f"   Image Type: {image_type}")
+                print(f"   Question: {original_query}")
                 print(f"   Previous prompt: {previous_prompt}")
                 print(f"   VLM response: {response[:200]}")
-                # Simple fallback: try adding "object" or using first word
-                words = previous_prompt.split()
-                if len(words) > 1:
-                    alternative = words[-1]  # Use last word
-                else:
-                    alternative = previous_prompt + " object"
+                alternative = _generate_diverse_fallback(previous_prompt, original_query, attempt)
+                # Ensure uniqueness
+                if alternative.lower() == previous_prompt.lower() or alternative in used_prompts:
+                    words = previous_prompt.split()
+                    if len(words) > 1:
+                        alternative = words[-1] if words[-1] != previous_prompt else words[0]
+                    else:
+                        alternative = previous_prompt + "s"
             
+            used_prompts.add(alternative)
             print(f"✓ VLM rephrased: '{previous_prompt}' → '{alternative}'")
             return alternative
             
         except Exception as e:
             print(f"⚠ Error in rephrase: {e}, using fallback")
-            print(f"   Original query: {original_query}")
+            print(f"   Image Type: {image_type}")
+            print(f"   Question: {original_query}")
             print(f"   Previous prompt: {previous_prompt}")
             import traceback
             print(f"   Traceback: {traceback.format_exc()[:300]}")
-            return previous_prompt
+            fallback = _generate_diverse_fallback(previous_prompt, original_query, attempt)
+            # Ensure uniqueness
+            if fallback.lower() == previous_prompt.lower() or fallback in used_prompts:
+                words = previous_prompt.split()
+                if len(words) > 1:
+                    fallback = words[-1] if words[-1] != previous_prompt else words[0]
+                else:
+                    fallback = previous_prompt + "s"
+            used_prompts.add(fallback)
+            return fallback
 
     @staticmethod
     def _calculate_mask_area(mask_rle: Dict, gsd: float, image_shape: Tuple[int, int]) -> float:
@@ -1917,206 +2106,208 @@ Output ONLY the alternative keyword (2-3 words max), nothing else:"""
         self.processor.confidence_threshold = processor_threshold
         print(f"✓ Confidence thresholds: processor={processor_threshold:.2f}, final={confidence_threshold:.2f}")
         
-        # Load image
-        image = Image.open(io.BytesIO(image_bytes)).convert('RGB')
-        orig_w, orig_h = image.size
-        print(f"✓ Image loaded: {orig_w}x{orig_h}")
-        
-        # ================================================================
-        # OPTIMIZATION 1: Encode text ONCE
-        # ================================================================
-        text_outputs = self.processor.model.backbone.forward_text(
-            [text_prompt],
-            device=self.processor.device
-        )
-        print(f"✓ Text encoded once (cached for all tiles)")
-        
-        all_detections = []
-        total_tiles = 0
-        stats = {
-            "scales": scales,
-            "tile_size": tile_size,
-            "overlap_ratio": overlap_ratio,
-            "tiles_per_scale": {},
-        }
-        
-        for scale in scales:
-            # Scale image
-            if scale != 1.0:
-                scaled_w = int(orig_w * scale)
-                scaled_h = int(orig_h * scale)
-                scaled_image = image.resize((scaled_w, scaled_h), Image.Resampling.LANCZOS)
-            else:
-                scaled_image = image
+        # Use try-finally to ensure threshold is always restored
+        try:
+            # Load image
+            image = Image.open(io.BytesIO(image_bytes)).convert('RGB')
+            orig_w, orig_h = image.size
+            print(f"✓ Image loaded: {orig_w}x{orig_h}")
             
-            # Generate tiles for this scale
-            tiles_with_offsets = self._create_tiles(scaled_image, tile_size, overlap_ratio)
-            stats["tiles_per_scale"][str(scale)] = len(tiles_with_offsets)
-            total_tiles += len(tiles_with_offsets)
+            # ================================================================
+            # OPTIMIZATION 1: Encode text ONCE
+            # ================================================================
+            text_outputs = self.processor.model.backbone.forward_text(
+                [text_prompt],
+                device=self.processor.device
+            )
+            print(f"✓ Text encoded once (cached for all tiles)")
             
-            print(f"  Scale {scale}: {len(tiles_with_offsets)} tiles")
+            all_detections = []
+            total_tiles = 0
+            stats = {
+                "scales": scales,
+                "tile_size": tile_size,
+                "overlap_ratio": overlap_ratio,
+                "tiles_per_scale": {},
+            }
             
-            # Process tiles in batches
-            for batch_start in range(0, len(tiles_with_offsets), batch_size):
-                batch_end = min(batch_start + batch_size, len(tiles_with_offsets))
-                batch = tiles_with_offsets[batch_start:batch_end]
+            for scale in scales:
+                # Scale image
+                if scale != 1.0:
+                    scaled_w = int(orig_w * scale)
+                    scaled_h = int(orig_h * scale)
+                    scaled_image = image.resize((scaled_w, scaled_h), Image.Resampling.LANCZOS)
+                else:
+                    scaled_image = image
                 
-                tile_images = [t[0] for t in batch]
-                tile_offsets = [t[1] for t in batch]
+                # Generate tiles for this scale
+                tiles_with_offsets = self._create_tiles(scaled_image, tile_size, overlap_ratio)
+                stats["tiles_per_scale"][str(scale)] = len(tiles_with_offsets)
+                total_tiles += len(tiles_with_offsets)
                 
-                # ================================================================
-                # OPTIMIZATION 2: Batch encode images
-                # ================================================================
-                batch_state = self.processor.set_image_batch(tile_images)
-                actual_batch_size = len(tile_images)
+                print(f"  Scale {scale}: {len(tiles_with_offsets)} tiles")
                 
-                for i in range(len(tile_images)):
-                    try:
-                        # Extract per-tile backbone
-                        extracted_backbone = self._extract_tile_backbone(
-                            batch_state['backbone_out'], i, actual_batch_size
-                        )
-                        
-                        # Debug: Verify backbone_fpn extraction
-                        if 'backbone_fpn' in extracted_backbone:
-                            fpn_list = extracted_backbone['backbone_fpn']
-                            if isinstance(fpn_list, list) and len(fpn_list) > 0:
-                                first_fpn_shape = fpn_list[0].shape if hasattr(fpn_list[0], 'shape') else 'N/A'
-                                print(f"  ✓ Tile {i}: backbone_fpn extracted, first level shape: {first_fpn_shape}")
-                        
-                        tile_state = {
-                            'original_height': batch_state['original_heights'][i],
-                            'original_width': batch_state['original_widths'][i],
-                            'backbone_out': extracted_backbone
-                        }
-                        
-                        # ================================================================
-                        # OPTIMIZATION 1 (cont): Inject cached text features
-                        # ================================================================
-                        tile_state['backbone_out'].update({
-                            'language_features': text_outputs['language_features'],
-                            'language_mask': text_outputs['language_mask'],
-                            'language_embeds': text_outputs['language_embeds'],
-                        })
-                        
-                        # Initialize geometric prompt
-                        if 'geometric_prompt' not in tile_state:
-                            tile_state['geometric_prompt'] = self.processor.model._get_dummy_prompt()
-                        
-                        # Run grounding (text already embedded)
-                        tile_state = self.processor._forward_grounding(tile_state)
-                        
-                        # Collect detections
-                        if 'boxes' in tile_state and len(tile_state['boxes']) > 0:
-                            boxes = tile_state['boxes'].cpu().numpy()
-                            masks = tile_state['masks'].cpu()
-                            scores = tile_state['scores'].cpu().numpy()
+                # Process tiles in batches
+                for batch_start in range(0, len(tiles_with_offsets), batch_size):
+                    batch_end = min(batch_start + batch_size, len(tiles_with_offsets))
+                    batch = tiles_with_offsets[batch_start:batch_end]
+                    
+                    tile_images = [t[0] for t in batch]
+                    tile_offsets = [t[1] for t in batch]
+                    
+                    # ================================================================
+                    # OPTIMIZATION 2: Batch encode images
+                    # ================================================================
+                    batch_state = self.processor.set_image_batch(tile_images)
+                    actual_batch_size = len(tile_images)
+                    
+                    for i in range(len(tile_images)):
+                        try:
+                            # Extract per-tile backbone
+                            extracted_backbone = self._extract_tile_backbone(
+                                batch_state['backbone_out'], i, actual_batch_size
+                            )
                             
-                            # Get tile dimensions for mask transformation
-                            tile_h = tile_state['original_height']
-                            tile_w = tile_state['original_width']
+                            # Debug: Verify backbone_fpn extraction
+                            if 'backbone_fpn' in extracted_backbone:
+                                fpn_list = extracted_backbone['backbone_fpn']
+                                if isinstance(fpn_list, list) and len(fpn_list) > 0:
+                                    first_fpn_shape = fpn_list[0].shape if hasattr(fpn_list[0], 'shape') else 'N/A'
+                                    print(f"  ✓ Tile {i}: backbone_fpn extracted, first level shape: {first_fpn_shape}")
                             
-                            for j in range(len(boxes)):
-                                if scores[j] >= confidence_threshold:
-                                    # Transform box to original coords
-                                    orig_box = self._transform_box_to_original(
-                                        boxes[j], tile_offsets[i], scale, (orig_w, orig_h)
-                                    )
-                                    
-                                    # Validate box is not degenerate after clipping
-                                    if orig_box[2] <= orig_box[0] or orig_box[3] <= orig_box[1]:
-                                        continue  # Skip degenerate boxes
-                                    
-                                    # Transform mask to original coords (CRITICAL: mask must match box coordinates)
-                                    mask_binary_tile = masks[j].squeeze().numpy() > 0.5
-                                    mask_binary_global = self._transform_mask_to_original(
-                                        mask_binary_tile, 
-                                        tile_offsets[i], 
-                                        scale, 
-                                        (orig_w, orig_h),
-                                        (tile_w, tile_h)
-                                    )
-                                    
-                                    # Encode mask as RLE at GLOBAL resolution
-                                    mask_rle = rle_encode(torch.tensor(mask_binary_global, dtype=torch.bool).unsqueeze(0))[0]
-                                    
-                                    # CRITICAL FIX: Decode bytes to string for JSON serialization
-                                    # pycocotools returns 'counts' as bytes which can't be serialized to JSON
-                                    if "counts" in mask_rle and isinstance(mask_rle["counts"], bytes):
-                                        mask_rle["counts"] = mask_rle["counts"].decode("utf-8")
-                                    
-                                    # Validate mask-to-box alignment: RLE size must match original image
-                                    if mask_rle.get("size") != [orig_h, orig_w]:
-                                        print(f"⚠ Mask size mismatch: expected [{orig_h}, {orig_w}], got {mask_rle.get('size')}")
-                                        continue  # Skip this detection
-                                    
-                                    # Calculate box area in original image pixels
-                                    box_area_pixels = int((orig_box[2] - orig_box[0]) * (orig_box[3] - orig_box[1]))
-                                    
-                                    all_detections.append({
-                                        'box': orig_box.tolist(),
-                                        'mask_rle': mask_rle,
-                                        'score': float(scores[j]),
-                                        'scale': scale,
-                                        'box_area_pixels': box_area_pixels,
-                                    })
-                    except Exception as e:
-                        import traceback
-                        error_details = traceback.format_exc()
-                        print(f"⚠ Error processing tile {i} in batch at scale {scale}:")
-                        print(f"   Tile offset: {tile_offsets[i]}")
-                        print(f"   Error: {e}")
-                        print(f"   Traceback: {error_details[:500]}")
-                        stats.setdefault("tile_errors", []).append({
-                            "tile_idx": i,
-                            "scale": scale,
-                            "offset": list(tile_offsets[i]),
-                            "error": str(e),
-                        })
-                        continue
-                
-                # Free batch memory
-                del batch_state
-                if batch_start % (batch_size * 2) == 0:
-                    try:
-                        torch.cuda.empty_cache()
-                    except Exception:
-                        pass  # Ignore cleanup errors
-        
-        stats["total_tiles"] = total_tiles
-        stats["successful_tiles"] = total_tiles - len(stats.get("tile_errors", []))
-        print(f"✓ Processed {total_tiles} tiles across {len(scales)} scales")
-        print(f"  Successful tiles: {stats['successful_tiles']}/{total_tiles}")
-        if stats.get("tile_errors"):
-            print(f"  ⚠ Failed tiles: {len(stats['tile_errors'])}")
-        print(f"  Raw detections: {len(all_detections)}")
-        
-        # Apply NMS
-        final_detections = self._apply_nms(all_detections, iou_threshold)
-        print(f"✓ After NMS: {len(final_detections)} detections")
-        
-        # Restore original confidence threshold
-        self.processor.confidence_threshold = original_threshold
-        
-        # Provide diagnostic warnings for edge cases
-        if stats["successful_tiles"] == 0:
-            print(f"❌ WARNING: All {total_tiles} tiles failed to process!")
-            print(f"   This may indicate a model loading issue or incompatible image format.")
-        elif len(final_detections) == 0 and len(all_detections) > 0:
-            print(f"⚠ WARNING: {len(all_detections)} raw detections reduced to 0 after NMS.")
-            print(f"   Consider lowering iou_threshold (current: {iou_threshold})")
-        elif len(final_detections) == 0:
-            print(f"ℹ No objects detected for prompt '{text_prompt}'.")
-            print(f"   Consider lowering confidence_threshold (current: {confidence_threshold})")
-        
-        return {
-            "status": "success",
-            "count": len(final_detections),
-            "detections": final_detections,
-            "orig_img_w": orig_w,
-            "orig_img_h": orig_h,
-            "pyramidal_stats": stats,
-        }
+                            tile_state = {
+                                'original_height': batch_state['original_heights'][i],
+                                'original_width': batch_state['original_widths'][i],
+                                'backbone_out': extracted_backbone
+                            }
+                            
+                            # ================================================================
+                            # OPTIMIZATION 1 (cont): Inject cached text features
+                            # ================================================================
+                            tile_state['backbone_out'].update({
+                                'language_features': text_outputs['language_features'],
+                                'language_mask': text_outputs['language_mask'],
+                                'language_embeds': text_outputs['language_embeds'],
+                            })
+                            
+                            # Initialize geometric prompt
+                            if 'geometric_prompt' not in tile_state:
+                                tile_state['geometric_prompt'] = self.processor.model._get_dummy_prompt()
+                            
+                            # Run grounding (text already embedded)
+                            tile_state = self.processor._forward_grounding(tile_state)
+                            
+                            # Collect detections
+                            if 'boxes' in tile_state and len(tile_state['boxes']) > 0:
+                                boxes = tile_state['boxes'].cpu().numpy()
+                                masks = tile_state['masks'].cpu()
+                                scores = tile_state['scores'].cpu().numpy()
+                                
+                                # Get tile dimensions for mask transformation
+                                tile_h = tile_state['original_height']
+                                tile_w = tile_state['original_width']
+                                
+                                for j in range(len(boxes)):
+                                    if scores[j] >= confidence_threshold:
+                                        # Transform box to original coords
+                                        orig_box = self._transform_box_to_original(
+                                            boxes[j], tile_offsets[i], scale, (orig_w, orig_h)
+                                        )
+                                        
+                                        # Validate box is not degenerate after clipping
+                                        if orig_box[2] <= orig_box[0] or orig_box[3] <= orig_box[1]:
+                                            continue  # Skip degenerate boxes
+                                        
+                                        # Transform mask to original coords (CRITICAL: mask must match box coordinates)
+                                        mask_binary_tile = masks[j].squeeze().numpy() > 0.5
+                                        mask_binary_global = self._transform_mask_to_original(
+                                            mask_binary_tile, 
+                                            tile_offsets[i], 
+                                            scale, 
+                                            (orig_w, orig_h),
+                                            (tile_w, tile_h)
+                                        )
+                                        
+                                        # Encode mask as RLE at GLOBAL resolution
+                                        mask_rle = rle_encode(torch.tensor(mask_binary_global, dtype=torch.bool).unsqueeze(0))[0]
+                                        
+                                        # CRITICAL FIX: Decode bytes to string for JSON serialization
+                                        # pycocotools returns 'counts' as bytes which can't be serialized to JSON
+                                        if "counts" in mask_rle and isinstance(mask_rle["counts"], bytes):
+                                            mask_rle["counts"] = mask_rle["counts"].decode("utf-8")
+                                        
+                                        # Validate mask-to-box alignment: RLE size must match original image
+                                        if mask_rle.get("size") != [orig_h, orig_w]:
+                                            print(f"⚠ Mask size mismatch: expected [{orig_h}, {orig_w}], got {mask_rle.get('size')}")
+                                            continue  # Skip this detection
+                                        
+                                        # Calculate box area in original image pixels
+                                        box_area_pixels = int((orig_box[2] - orig_box[0]) * (orig_box[3] - orig_box[1]))
+                                        
+                                        all_detections.append({
+                                            'box': orig_box.tolist(),
+                                            'mask_rle': mask_rle,
+                                            'score': float(scores[j]),
+                                            'scale': scale,
+                                            'box_area_pixels': box_area_pixels,
+                                        })
+                        except Exception as e:
+                            import traceback
+                            error_details = traceback.format_exc()
+                            print(f"⚠ Error processing tile {i} in batch at scale {scale}:")
+                            print(f"   Tile offset: {tile_offsets[i]}")
+                            print(f"   Error: {e}")
+                            print(f"   Traceback: {error_details[:500]}")
+                            stats.setdefault("tile_errors", []).append({
+                                "tile_idx": i,
+                                "scale": scale,
+                                "offset": list(tile_offsets[i]),
+                                "error": str(e),
+                            })
+                            continue
+                    
+                    # Free batch memory
+                    del batch_state
+                    if batch_start % (batch_size * 2) == 0:
+                        try:
+                            torch.cuda.empty_cache()
+                        except Exception:
+                            pass  # Ignore cleanup errors
+            
+            stats["total_tiles"] = total_tiles
+            stats["successful_tiles"] = total_tiles - len(stats.get("tile_errors", []))
+            print(f"✓ Processed {total_tiles} tiles across {len(scales)} scales")
+            print(f"  Successful tiles: {stats['successful_tiles']}/{total_tiles}")
+            if stats.get("tile_errors"):
+                print(f"  ⚠ Failed tiles: {len(stats['tile_errors'])}")
+            print(f"  Raw detections: {len(all_detections)}")
+            
+            # Apply NMS
+            final_detections = self._apply_nms(all_detections, iou_threshold)
+            print(f"✓ After NMS: {len(final_detections)} detections")
+            
+            # Provide diagnostic warnings for edge cases
+            if stats["successful_tiles"] == 0:
+                print(f"❌ WARNING: All {total_tiles} tiles failed to process!")
+                print(f"   This may indicate a model loading issue or incompatible image format.")
+            elif len(final_detections) == 0 and len(all_detections) > 0:
+                print(f"⚠ WARNING: {len(all_detections)} raw detections reduced to 0 after NMS.")
+                print(f"   Consider lowering iou_threshold (current: {iou_threshold})")
+            elif len(final_detections) == 0:
+                print(f"ℹ No objects detected for prompt '{text_prompt}'.")
+                print(f"   Consider lowering confidence_threshold (current: {confidence_threshold})")
+            
+            return {
+                "status": "success",
+                "count": len(final_detections),
+                "detections": final_detections,
+                "orig_img_w": orig_w,
+                "orig_img_h": orig_h,
+                "pyramidal_stats": stats,
+            }
+        finally:
+            # Always restore original confidence threshold, even if an exception occurs
+            self.processor.confidence_threshold = original_threshold
 
     @modal.method()
     def sam3_pyramidal_infer(
@@ -2151,6 +2342,7 @@ Output ONLY the alternative keyword (2-3 words max), nothing else:"""
         confidence_threshold: float = 0.3,
         pyramidal_config: Dict[str, Any] = None,
         max_retries: int = 2,
+        include_obb: bool = False,
     ) -> Dict[str, Any]:
         """
         Count objects using VLM-enhanced pyramidal SAM3 segmentation.
@@ -2172,6 +2364,7 @@ Output ONLY the alternative keyword (2-3 words max), nothing else:"""
                 - batch_size: Batch size (default: 16)
                 - iou_threshold: NMS IoU threshold (default: 0.5)
             max_retries: Maximum retry attempts with rephrased prompts (default: 2)
+            include_obb: Whether to include oriented bounding boxes in response (default: False)
         
         Returns:
             Dict with count, visual_prompt, verification_info, detections, and processing stats
@@ -2211,10 +2404,13 @@ Output ONLY the alternative keyword (2-3 words max), nothing else:"""
         attempts = []
         visual_prompt = None
         verified_detections = []
+        used_prompts = set()  # Track used prompts to avoid infinite loops
         
         # Step 1: Refine prompt with VLM
         print("Step 1: VLM Prompt Refinement")
         visual_prompt = self._refine_prompt_with_vlm(image_bytes, text_prompt, vlm)
+        if visual_prompt:
+            used_prompts.add(visual_prompt.lower())
         
         # Retry loop
         for attempt in range(max_retries + 1):
@@ -2242,7 +2438,10 @@ Output ONLY the alternative keyword (2-3 words max), nothing else:"""
                 })
                 if attempt < max_retries:
                     # Try rephrasing
-                    visual_prompt = self._rephrase_prompt_with_vlm(image_bytes, text_prompt, visual_prompt, vlm)
+                    visual_prompt = self._rephrase_prompt_with_vlm(
+                        image_bytes, text_prompt, visual_prompt, vlm, 
+                        attempt=attempt, used_prompts=used_prompts
+                    )
                     continue
                 else:
                     return result
@@ -2279,7 +2478,10 @@ Output ONLY the alternative keyword (2-3 words max), nothing else:"""
             # If no detections and we have retries left, try rephrasing
             if len(verified_detections) == 0 and attempt < max_retries:
                 print(f"No detections found, rephrasing prompt...")
-                visual_prompt = self._rephrase_prompt_with_vlm(image_bytes, text_prompt, visual_prompt, vlm)
+                visual_prompt = self._rephrase_prompt_with_vlm(
+                    image_bytes, text_prompt, visual_prompt, vlm,
+                    attempt=attempt, used_prompts=used_prompts
+                )
         
         # Prepare response
         verification_info = {
@@ -2294,6 +2496,18 @@ Output ONLY the alternative keyword (2-3 words max), nothing else:"""
         words = object_type.split()
         if words:
             object_type = words[-1].rstrip('s')
+        
+        # Generate OBBs if requested
+        if include_obb and len(verified_detections) > 0:
+            print("Generating OBBs from masks...")
+            orig_h = result.get("orig_img_h", 0)
+            orig_w = result.get("orig_img_w", 0)
+            image_shape = (orig_h, orig_w)
+            
+            for det in verified_detections:
+                if 'mask_rle' in det:
+                    obb = self._generate_obb_from_mask_rle(det['mask_rle'], image_shape)
+                    det['obb'] = obb
         
         return {
             "status": "success",
@@ -2317,6 +2531,7 @@ Output ONLY the alternative keyword (2-3 words max), nothing else:"""
         confidence_threshold: float = 0.3,
         pyramidal_config: Dict[str, Any] = None,
         max_retries: int = 2,
+        include_obb: bool = False,
     ) -> Dict[str, Any]:
         """
         Calculate areas of detected objects using VLM-enhanced Pyramidal SAM3 segmentation.
@@ -2339,6 +2554,7 @@ Output ONLY the alternative keyword (2-3 words max), nothing else:"""
                 - batch_size: Batch size (default: 16)
                 - iou_threshold: NMS IoU threshold (default: 0.5)
             max_retries: Maximum retry attempts with rephrased prompts (default: 2)
+            include_obb: Whether to include oriented bounding boxes in response (default: False)
         
         Returns:
             Dict with object count, total area (mask-based), coverage percentage, and per-object areas
@@ -2385,6 +2601,7 @@ Output ONLY the alternative keyword (2-3 words max), nothing else:"""
         attempts = []
         all_verified_detections = []
         last_result = None
+        used_prompts = set()  # Track used prompts across all keywords to avoid infinite loops
         
         # Step 2: Segment with each keyword and combine
         print("\nStep 2: Multi-keyword Segmentation")
@@ -2392,6 +2609,8 @@ Output ONLY the alternative keyword (2-3 words max), nothing else:"""
             print(f"\n--- Keyword {keyword_idx + 1}/{len(keywords)}: '{keyword}' ---")
             
             visual_prompt = keyword
+            if visual_prompt:
+                used_prompts.add(visual_prompt.lower())
             verified_detections = []
             
             # Retry loop for this keyword
@@ -2414,7 +2633,10 @@ Output ONLY the alternative keyword (2-3 words max), nothing else:"""
                 
                 if result["status"] != "success":
                     if attempt < max_retries:
-                        visual_prompt = self._rephrase_prompt_with_vlm(image_bytes, text_prompt, visual_prompt, vlm)
+                        visual_prompt = self._rephrase_prompt_with_vlm(
+                            image_bytes, text_prompt, visual_prompt, vlm,
+                            attempt=attempt, used_prompts=used_prompts
+                        )
                         continue
                     else:
                         break
@@ -2444,7 +2666,10 @@ Output ONLY the alternative keyword (2-3 words max), nothing else:"""
                 
                 # Try rephrasing if no detections
                 if len(verified_detections) == 0 and attempt < max_retries:
-                    visual_prompt = self._rephrase_prompt_with_vlm(image_bytes, text_prompt, visual_prompt, vlm)
+                    visual_prompt = self._rephrase_prompt_with_vlm(
+                        image_bytes, text_prompt, visual_prompt, vlm,
+                        attempt=attempt, used_prompts=used_prompts
+                    )
         
         print(f"\nTotal verified detections: {len(all_verified_detections)}")
         
@@ -2484,6 +2709,11 @@ Output ONLY the alternative keyword (2-3 words max), nothing else:"""
                     "score": det["score"],
                     "box": det["box"],
                 }
+                
+                # Generate OBB if requested
+                if include_obb and mask_rle:
+                    obb = self._generate_obb_from_mask_rle(mask_rle, image_shape)
+                    area_info["obb"] = obb
                 
                 individual_areas.append(area_info)
                 print(f"  Object {idx+1}: {area_m2:.2f} m² ({pixel_area} pixels)")
@@ -2564,47 +2794,67 @@ Now analyze the image and query."""
                 print(f"   Original query: {user_query}")
                 return [user_query]
             
-            # Try to extract JSON from response
-            json_match = re.search(r'\{.*\}', response, re.DOTALL)
-            if json_match:
+            # Try to extract JSON from response with improved patterns
+            # First, try to remove markdown code blocks if present
+            cleaned_response = response.strip()
+            # Remove markdown code blocks
+            cleaned_response = re.sub(r'```json\s*', '', cleaned_response)
+            cleaned_response = re.sub(r'```\s*', '', cleaned_response)
+            cleaned_response = cleaned_response.strip()
+            
+            # Try multiple JSON extraction patterns
+            json_patterns = [
+                r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}',  # Nested JSON
+                r'\{.*?"keywords".*?\}',  # JSON with keywords field
+                r'\{[^}]*\}',  # Simple JSON object
+            ]
+            
+            result_dict = None
+            for pattern in json_patterns:
+                json_match = re.search(pattern, cleaned_response, re.DOTALL)
+                if json_match:
+                    try:
+                        json_str = json_match.group()
+                        result_dict = json.loads(json_str)
+                        break
+                    except json.JSONDecodeError:
+                        continue
+            
+            if result_dict:
                 try:
-                    json_str = json_match.group()
-                    result_dict = json.loads(json_str)
-                    
                     # Validate with Pydantic
                     validated_result = KeywordExtractionResponse(**result_dict)
                     keywords = validated_result.keywords
                     primary_object = validated_result.primary_object
                     reasoning = validated_result.reasoning
                     
-                    print(f"\n=== Keyword Extraction ===")
-                    print(f"Primary Object: {primary_object}")
-                    print(f"Keywords: {keywords}")
-                    if reasoning:
-                        print(f"Reasoning: {reasoning}")
-                    print(f"===========================\n")
+                    # Validate that keywords are meaningful (not empty, not generic)
+                    if keywords and isinstance(keywords, list) and len(keywords) > 0:
+                        # Filter out empty or generic keywords
+                        meaningful_keywords = [k for k in keywords if k and isinstance(k, str) and len(k.strip()) > 0]
+                        if meaningful_keywords:
+                            print(f"\n=== Keyword Extraction ===")
+                            print(f"Primary Object: {primary_object}")
+                            print(f"Keywords: {meaningful_keywords}")
+                            if reasoning:
+                                print(f"Reasoning: {reasoning}")
+                            print(f"===========================\n")
+                            return meaningful_keywords
                     
-                    if keywords:
-                        return keywords
-                    else:
-                        print(f"⚠ No keywords in validated response, using fallback")
-                        return [user_query]
+                    print(f"⚠ No meaningful keywords in validated response, using fallback")
+                    print(f"   Extracted keywords: {keywords}")
+                    print(f"   Original query: {user_query}")
+                    return [user_query]
                         
                 except ValidationError as ve:
                     print(f"❌ VLM response validation failed: {ve}")
-                    print(f"   Full VLM response: {response[:500]}")
-                    print(f"   Original query: {user_query}")
-                    print(f"   Using fallback: {user_query}")
-                    return [user_query]
-                except json.JSONDecodeError as je:
-                    print(f"❌ JSON decode error: {je}")
-                    print(f"   Full VLM response: {response[:500]}")
+                    print(f"   Full VLM response: {response[:1000]}")
                     print(f"   Original query: {user_query}")
                     print(f"   Using fallback: {user_query}")
                     return [user_query]
             else:
-                print(f"❌ Could not find JSON in VLM response")
-                print(f"   Full VLM response: {response[:500]}")
+                print(f"❌ Could not find or parse JSON in VLM response")
+                print(f"   Full VLM response: {response[:1000]}")
                 print(f"   Original query: {user_query}")
                 print(f"   Using fallback: {user_query}")
                 return [user_query]
@@ -2756,6 +3006,7 @@ Now analyze the image and query."""
         debug: bool = False,
         confidence_threshold: float = None,
         pyramidal_config: Dict[str, Any] = None,
+        include_obb: bool = False,
     ) -> Dict[str, Any]:
         """
         Core GPU inference method - LLM provider agnostic.
@@ -2780,6 +3031,7 @@ Now analyze the image and query."""
                 - scales: Scale factors for multi-scale detection (default: [1.0, 0.5])
                 - batch_size: Batch size for inference (default: 16)
                 - iou_threshold: IoU threshold for NMS deduplication (default: 0.5)
+            include_obb: Whether to include oriented bounding boxes in response (default: False)
         
         Returns:
             Dict with status, regions, summary, and optional debug visualization
@@ -2948,6 +3200,20 @@ Now analyze the image and query."""
                             }
                             for i, (box, mask) in enumerate(zip(pred_boxes, pred_masks))
                         ]
+
+                    # Generate OBBs if requested
+                    if include_obb and len(regions) > 0:
+                        print("Generating OBBs from masks...")
+                        orig_h = raw_json.get("orig_img_h", 0)
+                        orig_w = raw_json.get("orig_img_w", 0)
+                        image_shape = (orig_h, orig_w)
+                        
+                        for region in regions:
+                            # Extract mask_rle from region (may be in "mask" or "mask_rle" field)
+                            mask_rle = region.get("mask") or region.get("mask_rle")
+                            if mask_rle:
+                                obb = self._generate_obb_from_mask_rle(mask_rle, image_shape)
+                                region["obb"] = obb
 
                     # Ensure all data is JSON-serializable before returning
                     raw_json = make_json_serializable(raw_json)
@@ -3200,6 +3466,7 @@ all matching objects with verification to reduce false positives.
                 confidence_threshold=request.confidence_threshold,
                 pyramidal_config=pyramidal_config_dict,
                 max_retries=request.max_retries,
+                include_obb=request.include_obb,
             )
             print(f"✓ sam3_count returned count: {result.get('count', 0)}")
             return JSONResponse(content=result)
@@ -3265,6 +3532,7 @@ area measurements in square meters.
                 confidence_threshold=request.confidence_threshold,
                 pyramidal_config=pyramidal_config_dict,
                 max_retries=request.max_retries,
+                include_obb=request.include_obb,
             )
             print(f"✓ sam3_area returned {result.get('object_count', 0)} objects")
             return JSONResponse(content=result)
@@ -3330,6 +3598,7 @@ Set `debug=true` to receive a visualization image in the response.
                 debug=request.debug,
                 confidence_threshold=request.confidence_threshold,
                 pyramidal_config=pyramidal_config_dict,
+                include_obb=request.include_obb,
             )
             return JSONResponse(content=result)
             
