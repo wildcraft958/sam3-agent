@@ -4,7 +4,7 @@ Complete examples showing how to use the SAM3 Agent API with flexible LLM config
 
 ## API Endpoint
 
-**POST** `https://aryan-don357--sam3-agent-sam3-segment.modal.run`
+**POST** `https://srinjoy59--sam3-agent-sam3-segment.modal.run`
 
 ## Request Format
 
@@ -35,7 +35,7 @@ with open("image.jpg", "rb") as f:
 
 # Make request
 response = requests.post(
-    "https://aryan-don357--sam3-agent-sam3-segment.modal.run",
+    "https://srinjoy59--sam3-agent-sam3-segment.modal.run",
     json={
         "prompt": "segment all objects",
         "image_b64": image_b64,
@@ -64,7 +64,7 @@ with open("image.jpg", "rb") as f:
     image_b64 = base64.b64encode(f.read()).decode("utf-8")
 
 response = requests.post(
-    "https://aryan-don357--sam3-agent-sam3-segment.modal.run",
+    "https://srinjoy59--sam3-agent-sam3-segment.modal.run",
     json={
         "prompt": "the leftmost child wearing blue vest",
         "image_b64": image_b64,
@@ -92,7 +92,7 @@ with open("image.jpg", "rb") as f:
     image_b64 = base64.b64encode(f.read()).decode("utf-8")
 
 response = requests.post(
-    "https://aryan-don357--sam3-agent-sam3-segment.modal.run",
+    "https://srinjoy59--sam3-agent-sam3-segment.modal.run",
     json={
         "prompt": "segment all cars",
         "image_b64": image_b64,
@@ -115,7 +115,7 @@ result = response.json()
 import requests
 
 response = requests.post(
-    "https://aryan-don357--sam3-agent-sam3-segment.modal.run",
+    "https://srinjoy59--sam3-agent-sam3-segment.modal.run",
     json={
         "prompt": "find all people",
         "image_url": "https://example.com/image.jpg",
@@ -137,7 +137,7 @@ result = response.json()
 IMAGE_B64=$(base64 -w 0 image.jpg)
 
 # Make request
-curl -X POST https://aryan-don357--sam3-agent-sam3-segment.modal.run \
+curl -X POST https://srinjoy59--sam3-agent-sam3-segment.modal.run \
   -H "Content-Type: application/json" \
   -d "{
     \"prompt\": \"segment all objects\",

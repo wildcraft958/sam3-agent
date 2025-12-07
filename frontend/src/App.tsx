@@ -5,9 +5,12 @@ import SAM3ConfigForm, { SAM3Config } from './components/SAM3ConfigForm';
 import ImageVisualization from './components/ImageVisualization';
 import ResultsPanel from './components/ResultsPanel';
 import CommunicationLog from './components/CommunicationLog';
-import { segmentImage, countImage, checkHealth, LLMConfig, SegmentResponse } from './utils/api';
+import { segmentImage, countImage, LLMConfig, SegmentResponse } from './utils/api';
+
+type ViewMode = 'main' | 'diagnostic';
 
 function App() {
+  const [viewMode, setViewMode] = useState<ViewMode>('main');
   const [imageBase64, setImageBase64] = useState<string | null>(null);
   const [imageFile, setImageFile] = useState<File | null>(null);
   const [imageUrl, setImageUrl] = useState<string | null>(null);
@@ -26,7 +29,6 @@ function App() {
   const [sam3Config, setSam3Config] = useState<SAM3Config>({
     confidence_threshold: 0.4,
   });
-  const [apiHealth, setApiHealth] = useState<'checking' | 'healthy' | 'unhealthy' | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
 
   const handleImageSelect = (base64: string, file: File) => {
@@ -58,20 +60,6 @@ function App() {
       });
     }
   };
-
-  // Check API health on mount
-  useEffect(() => {
-    const checkApiHealth = async () => {
-      setApiHealth('checking');
-      try {
-        const health = await checkHealth();
-        setApiHealth(health.status === 'ok' ? 'healthy' : 'unhealthy');
-      } catch {
-        setApiHealth('unhealthy');
-      }
-    };
-    checkApiHealth();
-  }, []);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -110,13 +98,10 @@ function App() {
 
     try {
       if (useInfer) {
-        // Use SAM3 counting endpoint (still requires llm_config for VLM verification)
-        // Convert base64 to data URI format
-        const imageUrl = imageBase64 ? `data:image/jpeg;base64,${imageBase64}` : undefined;
+        // Use pure SAM3 counting (no LLM)
         const countResponse = await countImage({
           prompt: prompt,
-          image_url: imageUrl,
-          llm_config: llmConfig,
+          image_b64: imageBase64,
           confidence_threshold: sam3Config.confidence_threshold,
         }, signal);
 
@@ -152,11 +137,9 @@ function App() {
         }
       } else {
         // Use full agent with LLM
-        // Convert base64 to data URI format
-        const imageUrl = imageBase64 ? `data:image/jpeg;base64,${imageBase64}` : undefined;
         const segmentResponse = await segmentImage({
           prompt,
-          image_url: imageUrl,
+          image_b64: imageBase64,
           llm_config: llmConfig,
           debug: true,
           confidence_threshold: sam3Config.confidence_threshold,
@@ -168,6 +151,10 @@ function App() {
         }
 
         setResponse(segmentResponse);
+        // Also set error state if response has error status
+        if (segmentResponse.status === 'error') {
+          setError(segmentResponse.message || 'Segmentation failed');
+        }
       }
     } catch (err) {
       // Don't set error if request was cancelled
@@ -175,6 +162,7 @@ function App() {
         return;
       }
       const errorMessage = err instanceof Error ? err.message : 'Unknown error occurred';
+      console.error('[App] Error in handleSegment:', err);
       setError(errorMessage);
       setResponse({
         status: 'error',
@@ -189,6 +177,29 @@ function App() {
     }
   };
 
+  if (viewMode === 'diagnostic') {
+    return (
+      <div className="app">
+        <header className="app-header">
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <div>
+              <h1>SAM3 Agent Diagnostics</h1>
+              <p>Diagnostic tools and system configuration</p>
+            </div>
+            <button
+              className="segment-button"
+              onClick={() => setViewMode('main')}
+              style={{ marginTop: 0 }}
+            >
+              Back to Main
+            </button>
+          </div>
+        </header>
+        <DiagnosticPage />
+      </div>
+    );
+  }
+
   return (
     <div className="app">
       <header className="app-header">
@@ -197,49 +208,13 @@ function App() {
             <h1>SAM3 Agent Visualization</h1>
             <p>Upload an image and visualize segmentation results with masks and bounding boxes</p>
           </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-            {apiHealth === 'checking' && (
-              <span style={{ fontSize: '0.875rem', color: 'var(--text-secondary)' }}>
-                Checking API...
-              </span>
-            )}
-            {apiHealth === 'healthy' && (
-              <span style={{ 
-                fontSize: '0.875rem', 
-                color: 'var(--success)',
-                display: 'flex',
-                alignItems: 'center',
-                gap: '0.25rem'
-              }}>
-                <span style={{ 
-                  width: '8px', 
-                  height: '8px', 
-                  borderRadius: '50%', 
-                  backgroundColor: 'var(--success)',
-                  display: 'inline-block'
-                }}></span>
-                API Connected
-              </span>
-            )}
-            {apiHealth === 'unhealthy' && (
-              <span style={{ 
-                fontSize: '0.875rem', 
-                color: 'var(--error)',
-                display: 'flex',
-                alignItems: 'center',
-                gap: '0.25rem'
-              }}>
-                <span style={{ 
-                  width: '8px', 
-                  height: '8px', 
-                  borderRadius: '50%', 
-                  backgroundColor: 'var(--error)',
-                  display: 'inline-block'
-                }}></span>
-                API Unavailable
-              </span>
-            )}
-          </div>
+          <button
+            className="segment-button"
+            onClick={() => setViewMode('diagnostic')}
+            style={{ marginTop: 0 }}
+          >
+            Diagnostics
+          </button>
         </div>
       </header>
 
@@ -273,9 +248,9 @@ function App() {
                   checked={useInfer}
                   onChange={(e) => setUseInfer(e.target.checked)}
                 />
-                Use SAM3 Counting Endpoint
+                Use Pure SAM3 Counting (No LLM)
               </label>
-              <p className="hint">Check to use SAM3 counting endpoint (optimized for counting tasks, still uses VLM for verification)</p>
+              <p className="hint">Check to use SAM3 counting only (faster, no LLM costs)</p>
             </div>
           </div>
 
@@ -315,9 +290,21 @@ function App() {
             </div>
           </div>
 
-          {error && (
+          {(error || response?.status === 'error') && (
             <div className="error-message">
-              <strong>Error:</strong> {error}
+              <strong>Error:</strong>
+              <div className="error-details">
+                {error && <div className="error-text">{error}</div>}
+                {response?.status === 'error' && response?.message && (
+                  <div className="error-text">{response.message}</div>
+                )}
+                {response?.traceback && (
+                  <details className="error-traceback">
+                    <summary>Technical Details</summary>
+                    <pre>{response.traceback}</pre>
+                  </details>
+                )}
+              </div>
             </div>
           )}
         </div>
@@ -348,4 +335,3 @@ function App() {
 }
 
 export default App;
-

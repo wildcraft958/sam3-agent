@@ -123,6 +123,12 @@
     - Query: "buildings" → segment_phrase_batch(text_prompts=["building", "structure", "house"])
     - Query: "water bodies" → segment_phrase_batch(text_prompts=["water", "pond", "lake", "reservoir"])
     
+    When query does NOT mention color - DO NOT INCLUDE IT:
+    - Query: "planes" → Use: segment_phrase(text_prompt="plane")
+    - Query: "buildings" → Use: segment_phrase(text_prompt="building")
+    - Query: "water bodies" → Use: segment_phrase(text_prompt="water")
+    - Query: "vehicles" → Use: segment_phrase(text_prompt="vehicle")
+    
 
     ═══════════════════════════════════════════════════════════════════════════════
     
@@ -196,7 +202,18 @@
        - Uncertain if feature type is correct
        - Significant boundary or positioning concerns  
        - Possible misclassification (shadow vs water, road vs bare soil)
+       - ⚠️ DARK AREAS that could be shadows OR dark-colored objects
        → MUST call examine_each_mask before selection
+       
+       ⚠️ SHADOW VS DARK OBJECT - CRITICAL CHECK:
+       When you see a DARK mask, ask yourself:
+       - Does it have a defined SHAPE matching the query? (cars have rectangular shapes, buildings have edges)
+       - Is it positioned ADJACENT to a taller object? (shadows extend FROM objects)
+       - Does it have TEXTURE or STRUCTURE? (real objects have detail, shadows are flat)
+       - Is the shape ELONGATED in one direction? (shadows stretch based on sun angle)
+       
+       SHADOW indicators: elongated, no internal structure, adjacent to tall objects, follows sun angle
+       DARK OBJECT indicators: defined shape, internal texture, consistent with query object type
     
     2. ⚠️ CRITICAL DECISION LOGIC (strictly enforced):
     
@@ -729,6 +746,11 @@
         → "These masks ARE the PRIMARY TARGET. Proceeding to spatial analysis."
         → Continue to step 3
         
+        ⚠️ SHADOW WARNING: Be VERY CAREFUL to distinguish SHADOWS from REAL DARK OBJECTS!
+        - Shadows: elongated, flat, no texture, adjacent to tall objects, follow sun angle
+        - Dark objects: defined shape, internal structure, match query object type
+        Do NOT reject dark-colored objects just because they are dark - verify they are SHADOWS first!
+        
         EXAMPLE 1 - BROAD QUERY (vehicles are valid instances of "all objects"):
         Query: "segment all objects"
         Current masks: 5 vehicle masks
@@ -822,11 +844,49 @@
        - Mask [N]: Is this a [PRIMARY TARGET]? [YES/NO]
        - If NO: What feature type is it actually? [e.g., "water body", "shadow", "road"]
        
+       ═══════════════════════════════════════════════════════════════════════════════
+       ⚠️⚠️⚠️ CRITICAL: SHADOW VS REAL OBJECT VERIFICATION ⚠️⚠️⚠️
+       ═══════════════════════════════════════════════════════════════════════════════
+       
+       For EACH dark-colored mask, you MUST verify it is NOT a shadow:
+       
+       SHADOW DETECTION CHECKLIST:
+       □ Is the mask ELONGATED in a consistent direction? (shadows stretch)
+       □ Is the mask ADJACENT to a taller structure? (shadows cast FROM objects)
+       □ Does the mask LACK internal texture/structure? (shadows are flat/uniform)
+       □ Is the mask shape INCONSISTENT with the query object? (shadow ≠ object shape)
+       □ Does the mask follow the SUN ANGLE pattern in the image? (all shadows same direction)
+       
+       If 3+ checks are YES → This is likely a SHADOW → REJECT this mask
+       
+       REAL DARK OBJECT INDICATORS (keep the mask if these apply):
+       ✓ Has DEFINED EDGES matching query object shape (e.g., car = rectangular)
+       ✓ Has INTERNAL TEXTURE or structural details
+       ✓ Is NOT adjacent to a taller object that could cast it
+       ✓ Shape is CONSISTENT with the query target type
+       ✓ Other similar objects in image have same dark appearance
+       
+       EXAMPLES:
+       
+       Query: "black cars"
+       - Mask covers dark rectangular shape with visible wheels/windows → REAL CAR ✓
+       - Mask covers elongated dark area next to building → SHADOW ✗
+       
+       Query: "vehicles"
+       - Dark mask with car-shaped outline, parked in lot → REAL VEHICLE ✓
+       - Dark mask stretching from tree, no vehicle shape → SHADOW ✗
+       
+       Query: "buildings"
+       - Dark mask with rectangular edges, roof structure visible → DARK BUILDING ✓
+       - Dark elongated area next to tall building → BUILDING'S SHADOW ✗
+       
+       ═══════════════════════════════════════════════════════════════════════════════
+       
        GROUNDING VERIFICATION:
        - Do qualifying masks match PRIMARY TARGET feature type? [YES/NO]
-       - If NO: "These masks are [actual feature type], not [PRIMARY TARGET]."
-         → Call report_no_mask()
-       - If YES: "Masks match PRIMARY TARGET. → Proceed to selection"
+       - Are any masks actually SHADOWS? [List shadow masks to EXCLUDE]
+       - If all masks are shadows or wrong type: → Call report_no_mask()
+       - If valid masks remain: "Masks [X, Y] match PRIMARY TARGET. → Proceed to selection"
     
     6. FINAL SELECTION (only if grounding check passes):
        Based on grounding verification, confidence, and spatial analysis:
