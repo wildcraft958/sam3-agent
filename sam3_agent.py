@@ -41,21 +41,35 @@
 
 import os
 import sys
-import json
-import base64
-import tempfile
-import re
 import io
+import base64
+import json
+import re
+import tempfile
 from functools import partial
 
-# Disable PIL decompression bomb limit for large satellite/aerial imagery
-from PIL import Image as PILImageConfig
-PILImageConfig.MAX_IMAGE_PIXELS = None
+import modal
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple, Literal, Union
-from pydantic import BaseModel, Field, ValidationError, ConfigDict
 
-import modal
+# Conditional import for pydantic - only needed in Modal container, not locally
+try:
+    from pydantic import BaseModel, Field, ValidationError, ConfigDict
+except ImportError:
+    # Stub classes for local parsing - Modal container will have real pydantic
+    class BaseModel:
+        def __init__(self, **kwargs):
+            pass
+        model_config = None
+    
+    def Field(*args, **kwargs):
+        return None
+    
+    class ValidationError(Exception):
+        pass
+    
+    class ConfigDict(dict):
+        pass
 
 # ------------------------------------------------------------------------------
 # Modal app + image
@@ -1012,6 +1026,10 @@ class SAM3Model:
     @modal.enter()
     def setup(self):
         """Runs once per container: load SAM3 model + processor into GPU."""
+        # Disable PIL decompression bomb limit for large satellite/aerial imagery
+        from PIL import Image as PILImageConfig
+        PILImageConfig.MAX_IMAGE_PIXELS = None
+        
         from huggingface_hub import login
         from sam3.model_builder import build_sam3_image_model
         from sam3.model.sam3_image_processor import Sam3Processor
