@@ -789,6 +789,7 @@ class SAM3CountRequest(BaseModel):
     max_retries: Optional[int] = Field(2, ge=0, le=5, description="Maximum retry attempts for verification")
     pyramidal_config: Optional[PyramidalConfig] = Field(None, description="Pyramidal processing configuration")
     include_obb: Optional[bool] = Field(False, description="Include oriented bounding boxes (OBB) in response")
+    obb_as_polygon: Optional[bool] = Field(False, description="Return OBB as polygon coordinates instead of parametric format [cx, cy, w, h, angle]")
 
 
 class DetectionInfo(BaseModel):
@@ -798,6 +799,7 @@ class DetectionInfo(BaseModel):
     box: List[float] = Field(..., description="Bounding box [x1, y1, x2, y2]")
     pixel_area: Optional[int] = Field(None, description="Area in pixels")
     obb: Optional[List[float]] = Field(None, description="Oriented bounding box [cx, cy, w, h, angle] in degrees")
+    obb_polygon: Optional[List[List[float]]] = Field(None, description="OBB as polygon coordinates [[x1, y1], [x2, y2], [x3, y3], [x4, y4]]")
 
 
 class SAM3CountResponse(BaseModel):
@@ -879,6 +881,7 @@ class SAM3AreaRequest(BaseModel):
     max_retries: Optional[int] = Field(2, ge=0, le=5, description="Maximum retry attempts for verification")
     pyramidal_config: Optional[PyramidalConfig] = Field(None, description="Pyramidal processing configuration")
     include_obb: Optional[bool] = Field(False, description="Include oriented bounding boxes (OBB) in response")
+    obb_as_polygon: Optional[bool] = Field(False, description="Return OBB as polygon coordinates instead of parametric format [cx, cy, w, h, angle]")
 
 
 class IndividualArea(BaseModel):
@@ -889,6 +892,7 @@ class IndividualArea(BaseModel):
     score: float = Field(..., description="Confidence score")
     box: List[float] = Field(..., description="Bounding box [x1, y1, x2, y2]")
     obb: Optional[List[float]] = Field(None, description="Oriented bounding box [cx, cy, w, h, angle] in degrees")
+    obb_polygon: Optional[List[List[float]]] = Field(None, description="OBB as polygon coordinates [[x1, y1], [x2, y2], [x3, y3], [x4, y4]]")
 
 
 class SAM3AreaResponse(BaseModel):
@@ -999,6 +1003,7 @@ class RegionInfo(BaseModel):
     score: float = Field(..., description="Confidence score")
     box: List[float] = Field(..., description="Bounding box [x1, y1, x2, y2]")
     obb: Optional[List[float]] = Field(None, description="Oriented bounding box [cx, cy, w, h, angle] in degrees")
+    obb_polygon: Optional[List[List[float]]] = Field(None, description="OBB as polygon coordinates [[x1, y1], [x2, y2], [x3, y3], [x4, y4]]")
     mask_rle: Optional[Dict[str, Any]] = Field(None, description="RLE-encoded mask")
 
 
@@ -1647,6 +1652,62 @@ Output ONLY the alternative keyword (2-3 words max), nothing else:"""
             
         except Exception as e:
             print(f"⚠ Error generating OBB from mask: {e}")
+            return None
+
+    @staticmethod
+    def _obb_to_polygon(obb: List[float]) -> Optional[List[List[float]]]:
+        """
+        Convert OBB parametric representation to polygon coordinates.
+        
+        Args:
+            obb: [cx, cy, w, h, angle] in degrees
+            
+        Returns:
+            Polygon as list of 4 corner points: [[x1, y1], [x2, y2], [x3, y3], [x4, y4]]
+            or None if obb is None or invalid
+        """
+        import numpy as np
+        
+        if obb is None or len(obb) != 5:
+            return None
+        
+        try:
+            cx, cy, w, h, angle = obb
+            
+            # Convert angle to radians
+            angle_rad = np.deg2rad(angle)
+            
+            # Calculate half dimensions
+            half_w = w / 2.0
+            half_h = h / 2.0
+            
+            # Create box points in local coordinate system (centered at origin)
+            corners = np.array([
+                [-half_w, -half_h],
+                [half_w, -half_h],
+                [half_w, half_h],
+                [-half_w, half_h]
+            ])
+            
+            # Rotation matrix
+            cos_a = np.cos(angle_rad)
+            sin_a = np.sin(angle_rad)
+            rotation_matrix = np.array([
+                [cos_a, -sin_a],
+                [sin_a, cos_a]
+            ])
+            
+            # Rotate corners
+            rotated_corners = corners @ rotation_matrix.T
+            
+            # Translate to center position
+            polygon = rotated_corners + np.array([cx, cy])
+            
+            # Convert to list of lists
+            return polygon.tolist()
+            
+        except Exception as e:
+            print(f"⚠ Error converting OBB to polygon: {e}")
             return None
 
     @modal.method()
@@ -2343,6 +2404,7 @@ Output ONLY the alternative keyword (2-3 words max), nothing else:"""
         pyramidal_config: Dict[str, Any] = None,
         max_retries: int = 2,
         include_obb: bool = False,
+        obb_as_polygon: bool = False,
     ) -> Dict[str, Any]:
         """
         Count objects using VLM-enhanced pyramidal SAM3 segmentation.
@@ -2365,6 +2427,7 @@ Output ONLY the alternative keyword (2-3 words max), nothing else:"""
                 - iou_threshold: NMS IoU threshold (default: 0.5)
             max_retries: Maximum retry attempts with rephrased prompts (default: 2)
             include_obb: Whether to include oriented bounding boxes in response (default: False)
+            obb_as_polygon: If True and include_obb=True, return OBB as polygon coordinates instead of parametric format (default: False)
         
         Returns:
             Dict with count, visual_prompt, verification_info, detections, and processing stats
@@ -2508,6 +2571,10 @@ Output ONLY the alternative keyword (2-3 words max), nothing else:"""
                 if 'mask_rle' in det:
                     obb = self._generate_obb_from_mask_rle(det['mask_rle'], image_shape)
                     det['obb'] = obb
+                    # Convert to polygon if requested
+                    if obb_as_polygon and obb is not None:
+                        obb_polygon = self._obb_to_polygon(obb)
+                        det['obb_polygon'] = obb_polygon
         
         return {
             "status": "success",
@@ -2532,6 +2599,7 @@ Output ONLY the alternative keyword (2-3 words max), nothing else:"""
         pyramidal_config: Dict[str, Any] = None,
         max_retries: int = 2,
         include_obb: bool = False,
+        obb_as_polygon: bool = False,
     ) -> Dict[str, Any]:
         """
         Calculate areas of detected objects using VLM-enhanced Pyramidal SAM3 segmentation.
@@ -2555,6 +2623,7 @@ Output ONLY the alternative keyword (2-3 words max), nothing else:"""
                 - iou_threshold: NMS IoU threshold (default: 0.5)
             max_retries: Maximum retry attempts with rephrased prompts (default: 2)
             include_obb: Whether to include oriented bounding boxes in response (default: False)
+            obb_as_polygon: If True and include_obb=True, return OBB as polygon coordinates instead of parametric format (default: False)
         
         Returns:
             Dict with object count, total area (mask-based), coverage percentage, and per-object areas
@@ -2714,6 +2783,10 @@ Output ONLY the alternative keyword (2-3 words max), nothing else:"""
                 if include_obb and mask_rle:
                     obb = self._generate_obb_from_mask_rle(mask_rle, image_shape)
                     area_info["obb"] = obb
+                    # Convert to polygon if requested
+                    if obb_as_polygon and obb is not None:
+                        obb_polygon = self._obb_to_polygon(obb)
+                        area_info["obb_polygon"] = obb_polygon
                 
                 individual_areas.append(area_info)
                 print(f"  Object {idx+1}: {area_m2:.2f} m² ({pixel_area} pixels)")
@@ -3007,6 +3080,7 @@ Now analyze the image and query."""
         confidence_threshold: float = None,
         pyramidal_config: Dict[str, Any] = None,
         include_obb: bool = False,
+        obb_as_polygon: bool = False,
     ) -> Dict[str, Any]:
         """
         Core GPU inference method - LLM provider agnostic.
@@ -3032,6 +3106,7 @@ Now analyze the image and query."""
                 - batch_size: Batch size for inference (default: 16)
                 - iou_threshold: IoU threshold for NMS deduplication (default: 0.5)
             include_obb: Whether to include oriented bounding boxes in response (default: False)
+            obb_as_polygon: If True and include_obb=True, return OBB as polygon coordinates instead of parametric format (default: False)
         
         Returns:
             Dict with status, regions, summary, and optional debug visualization
@@ -3214,6 +3289,10 @@ Now analyze the image and query."""
                             if mask_rle:
                                 obb = self._generate_obb_from_mask_rle(mask_rle, image_shape)
                                 region["obb"] = obb
+                                # Convert to polygon if requested
+                                if obb_as_polygon and obb is not None:
+                                    obb_polygon = self._obb_to_polygon(obb)
+                                    region["obb_polygon"] = obb_polygon
 
                     # Ensure all data is JSON-serializable before returning
                     raw_json = make_json_serializable(raw_json)
@@ -3467,6 +3546,7 @@ all matching objects with verification to reduce false positives.
                 pyramidal_config=pyramidal_config_dict,
                 max_retries=request.max_retries,
                 include_obb=request.include_obb,
+                obb_as_polygon=request.obb_as_polygon,
             )
             print(f"✓ sam3_count returned count: {result.get('count', 0)}")
             return JSONResponse(content=result)
@@ -3533,6 +3613,7 @@ area measurements in square meters.
                 pyramidal_config=pyramidal_config_dict,
                 max_retries=request.max_retries,
                 include_obb=request.include_obb,
+                obb_as_polygon=request.obb_as_polygon,
             )
             print(f"✓ sam3_area returned {result.get('object_count', 0)} objects")
             return JSONResponse(content=result)
@@ -3599,6 +3680,7 @@ Set `debug=true` to receive a visualization image in the response.
                 confidence_threshold=request.confidence_threshold,
                 pyramidal_config=pyramidal_config_dict,
                 include_obb=request.include_obb,
+                obb_as_polygon=request.obb_as_polygon,
             )
             return JSONResponse(content=result)
             
