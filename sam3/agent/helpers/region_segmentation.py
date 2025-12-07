@@ -69,7 +69,7 @@ def transform_masks_to_global(
     Transform masks from region-local coordinates to global image coordinates.
     
     Args:
-        pred_boxes: List of boxes in normalized xywh format (region-local)
+        pred_boxes: List of boxes in normalized xyxy format [x1, y1, x2, y2] (region-local)
         pred_masks: List of RLE masks (region-local)
         region_bbox: Pixel coordinates (x_min, y_min, x_max, y_max) of the region
         orig_img_h: Original full image height
@@ -82,27 +82,29 @@ def transform_masks_to_global(
     region_w = x_max - x_min
     region_h = y_max - y_min
     
-    # Transform boxes: region-local normalized xywh -> global normalized xywh
+    # Transform boxes: region-local normalized xyxy -> global normalized xyxy
     transformed_boxes = []
     for box in pred_boxes:
-        # box is [x_center, y_center, width, height] in normalized region coordinates
+        # box is [x1, y1, x2, y2] in normalized region coordinates
         # Convert to pixel coordinates in region
-        cx_local = box[0] * region_w
-        cy_local = box[1] * region_h
-        w_local = box[2] * region_w
-        h_local = box[3] * region_h
+        x1_local = box[0] * region_w
+        y1_local = box[1] * region_h
+        x2_local = box[2] * region_w
+        y2_local = box[3] * region_h
         
         # Convert to global pixel coordinates
-        cx_global = cx_local + x_min
-        cy_global = cy_local + y_min
+        x1_global = x1_local + x_min
+        y1_global = y1_local + y_min
+        x2_global = x2_local + x_min
+        y2_global = y2_local + y_min
         
         # Convert back to normalized global coordinates
-        cx_global_norm = cx_global / orig_img_w
-        cy_global_norm = cy_global / orig_img_h
-        w_global_norm = w_local / orig_img_w
-        h_global_norm = h_local / orig_img_h
+        x1_global_norm = x1_global / orig_img_w
+        y1_global_norm = y1_global / orig_img_h
+        x2_global_norm = x2_global / orig_img_w
+        y2_global_norm = y2_global / orig_img_h
         
-        transformed_boxes.append([cx_global_norm, cy_global_norm, w_global_norm, h_global_norm])
+        transformed_boxes.append([x1_global_norm, y1_global_norm, x2_global_norm, y2_global_norm])
     
     # Transform masks: region-local RLE -> global RLE
     transformed_masks = []

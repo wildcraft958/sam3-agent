@@ -153,7 +153,7 @@ class QwenVLMInterface(VisionLanguageModel):
     """
     
     def __init__(self, 
-                 base_url: str = "https://aryan-don357--qwen3-vl-vllm-server-30b-vllm-server.modal.run/v1",
+                 base_url: str = "https://srinjoy59--qwen3-vl-vllm-server-30b-vllm-server.modal.run/v1",
                  model_name: str = "Qwen/Qwen3-VL-30B-A3B-Instruct", 
                  timeout: int = 120):
         self.base_url = base_url.rstrip('/')

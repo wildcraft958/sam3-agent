@@ -113,7 +113,7 @@ def compute_mask_attributes(
     Compute mask attributes: size ratio and aspect ratio.
     
     Args:
-        pred_box: Normalized box in xywh format [x_center, y_center, width, height]
+        pred_box: Normalized box in xyxy format [x1, y1, x2, y2]
         pred_mask: RLE mask
         orig_img_h: Original image height
         orig_img_w: Original image width
@@ -128,9 +128,9 @@ def compute_mask_attributes(
     size_ratio = mask_area / image_area if image_area > 0 else 0.0
     
     # Compute aspect ratio from box
-    # pred_box is [x_center, y_center, width, height] normalized
-    width_norm = pred_box[2]
-    height_norm = pred_box[3]
+    # pred_box is [x1, y1, x2, y2] normalized
+    width_norm = pred_box[2] - pred_box[0]
+    height_norm = pred_box[3] - pred_box[1]
     
     # Convert to pixel dimensions
     width_px = width_norm * orig_img_w

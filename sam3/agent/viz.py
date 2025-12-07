@@ -63,44 +63,33 @@ def visualize(
             if isinstance(mask_entry, dict) and "counts" in mask_entry and "size" in mask_entry:
                 # New format: full RLE dict already has counts and size
                 rle = {"size": tuple(mask_entry["size"]), "counts": mask_entry["counts"]}
+                rle_masks.append(rle)
             else:
                 # Old format: string counts, reconstruct size from orig_img_h/w
-                rle_masks.append({"size": (orig_h, orig_w), "counts": rle})
-        binary_masks = [mask_utils.decode(rle) for rle in rle_masks]
+                rle_masks.append({"size": (orig_h, orig_w), "counts": mask_entry})
+        
+        # Decode all RLE masks to binary
+        for rle in rle_masks:
+            mask = mask_utils.decode(rle)
+            if mask.ndim == 3:
+                mask = mask[:, :, 0]
+            binary_masks.append(mask)
         
         # Resize masks to match original image dimensions if needed (pyramidal processing fix)
         resized_binary_masks = []
         for mask in binary_masks:
             if mask.shape[0] != orig_h or mask.shape[1] != orig_w:
                 # Resize mask to match original image dimensions
-                resized_mask = cv2.resize(
+                resized_mask = True
+                mask = cv2.resize(
                     mask.astype(np.float32),
                     (orig_w, orig_h),  # cv2.resize uses (width, height)
                     interpolation=cv2.INTER_NEAREST
                 )
-                resized_binary_masks.append((resized_mask > 0.5).astype(np.uint8))
+                resized_binary_masks.append((mask > 0.5).astype(np.uint8))
             else:
                 resized_binary_masks.append(mask)
         binary_masks = resized_binary_masks
-
-            mask = mask_utils.decode(rle)
-            if mask.ndim == 3:
-                mask = mask[:, :, 0]
-
-            if mask.shape[:2] != (target_h, target_w):
-                resized_mask = True
-                mask = cv2.resize(
-                    mask, (target_w, target_h), interpolation=cv2.INTER_NEAREST
-                )
-                mask = (mask > 0).astype("uint8")
-                encoded = mask_utils.encode(np.asfortranarray(mask))
-                counts = encoded["counts"]
-                if isinstance(counts, bytes):
-                    counts = counts.decode("utf-8")
-                rle = {"size": list(encoded["size"]), "counts": counts}
-
-            rle_masks.append(rle)
-            binary_masks.append(mask)
 
         if resized_mask:
             logger.warning(

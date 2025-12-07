@@ -101,7 +101,8 @@ function App() {
         // Use pure SAM3 counting (no LLM)
         const countResponse = await countImage({
           prompt: prompt,
-          image_b64: imageBase64,
+          image_url: `data:image/jpeg;base64,${imageBase64}`,
+          llm_config: llmConfig,
           confidence_threshold: sam3Config.confidence_threshold,
         }, signal);
 
@@ -139,7 +140,7 @@ function App() {
         // Use full agent with LLM
         const segmentResponse = await segmentImage({
           prompt,
-          image_b64: imageBase64,
+          image_url: `data:image/jpeg;base64,${imageBase64}`,
           llm_config: llmConfig,
           debug: true,
           confidence_threshold: sam3Config.confidence_threshold,

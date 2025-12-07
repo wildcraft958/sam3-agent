@@ -86,7 +86,7 @@ def transform_mask_coordinates(
     Transform mask coordinates from tile-local to global image coordinates.
     
     Args:
-        box: Normalized box in xywh format [x_center, y_center, width, height] (tile-local)
+        box: Normalized box in xyxy format [x1, y1, x2, y2] (tile-local)
         mask: RLE mask (tile-local)
         tile_bbox: Tile bounding box (x_min, y_min, x_max, y_max) in pixels
         orig_img_h: Original full image height
@@ -99,24 +99,26 @@ def transform_mask_coordinates(
     tile_w = x_max - x_min
     tile_h = y_max - y_min
     
-    # Transform box: tile-local normalized xywh -> global normalized xywh
-    # box is [x_center, y_center, width, height] in normalized tile coordinates
-    cx_local = box[0] * tile_w
-    cy_local = box[1] * tile_h
-    w_local = box[2] * tile_w
-    h_local = box[3] * tile_h
+    # Transform box: tile-local normalized xyxy -> global normalized xyxy
+    # box is [x1, y1, x2, y2] in normalized tile coordinates
+    x1_local = box[0] * tile_w
+    y1_local = box[1] * tile_h
+    x2_local = box[2] * tile_w
+    y2_local = box[3] * tile_h
     
     # Convert to global pixel coordinates
-    cx_global = cx_local + x_min
-    cy_global = cy_local + y_min
+    x1_global = x1_local + x_min
+    y1_global = y1_local + y_min
+    x2_global = x2_local + x_min
+    y2_global = y2_local + y_min
     
     # Convert back to normalized global coordinates
-    cx_global_norm = cx_global / orig_img_w
-    cy_global_norm = cy_global / orig_img_h
-    w_global_norm = w_local / orig_img_w
-    h_global_norm = h_local / orig_img_h
+    x1_global_norm = x1_global / orig_img_w
+    y1_global_norm = y1_global / orig_img_h
+    x2_global_norm = x2_global / orig_img_w
+    y2_global_norm = y2_global / orig_img_h
     
-    transformed_box = [cx_global_norm, cy_global_norm, w_global_norm, h_global_norm]
+    transformed_box = [x1_global_norm, y1_global_norm, x2_global_norm, y2_global_norm]
     
     # Transform mask: tile-local RLE -> global RLE
     if mask_utils is None:
@@ -160,26 +162,18 @@ def transform_mask_coordinates(
 
 def compute_iou_boxes(box1: List[float], box2: List[float]) -> float:
     """
-    Compute IoU between two normalized boxes in xywh format.
+    Compute IoU between two normalized boxes in xyxy format.
     
     Args:
-        box1: [x_center, y_center, width, height] normalized
-        box2: [x_center, y_center, width, height] normalized
+        box1: [x1, y1, x2, y2] normalized
+        box2: [x1, y1, x2, y2] normalized
     
     Returns:
         IoU value
     """
-    # Convert to xyxy format
-    def xywh_to_xyxy(box):
-        cx, cy, w, h = box
-        x_min = cx - w / 2
-        y_min = cy - h / 2
-        x_max = cx + w / 2
-        y_max = cy + h / 2
-        return x_min, y_min, x_max, y_max
-    
-    x1_min, y1_min, x1_max, y1_max = xywh_to_xyxy(box1)
-    x2_min, y2_min, x2_max, y2_max = xywh_to_xyxy(box2)
+    # Boxes are already in xyxy format
+    x1_min, y1_min, x1_max, y1_max = box1
+    x2_min, y2_min, x2_max, y2_max = box2
     
     # Compute intersection
     inter_x_min = max(x1_min, x2_min)
@@ -192,9 +186,9 @@ def compute_iou_boxes(box1: List[float], box2: List[float]) -> float:
     
     inter_area = (inter_x_max - inter_x_min) * (inter_y_max - inter_y_min)
     
-    # Compute union
-    box1_area = box1[2] * box1[3]
-    box2_area = box2[2] * box2[3]
+    # Compute union (area = (x2 - x1) * (y2 - y1))
+    box1_area = (box1[2] - box1[0]) * (box1[3] - box1[1])
+    box2_area = (box2[2] - box2[0]) * (box2[3] - box2[1])
     union_area = box1_area + box2_area - inter_area
     
     if union_area <= 0:

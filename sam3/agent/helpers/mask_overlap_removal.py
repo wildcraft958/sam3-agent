@@ -11,6 +11,65 @@ except Exception:
     mask_utils = None
 
 
+def bbox_iou(box1, box2):
+    """
+    Calculate IoU between two boxes in [x1, y1, x2, y2] format (normalized or absolute).
+    
+    Args:
+        box1: [x1, y1, x2, y2] bounding box
+        box2: [x1, y1, x2, y2] bounding box
+    
+    Returns:
+        IoU value between 0 and 1
+    """
+    # Validate boxes have 4 elements
+    if len(box1) != 4 or len(box2) != 4:
+        return 0.0
+    
+    x1 = max(box1[0], box2[0])
+    y1 = max(box1[1], box2[1])
+    x2 = min(box1[2], box2[2])
+    y2 = min(box1[3], box2[3])
+    
+    inter_area = max(0, x2 - x1) * max(0, y2 - y1)
+    
+    box1_area = (box1[2] - box1[0]) * (box1[3] - box1[1])
+    box2_area = (box2[2] - box2[0]) * (box2[3] - box2[1])
+    
+    union_area = box1_area + box2_area - inter_area
+    
+    if union_area <= 0:
+        return 0.0
+    return inter_area / union_area
+
+
+def bbox_nms(boxes, scores, iou_threshold=0.5):
+    """
+    Apply Non-Maximum Suppression on bounding boxes.
+    Returns indices of boxes to keep.
+    """
+    if len(boxes) == 0:
+        return []
+    
+    # Sort by score descending
+    order = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)
+    
+    keep = []
+    while order:
+        i = order[0]
+        keep.append(i)
+        order = order[1:]
+        
+        # Filter out boxes with high IoU
+        remaining = []
+        for j in order:
+            if bbox_iou(boxes[i], boxes[j]) < iou_threshold:
+                remaining.append(j)
+        order = remaining
+    
+    return keep
+
+
 def mask_intersection(
     masks1: torch.Tensor, masks2: torch.Tensor, block_size: int = 16
 ) -> torch.Tensor:
@@ -76,9 +135,11 @@ def _decode_masks_to_torch_bool(pred_masks: List, h: int, w: int) -> torch.Tenso
     return torch.from_numpy(masks_np > 0)
 
 
-def remove_overlapping_masks(sample: Dict, iom_thresh: float = 0.3) -> Dict:
+def remove_overlapping_masks(sample: Dict, bbox_iou_thresh: float = 0.5) -> Dict:
     """
-    Greedy keep: sort by score desc; keep a mask if IoM to all kept masks <= threshold.
+    Bounding Box NMS deduplication for batch segmentation results.
+    Removes boxes with IoU > bbox_iou_thresh (keeps higher confidence detections).
+    
     If pred_masks has length 0 or 1, returns sample unchanged (no extra keys).
     """
     # Basic presence checks
@@ -92,15 +153,6 @@ def remove_overlapping_masks(sample: Dict, iom_thresh: float = 0.3) -> Dict:
     if N <= 1:
         return sample
 
-    # From here on we have at least 2 masks
-    # Get image dimensions - prefer from first mask if new format, else from orig_img_h/w
-    h = int(sample["orig_img_h"])
-    w = int(sample["orig_img_w"])
-    # If using new format, get size from first mask (all masks should have same size)
-    if pred_masks and isinstance(pred_masks[0], dict) and "size" in pred_masks[0]:
-        mask_size = pred_masks[0]["size"]
-        h, w = int(mask_size[0]), int(mask_size[1])
-    
     pred_scores = sample.get("pred_scores", [1.0] * N)  # fallback if scores missing
     pred_boxes = sample.get("pred_boxes", None)
 
@@ -108,35 +160,29 @@ def remove_overlapping_masks(sample: Dict, iom_thresh: float = 0.3) -> Dict:
     if pred_boxes is not None:
         assert N == len(pred_boxes), "pred_masks and pred_boxes must have same length"
 
-    masks_bool = _decode_masks_to_torch_bool(pred_masks, h, w)  # (N, H, W)
-
-    order = sorted(range(N), key=lambda i: float(pred_scores[i]), reverse=True)
-    kept_idx: List[int] = []
-    kept_masks: List[torch.Tensor] = []
-
-    for i in order:
-        cand = masks_bool[i].unsqueeze(0)  # (1, H, W)
-        if len(kept_masks) == 0:
-            kept_idx.append(i)
-            kept_masks.append(masks_bool[i])
-            continue
-
-        kept_stack = torch.stack(kept_masks, dim=0)  # (K, H, W)
-        iom_vals = mask_iom(cand, kept_stack).squeeze(0)  # (K,)
-        if torch.any(iom_vals > iom_thresh):
-            continue  # overlaps too much with a higher-scored kept mask
-        kept_idx.append(i)
-        kept_masks.append(masks_bool[i])
-
-    kept_idx_sorted = sorted(kept_idx)
-
-    # Build filtered JSON (this *does* modify fields; only for N>=2 case)
-    out = dict(sample)
-    out["pred_masks"] = [pred_masks[i] for i in kept_idx_sorted]
-    out["pred_scores"] = [pred_scores[i] for i in kept_idx_sorted]
-    if pred_boxes is not None:
-        out["pred_boxes"] = [pred_boxes[i] for i in kept_idx_sorted]
-    out["kept_indices"] = kept_idx_sorted
-    out["removed_indices"] = [i for i in range(N) if i not in set(kept_idx_sorted)]
-    out["iom_threshold"] = float(iom_thresh)
-    return out
+    # ============================================================
+    # Bounding Box NMS - removes duplicate detections
+    # ============================================================
+    if pred_boxes is not None and len(pred_boxes) > 1:
+        bbox_keep_indices = bbox_nms(pred_boxes, pred_scores, iou_threshold=bbox_iou_thresh)
+        
+        # Filter to only boxes that passed bbox NMS
+        final_masks = [pred_masks[i] for i in bbox_keep_indices]
+        final_scores = [pred_scores[i] for i in bbox_keep_indices]
+        final_boxes = [pred_boxes[i] for i in bbox_keep_indices]
+        final_count = len(final_masks)
+        
+        print(f"    📦 BBox NMS (IoU>{bbox_iou_thresh}): {N} → {final_count} masks")
+        
+        # Build filtered output
+        out = dict(sample)
+        out["pred_masks"] = final_masks
+        out["pred_scores"] = final_scores
+        out["pred_boxes"] = final_boxes
+        out["kept_indices"] = bbox_keep_indices
+        out["removed_indices"] = [i for i in range(N) if i not in set(bbox_keep_indices)]
+        out["bbox_iou_threshold"] = float(bbox_iou_thresh)
+        return out
+    
+    # No boxes to filter - return as is
+    return sample

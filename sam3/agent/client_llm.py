@@ -122,6 +122,18 @@ def send_generate_request(
         print(f"   Server URL: {server_url}")
         print(f"   Messages: {len(processed_messages)} messages")
         
+        # Log message structure for debugging
+        message_types = {}
+        for msg in processed_messages:
+            role = msg.get("role", "unknown")
+            if "content" in msg:
+                if isinstance(msg["content"], list):
+                    content_types = [c.get("type", "unknown") for c in msg["content"] if isinstance(c, dict)]
+                    message_types[role] = content_types
+                else:
+                    message_types[role] = type(msg["content"]).__name__
+        print(f"   Message structure: {message_types}")
+        
         # Prepare request parameters
         # NOTE: We intentionally DO NOT pass tools to the API request
         # because the OpenAI SDK automatically adds tool_choice="auto" when tools are present,
@@ -134,7 +146,8 @@ def send_generate_request(
             "n": 1,
         }
         
-        response = client.chat.completions.create(**request_params)
+        # Add timeout to prevent hanging requests (2 minutes default)
+        response = client.chat.completions.create(**request_params, timeout=120.0)
 
         # Extract the response
         if response.choices and len(response.choices) > 0:
@@ -142,12 +155,52 @@ def send_generate_request(
             
             # Return text response - tool calls will be parsed from text by agent_core
             content = message.content
+            
+            # Handle case where content is None but tool_calls might be present
             if content is None:
+                finish_reason = response.choices[0].finish_reason if response.choices else 'N/A'
                 print(f"⚠️ Warning: Response content is None")
-                print(f"   Full response: {response}")
+                print(f"   Model: {model}")
+                print(f"   Server URL: {server_url}")
+                print(f"   Finish reason: {finish_reason}")
+                print(f"   Message count: {len(processed_messages)}")
+                
+                # Check for tool_calls - some models return tool_calls instead of content
+                tool_calls_present = hasattr(message, 'tool_calls') and message.tool_calls
+                if tool_calls_present:
+                    print(f"   ⚠️ Tool calls present ({len(message.tool_calls)}): Model returned structured tool_calls instead of text")
+                    print(f"   Tool calls: {message.tool_calls}")
+                    print(f"   ⚠️ This model may be using structured tool calling, but agent expects text-based tool calls")
+                    print(f"   💡 Possible solutions:")
+                    print(f"      1. Check if the model supports text-based tool calling")
+                    print(f"      2. Verify the model configuration and API compatibility")
+                    print(f"      3. Check if tool_choice parameter needs to be set differently")
+                    # Return None to trigger retry logic in agent_core
+                    return None
+                else:
+                    print(f"   ❌ No content and no tool_calls - this indicates a model error or unexpected response format")
+                    print(f"   💡 Possible causes:")
+                    print(f"      1. Model server error or timeout")
+                    print(f"      2. Model ran out of context or tokens")
+                    print(f"      3. Invalid request format")
+                    print(f"      4. Model configuration issue")
+                    if finish_reason:
+                        print(f"   Finish reason '{finish_reason}' may provide additional context")
+                    return None
             return content
         else:
             print(f"❌ Unexpected response format: {response}")
+            print(f"   Model: {model}")
+            print(f"   Server URL: {server_url}")
+            print(f"   Request params: model={request_params['model']}, max_tokens={request_params['max_tokens']}, n={request_params['n']}")
+            print(f"   Message count: {len(processed_messages)}")
+            print(f"   Response type: {type(response)}")
+            print(f"   Response keys/attributes: {dir(response) if hasattr(response, '__dict__') else 'N/A'}")
+            if hasattr(response, 'choices'):
+                print(f"   Choices: {response.choices}")
+                print(f"   Choices length: {len(response.choices) if response.choices else 0}")
+            else:
+                print(f"   Response has no 'choices' attribute")
             return None
 
     except Exception as e:
@@ -168,7 +221,12 @@ def send_generate_request(
             raise ValueError(hint) from e
 
         print(f"❌ Request failed: {e}")
-        print(f"   Traceback: {traceback.format_exc()}")
+        print(f"   Model: {model}")
+        print(f"   Server URL: {server_url}")
+        print(f"   Message count: {len(processed_messages)}")
+        print(f"   Request params: model={request_params.get('model', 'N/A')}, max_tokens={request_params.get('max_tokens', 'N/A')}")
+        print(f"   Exception type: {type(e).__name__}")
+        print(f"   Full traceback: {traceback.format_exc()}")
         # Re-raise to see the actual error in logs
         raise
 

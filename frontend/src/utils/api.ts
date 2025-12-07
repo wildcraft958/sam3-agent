@@ -1,7 +1,13 @@
 import axios from 'axios';
 
-const API_ENDPOINT = import.meta.env.VITE_API_ENDPOINT || 'https://srinjoy59--sam3-agent-pyramidal-sam3-segment.modal.run';
-const COUNT_ENDPOINT = import.meta.env.VITE_COUNT_ENDPOINT || 'https://srinjoy59--sam3-agent-pyramidal-sam3-count.modal.run';
+// Modal deployment base URL - can be overridden via environment variable
+const MODAL_BASE_URL = import.meta.env.VITE_MODAL_BASE_URL || 'https://animerj958--sam3-agent-pyramidal-v2-fastapi-app.modal.run';
+
+// API endpoints - constructed from base URL
+const API_ENDPOINT = `${MODAL_BASE_URL}/sam3/segment`;
+const COUNT_ENDPOINT = `${MODAL_BASE_URL}/sam3/count`;
+const AREA_ENDPOINT = `${MODAL_BASE_URL}/sam3/area`;
+const HEALTH_ENDPOINT = `${MODAL_BASE_URL}/health`;
 
 export interface LLMConfig {
   base_url: string;
@@ -13,7 +19,6 @@ export interface LLMConfig {
 
 export interface SegmentRequest {
   prompt: string;
-  image_b64?: string;
   image_url?: string;
   llm_config: LLMConfig;
   debug?: boolean;
@@ -22,9 +27,10 @@ export interface SegmentRequest {
 
 export interface CountRequest {
   prompt: string;
-  image_b64?: string;
   image_url?: string;
+  llm_config: LLMConfig;
   confidence_threshold?: number;
+  max_retries?: number;
 }
 
 export interface Region {
@@ -64,6 +70,7 @@ export interface CountResponse {
   status: 'success' | 'error';
   count?: number;
   object_type?: string;
+  visual_prompt?: string;
   confidence_summary?: {
     high: number;
     medium: number;
@@ -73,12 +80,57 @@ export interface CountResponse {
     box: number[];
     mask_rle: { counts: string | number[]; size: number[] };
     score: number;
-    scale: number;
+    scale?: number;
   }>;
   orig_img_h?: number;
   orig_img_w?: number;
+  verification_info?: Record<string, any>;
+  pyramidal_stats?: Record<string, any>;
   message?: string;
   traceback?: string;
+}
+
+export interface AreaRequest {
+  prompt: string;
+  image_url?: string;
+  llm_config: LLMConfig;
+  gsd?: number;
+  confidence_threshold?: number;
+  max_retries?: number;
+}
+
+export interface AreaResponse {
+  status: 'success' | 'error';
+  object_count?: number;
+  total_pixel_area?: number;
+  total_real_area_m2?: number;
+  coverage_percentage?: number;
+  individual_areas?: Array<{
+    id: number;
+    pixel_area: number;
+    real_area_m2?: number;
+    score: number;
+    box: number[];
+  }>;
+  visual_prompt?: string;
+  verification_info?: Record<string, any>;
+  pyramidal_stats?: Record<string, any>;
+  message?: string;
+  traceback?: string;
+}
+
+export interface HealthResponse {
+  status: string;
+  service: string;
+}
+
+// Helper functions to get endpoints (for runtime configuration support)
+function getApiEndpoint(): string {
+  return API_ENDPOINT;
+}
+
+function getInferEndpoint(): string {
+  return COUNT_ENDPOINT;
 }
 
 export async function segmentImage(
@@ -90,8 +142,8 @@ export async function segmentImage(
   console.log('[API] Starting segmentImage request', {
     endpoint: endpoint,
     prompt: request.prompt?.substring(0, 50) + '...',
-    hasImage: !!request.image_b64,
-    imageSize: request.image_b64 ? `${Math.round(request.image_b64.length / 1024)}KB` : 'N/A',
+    hasImage: !!request.image_url,
+    imageSize: request.image_url ? (request.image_url.startsWith('data:') ? `${Math.round((request.image_url.length - request.image_url.indexOf(',') - 1) * 3 / 4 / 1024)}KB` : 'URL') : 'N/A',
   });
 
   try {
@@ -208,6 +260,15 @@ export async function countImage(
   request: CountRequest,
   signal?: AbortSignal
 ): Promise<CountResponse> {
+  const endpoint = COUNT_ENDPOINT;
+  const startTime = Date.now();
+  console.log('[API] Starting countImage request', {
+    endpoint: endpoint,
+    prompt: request.prompt?.substring(0, 50) + '...',
+    hasImage: !!request.image_url,
+    imageSize: request.image_url ? (request.image_url.startsWith('data:') ? `${Math.round((request.image_url.length - request.image_url.indexOf(',') - 1) * 3 / 4 / 1024)}KB` : 'URL') : 'N/A',
+  });
+
   try {
     const response = await axios.post<CountResponse>(COUNT_ENDPOINT, request, {
       headers: {
@@ -218,15 +279,15 @@ export async function countImage(
     });
     
     const duration = Date.now() - startTime;
-    console.log('[API] inferImage request succeeded', {
+    console.log('[API] countImage request succeeded', {
       duration: `${duration}ms`,
       status: response.data.status,
-      boxesCount: response.data.pred_boxes?.length || 0,
-      masksCount: response.data.pred_masks?.length || 0,
+      count: response.data.count || 0,
+      detectionsCount: response.data.detections?.length || 0,
     });
 
     if (response.data.status === 'error') {
-      console.error('[API] inferImage returned error status', {
+      console.error('[API] countImage returned error status', {
         message: response.data.message,
         traceback: response.data.traceback,
       });
@@ -244,7 +305,7 @@ export async function countImage(
                          (!error.response && error.request);
       
       if (isCorsError) {
-        console.error('[API] CORS error detected in inferImage', {
+        console.error('[API] CORS error detected in countImage', {
           endpoint: endpoint,
           error: error.message,
           code: error.code,
@@ -258,7 +319,7 @@ export async function countImage(
 
       // Handle cancellation
       if (error.code === 'ERR_CANCELED' || error.message === 'canceled') {
-        console.log('[API] inferImage request cancelled by user');
+        console.log('[API] countImage request cancelled by user');
         return {
           status: 'error',
           message: 'Request was cancelled by user',
@@ -267,7 +328,7 @@ export async function countImage(
       
       // Handle timeout specifically
       if (error.code === 'ECONNABORTED' || error.message.includes('timeout')) {
-        console.error('[API] inferImage request timed out', {
+        console.error('[API] countImage request timed out', {
           endpoint: endpoint,
           duration: `${duration}ms`,
         });
@@ -279,7 +340,7 @@ export async function countImage(
 
       // Network errors
       if (error.code === 'ERR_NETWORK' || error.code === 'ECONNREFUSED') {
-        console.error('[API] Network error in inferImage', {
+        console.error('[API] Network error in countImage', {
           endpoint: endpoint,
           code: error.code,
           message: error.message,
@@ -290,7 +351,7 @@ export async function countImage(
         };
       }
 
-      console.error('[API] inferImage request failed', {
+      console.error('[API] countImage request failed', {
         endpoint: endpoint,
         status: error.response?.status,
         statusText: error.response?.statusText,
@@ -306,7 +367,7 @@ export async function countImage(
       };
     }
 
-    console.error('[API] Unexpected error in inferImage', {
+    console.error('[API] Unexpected error in countImage', {
       error: error instanceof Error ? error.message : String(error),
       errorType: error?.constructor?.name,
     });
@@ -314,6 +375,67 @@ export async function countImage(
     return {
       status: 'error',
       message: error instanceof Error ? error.message : 'Unknown error',
+    };
+  }
+}
+
+export async function calculateArea(
+  request: AreaRequest,
+  signal?: AbortSignal
+): Promise<AreaResponse> {
+  try {
+    const response = await axios.post<AreaResponse>(AREA_ENDPOINT, request, {
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      timeout: 600000, // 10 minutes timeout (matches Modal backend timeout)
+      signal, // Add abort signal support
+    });
+    return response.data;
+  } catch (error) {
+    if (axios.isAxiosError(error)) {
+      // Handle cancellation
+      if (error.code === 'ERR_CANCELED' || error.message === 'canceled') {
+        return {
+          status: 'error',
+          message: 'Request was cancelled by user',
+        };
+      }
+      // Handle timeout specifically
+      if (error.code === 'ECONNABORTED' || error.message.includes('timeout')) {
+        return {
+          status: 'error',
+          message: 'Request timed out. The backend is still processing. Please check Modal logs or try again.',
+        };
+      }
+      return {
+        status: 'error',
+        message: error.response?.data?.message || error.message || 'Network error',
+      };
+    }
+    return {
+      status: 'error',
+      message: error instanceof Error ? error.message : 'Unknown error',
+    };
+  }
+}
+
+export async function checkHealth(): Promise<HealthResponse> {
+  try {
+    const response = await axios.get<HealthResponse>(HEALTH_ENDPOINT, {
+      timeout: 5000, // 5 seconds for health check
+    });
+    return response.data;
+  } catch (error) {
+    if (axios.isAxiosError(error)) {
+      return {
+        status: 'error',
+        service: 'sam3-agent',
+      };
+    }
+    return {
+      status: 'error',
+      service: 'sam3-agent',
     };
   }
 }

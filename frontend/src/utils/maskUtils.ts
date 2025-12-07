@@ -80,7 +80,9 @@ function resizeMask(
 }
 
 /**
- * Convert normalized bbox [x, y, w, h] to pixel coordinates
+ * Convert normalized bbox to pixel coordinates
+ * Format: [x1, y1, x2, y2] - corner-based (xyxy format)
+ * 
  * Input: normalized coordinates in range [0, 1]
  * Output: pixel coordinates [x1, y1, x2, y2]
  */
@@ -89,11 +91,18 @@ export function normalizedBboxToPixels(
   imgWidth: number,
   imgHeight: number
 ): [number, number, number, number] {
-  const [x, y, w, h] = bbox;
-  const x1 = Math.floor(x * imgWidth);
-  const y1 = Math.floor(y * imgHeight);
-  const x2 = Math.floor((x + w) * imgWidth);
-  const y2 = Math.floor((y + h) * imgHeight);
+  if (bbox.length < 4) {
+    console.warn('Invalid bbox format, expected 4 values');
+    return [0, 0, 0, 0];
+  }
+
+  const [x1_norm, y1_norm, x2_norm, y2_norm] = bbox;
+  
+  // Convert normalized [x1, y1, x2, y2] to pixel coordinates
+  const x1 = Math.floor(x1_norm * imgWidth);
+  const y1 = Math.floor(y1_norm * imgHeight);
+  const x2 = Math.floor(x2_norm * imgWidth);
+  const y2 = Math.floor(y2_norm * imgHeight);
 
   // Clamp to image bounds
   return [
