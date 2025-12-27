@@ -1,11 +1,5 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import {
-  getEndpointConfig,
-  getApiEndpoint,
-  getInferEndpoint,
-  setApiEndpoint,
-  setInferEndpoint,
-  resetEndpoints,
   checkAllEndpoints,
   ConnectivityResult,
 } from '../utils/api';
@@ -20,9 +14,6 @@ interface DiagnosticResult {
 export default function DiagnosticPage() {
   const [results, setResults] = useState<DiagnosticResult[]>([]);
   const [isRunning, setIsRunning] = useState(false);
-  const [endpointConfig, setEndpointConfig] = useState(getEndpointConfig());
-  const [customApiEndpoint, setCustomApiEndpoint] = useState('');
-  const [customInferEndpoint, setCustomInferEndpoint] = useState('');
 
   const addResult = (result: DiagnosticResult) => {
     setResults((prev) => [...prev, result]);
@@ -36,7 +27,7 @@ export default function DiagnosticPage() {
     try {
       const canvas = document.createElement('canvas');
       const ctx = canvas.getContext('2d');
-      
+
       if (!ctx) {
         return {
           name: 'Canvas 2D Context',
@@ -50,7 +41,7 @@ export default function DiagnosticPage() {
       canvas.height = 100;
       ctx.fillStyle = '#FF0000';
       ctx.fillRect(0, 0, 50, 50);
-      
+
       const imageData = ctx.getImageData(0, 0, 50, 50);
       const hasRed = imageData.data[0] === 255;
 
@@ -211,23 +202,13 @@ export default function DiagnosticPage() {
     const imageResult = await checkImageLoading();
     addResult(imageResult);
 
-    // 5. Endpoint Configuration
-    const config = getEndpointConfig();
-    setEndpointConfig(config);
-    addResult({
-      name: 'Endpoint Configuration',
-      status: 'pass',
-      message: 'Endpoint configuration loaded',
-      details: config,
-    });
-
-    // 6. API Endpoint Connectivity
+    // 5. API Endpoint Connectivity
     addResult({
       name: 'API Endpoint Connectivity',
       status: 'pending',
       message: 'Testing connectivity...',
     });
-    
+
     try {
       const connectivityResults = await checkAllEndpoints(5000);
       setResults((prev) => {
@@ -261,40 +242,6 @@ export default function DiagnosticPage() {
     }
 
     setIsRunning(false);
-  };
-
-  const handleSetApiEndpoint = () => {
-    if (customApiEndpoint.trim()) {
-      const result = setApiEndpoint(customApiEndpoint.trim());
-      if (result.success) {
-        setEndpointConfig(getEndpointConfig());
-        alert('API endpoint updated successfully!');
-      } else {
-        alert(`Failed to set endpoint: ${result.error}`);
-      }
-    }
-  };
-
-  const handleSetInferEndpoint = () => {
-    if (customInferEndpoint.trim()) {
-      const result = setInferEndpoint(customInferEndpoint.trim());
-      if (result.success) {
-        setEndpointConfig(getEndpointConfig());
-        alert('Infer endpoint updated successfully!');
-      } else {
-        alert(`Failed to set endpoint: ${result.error}`);
-      }
-    }
-  };
-
-  const handleResetEndpoints = () => {
-    if (confirm('Reset endpoints to defaults?')) {
-      resetEndpoints();
-      setEndpointConfig(getEndpointConfig());
-      setCustomApiEndpoint('');
-      setCustomInferEndpoint('');
-      alert('Endpoints reset to defaults');
-    }
   };
 
   const getStatusIcon = (status: DiagnosticResult['status']) => {
@@ -350,74 +297,6 @@ export default function DiagnosticPage() {
             Clear Results
           </button>
         </div>
-      </div>
-
-      <div className="panel-section">
-        <h2>Endpoint Configuration</h2>
-        <div className="endpoint-config">
-          <div className="config-item">
-            <label>
-              <strong>Current API Endpoint:</strong>
-            </label>
-            <code>{getApiEndpoint()}</code>
-          </div>
-          <div className="config-item">
-            <label>
-              <strong>Current Infer Endpoint:</strong>
-            </label>
-            <code>{getInferEndpoint()}</code>
-          </div>
-        </div>
-
-        <h3 style={{ marginTop: '1.5rem', marginBottom: '0.75rem' }}>Override Endpoints</h3>
-        <div className="form-group">
-          <label htmlFor="custom-api-endpoint">Custom API Endpoint:</label>
-          <input
-            id="custom-api-endpoint"
-            type="text"
-            value={customApiEndpoint}
-            onChange={(e) => setCustomApiEndpoint(e.target.value)}
-            placeholder="https://your-api-endpoint.com"
-          />
-          <button
-            type="button"
-            className="segment-button"
-            onClick={handleSetApiEndpoint}
-            disabled={!customApiEndpoint.trim()}
-            style={{ marginTop: '0.5rem' }}
-          >
-            Set API Endpoint
-          </button>
-        </div>
-
-        <div className="form-group" style={{ marginTop: '1rem' }}>
-          <label htmlFor="custom-infer-endpoint">Custom Infer Endpoint:</label>
-          <input
-            id="custom-infer-endpoint"
-            type="text"
-            value={customInferEndpoint}
-            onChange={(e) => setCustomInferEndpoint(e.target.value)}
-            placeholder="https://your-infer-endpoint.com"
-          />
-          <button
-            type="button"
-            className="segment-button"
-            onClick={handleSetInferEndpoint}
-            disabled={!customInferEndpoint.trim()}
-            style={{ marginTop: '0.5rem' }}
-          >
-            Set Infer Endpoint
-          </button>
-        </div>
-
-        <button
-          type="button"
-          className="stop-button"
-          onClick={handleResetEndpoints}
-          style={{ marginTop: '1rem' }}
-        >
-          Reset to Defaults
-        </button>
       </div>
 
       {results.length > 0 && (

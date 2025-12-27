@@ -18,9 +18,9 @@ function App() {
   const {
     imageBase64, imageUrl, prompt,
     llmConfig, sam3Config, useInfer,
-    response, loading, error,
+    response, loading, loadingStage, error,
     setImage, setPrompt, setLlmConfig, setSam3Config,
-    setUseInfer, setResponse, setLoading, setError
+    setUseInfer, setResponse, setLoading, setLoadingStage, setError
   } = useStore();
 
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -75,11 +75,15 @@ function App() {
     const signal = abortControllerRef.current.signal;
 
     setLoading(true);
+    setLoadingStage('starting');
     setError(null);
     setResponse(null);
 
     try {
       if (useInfer) {
+        // Stage 1: Text encoding (implicit in backend)
+        setLoadingStage('encoding_text');
+
         // Use pure SAM3 counting (no LLM)
         const countResponse = await countImage({
           prompt: prompt,
@@ -87,6 +91,9 @@ function App() {
           llm_config: llmConfig,
           ...sam3Config // Pass all config including pyramidal_config, include_obb, etc.
         }, signal);
+
+        // Stage 2: Finalizing
+        setLoadingStage('finalizing');
 
         // Check if request was cancelled
         if (signal.aborted) {
@@ -121,6 +128,9 @@ function App() {
           });
         }
       } else {
+        // Stage 1: Text encoding + Processing
+        setLoadingStage('encoding_text');
+
         // Use full agent with LLM
         const segmentResponse = await segmentImage({
           prompt,
@@ -129,6 +139,9 @@ function App() {
           debug: true,
           ...sam3Config // Pass full config
         }, signal);
+
+        // Stage 2: Finalizing
+        setLoadingStage('finalizing');
 
         // Check if request was cancelled
         if (signal.aborted) {
@@ -157,6 +170,7 @@ function App() {
       // Only reset loading if not cancelled
       if (!signal.aborted) {
         setLoading(false);
+        setLoadingStage(null);
         abortControllerRef.current = null;
       }
     }
@@ -307,7 +321,7 @@ function App() {
 
         <div className="right-panel">
           <div className="panel-section">
-            <ResultsPanel response={response} loading={loading} />
+            <ResultsPanel response={response} loading={loading} loadingStage={loadingStage || undefined} />
           </div>
 
           <div className="panel-section">

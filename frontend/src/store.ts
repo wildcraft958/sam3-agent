@@ -16,6 +16,7 @@ interface AppState {
   // Result State
   response: SegmentResponse | null;
   loading: boolean;
+  loadingStage: 'starting' | 'encoding_text' | 'encoding_images' | 'processing_tiles' | 'verification' | 'finalizing' | null;
   error: string | null;
 
   // Actions
@@ -26,6 +27,7 @@ interface AppState {
   setUseInfer: (useInfer: boolean) => void;
   setResponse: (response: SegmentResponse | null) => void;
   setLoading: (loading: boolean) => void;
+  setLoadingStage: (stage: 'starting' | 'encoding_text' | 'encoding_images' | 'processing_tiles' | 'verification' | 'finalizing' | null) => void;
   setError: (error: string | null) => void;
   resetState: () => void;
 }
@@ -63,6 +65,7 @@ export const useStore = create<AppState>((set) => ({
 
   response: null,
   loading: false,
+  loadingStage: null,
   error: null,
 
   // Actions
@@ -73,6 +76,7 @@ export const useStore = create<AppState>((set) => ({
   setUseInfer: (useInfer) => set({ useInfer }),
   setResponse: (response) => set({ response }),
   setLoading: (loading) => set({ loading }),
+  setLoadingStage: (stage) => set({ loadingStage: stage }),
   setError: (error) => set({ error }),
 
   resetState: () => set({

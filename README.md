@@ -469,43 +469,6 @@ curl -X POST http://localhost:8000/sam3/count \
 
 ---
 
-## Recent Updates (v2.0)
-
-### Backend Improvements
-✅ **Fixed Pyramidal Batching** (`pyramidal.py`):
-- Implemented true batch image encoding (16 tiles simultaneously)
-- Previously processed tiles sequentially (contradiction with technical report)
-- Now aligns with paper: "Process 16 tiles simultaneously on GPU"
-
-✅ **Feature Parity Verification**:
-- All features from legacy `modal_services/sam3_agent.py` are present
-- `pyramidal_config`, `include_obb`, `obb_as_polygon`, `max_retries` fully supported
-
-### Frontend Refactor
-✅ **Zustand State Management**:
-- Replaced local `useState` with global `useStore`
-- State persists across view changes
-- Cleaner code with centralized state logic
-
-✅ **Advanced Settings UI**:
-- Collapsible "Show Advanced Settings" section
-- Controls for batch size, scales, tile size, overlap
-- OBB toggles and max retries input
-- Matches all backend API capabilities
-
-✅ **Docker Compatibility**:
-- API Base URL configurable via `VITE_API_BASE_URL`
-- Defaults to `http://localhost:8000` for Docker
-- Seamless switch between local and Modal deployments
-
-### Cleanup
-✅ **Legacy Code**:
-- Preserved `modal_services/sam3_agent.py` (reference implementation)
-- Verified `sam3/sam` is required (used by `model_builder.py`)
-- Removed redundant dependencies
-
----
-
 ## Comparison with Standard Approaches
 
 | Feature | Standard SAM3 | This System |

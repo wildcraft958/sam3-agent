@@ -1,12 +1,15 @@
 import { useState } from 'react';
 import { SegmentResponse } from '../utils/api';
+import LoadingIndicator from './LoadingIndicator';
 
 interface ResultsPanelProps {
   response: SegmentResponse | null;
   loading: boolean;
+  loadingStage?: 'starting' | 'encoding_text' | 'encoding_images' | 'processing_tiles' | 'verification' | 'finalizing';
+  loadingProgress?: number;
 }
 
-export default function ResultsPanel({ response, loading }: ResultsPanelProps) {
+export default function ResultsPanel({ response, loading, loadingStage, loadingProgress }: ResultsPanelProps) {
   const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set(['summary']));
 
   const toggleSection = (section: string) => {
@@ -23,10 +26,7 @@ export default function ResultsPanel({ response, loading }: ResultsPanelProps) {
     return (
       <div className="results-panel">
         <h3>Results</h3>
-        <div className="loading-state">
-          <div className="spinner"></div>
-          <p>Processing image...</p>
-        </div>
+        <LoadingIndicator stage={loadingStage} progress={loadingProgress} />
       </div>
     );
   }
