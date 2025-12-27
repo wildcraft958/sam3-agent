@@ -1,13 +1,30 @@
 import axios from 'axios';
 
-// Modal deployment base URL - can be overridden via environment variable
-const MODAL_BASE_URL = import.meta.env.VITE_MODAL_BASE_URL || 'https://animerj958--sam3-agent-pyramidal-v2-fastapi-app.modal.run';
+// API Base URL - Prioritize VITE_API_BASE_URL, fallback to VITE_MODAL_BASE_URL, then default Modal URL
+// For Docker local dev, VITE_API_BASE_URL should be set to 'http://localhost:8000'
+const BASE_URL = import.meta.env.VITE_API_BASE_URL || import.meta.env.VITE_MODAL_BASE_URL || 'https://animerj958--sam3-agent-pyramidal-v2-fastapi-app.modal.run';
 
-// API endpoints - constructed from base URL
-const API_ENDPOINT = `${MODAL_BASE_URL}/sam3/segment`;
-const COUNT_ENDPOINT = `${MODAL_BASE_URL}/sam3/count`;
-const AREA_ENDPOINT = `${MODAL_BASE_URL}/sam3/area`;
-const HEALTH_ENDPOINT = `${MODAL_BASE_URL}/health`;
+// API endpoints
+const API_ENDPOINT = `${BASE_URL}/sam3/segment`;
+const COUNT_ENDPOINT = `${BASE_URL}/sam3/count`;
+const AREA_ENDPOINT = `${BASE_URL}/sam3/area`;
+const HEALTH_ENDPOINT = `${BASE_URL}/health`;
+
+export interface PyramidalConfig {
+  tile_size?: number;
+  overlap_ratio?: number;
+  scales?: number[];
+  batch_size?: number;
+  iou_threshold?: number;
+}
+
+export interface SAM3Config {
+  confidence_threshold: number;
+  max_retries?: number;
+  include_obb?: boolean;
+  obb_as_polygon?: boolean;
+  pyramidal_config?: PyramidalConfig;
+}
 
 export interface LLMConfig {
   base_url: string;
@@ -23,6 +40,9 @@ export interface SegmentRequest {
   llm_config: LLMConfig;
   debug?: boolean;
   confidence_threshold?: number;
+  pyramidal_config?: PyramidalConfig;
+  include_obb?: boolean;
+  obb_as_polygon?: boolean;
 }
 
 export interface CountRequest {
@@ -31,6 +51,9 @@ export interface CountRequest {
   llm_config: LLMConfig;
   confidence_threshold?: number;
   max_retries?: number;
+  pyramidal_config?: PyramidalConfig;
+  include_obb?: boolean;
+  obb_as_polygon?: boolean;
 }
 
 export interface Region {
@@ -154,7 +177,7 @@ export async function segmentImage(
       timeout: 600000, // 10 minutes timeout (matches Modal backend timeout)
       signal, // Add abort signal support
     });
-    
+
     const duration = Date.now() - startTime;
     console.log('[API] segmentImage request succeeded', {
       duration: `${duration}ms`,
@@ -173,14 +196,14 @@ export async function segmentImage(
     return response.data;
   } catch (error) {
     const duration = Date.now() - startTime;
-    
+
     if (axios.isAxiosError(error)) {
       // Check for CORS errors
-      const isCorsError = error.code === 'ERR_NETWORK' || 
-                         error.message.includes('CORS') ||
-                         error.message.includes('cross-origin') ||
-                         (!error.response && error.request);
-      
+      const isCorsError = error.code === 'ERR_NETWORK' ||
+        error.message.includes('CORS') ||
+        error.message.includes('cross-origin') ||
+        (!error.response && error.request);
+
       if (isCorsError) {
         console.error('[API] CORS error detected in segmentImage', {
           endpoint: endpoint,
@@ -202,7 +225,7 @@ export async function segmentImage(
           message: 'Request was cancelled by user',
         };
       }
-      
+
       // Handle timeout specifically
       if (error.code === 'ECONNABORTED' || error.message.includes('timeout')) {
         console.error('[API] segmentImage request timed out', {
@@ -277,7 +300,7 @@ export async function countImage(
       timeout: 600000, // 10 minutes timeout (matches Modal backend timeout)
       signal, // Add abort signal support
     });
-    
+
     const duration = Date.now() - startTime;
     console.log('[API] countImage request succeeded', {
       duration: `${duration}ms`,
@@ -296,14 +319,14 @@ export async function countImage(
     return response.data;
   } catch (error) {
     const duration = Date.now() - startTime;
-    
+
     if (axios.isAxiosError(error)) {
       // Check for CORS errors
-      const isCorsError = error.code === 'ERR_NETWORK' || 
-                         error.message.includes('CORS') ||
-                         error.message.includes('cross-origin') ||
-                         (!error.response && error.request);
-      
+      const isCorsError = error.code === 'ERR_NETWORK' ||
+        error.message.includes('CORS') ||
+        error.message.includes('cross-origin') ||
+        (!error.response && error.request);
+
       if (isCorsError) {
         console.error('[API] CORS error detected in countImage', {
           endpoint: endpoint,
@@ -325,7 +348,7 @@ export async function countImage(
           message: 'Request was cancelled by user',
         };
       }
-      
+
       // Handle timeout specifically
       if (error.code === 'ECONNABORTED' || error.message.includes('timeout')) {
         console.error('[API] countImage request timed out', {
@@ -451,19 +474,19 @@ export function imageToBase64(file: File): Promise<string> {
         canvas.width = img.width;
         canvas.height = img.height;
         const ctx = canvas.getContext('2d');
-        
+
         if (!ctx) {
           reject(new Error('Could not get canvas context'));
           return;
         }
-        
+
         // Fill with white background (in case of transparency)
         ctx.fillStyle = '#FFFFFF';
         ctx.fillRect(0, 0, canvas.width, canvas.height);
-        
+
         // Draw image (this will convert RGBA to RGB if needed)
         ctx.drawImage(img, 0, 0);
-        
+
         // Convert to base64 JPEG (always RGB, no alpha)
         const base64 = canvas.toDataURL('image/jpeg', 0.95).split(',')[1];
         resolve(base64);

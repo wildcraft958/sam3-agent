@@ -1,51 +1,33 @@
 import { useState, useEffect, useRef } from 'react';
 import ImageUpload from './components/ImageUpload';
 import LLMConfigForm from './components/LLMConfigForm';
-import SAM3ConfigForm, { SAM3Config } from './components/SAM3ConfigForm';
+import SAM3ConfigForm from './components/SAM3ConfigForm';
 import ImageVisualization from './components/ImageVisualization';
 import ResultsPanel from './components/ResultsPanel';
 import CommunicationLog from './components/CommunicationLog';
-import { segmentImage, countImage, LLMConfig, SegmentResponse } from './utils/api';
+import DiagnosticPage from './components/DiagnosticPage';
+import { segmentImage, countImage, SegmentResponse } from './utils/api';
+import { useStore } from './store';
 
 type ViewMode = 'main' | 'diagnostic';
 
 function App() {
   const [viewMode, setViewMode] = useState<ViewMode>('main');
-  const [imageBase64, setImageBase64] = useState<string | null>(null);
-  const [imageFile, setImageFile] = useState<File | null>(null);
-  const [imageUrl, setImageUrl] = useState<string | null>(null);
-  const [llmConfig, setLlmConfig] = useState<LLMConfig>({
-    base_url: 'https://srinjoy59--qwen3-vl-vllm-server-30b-vllm-server.modal.run/v1',
-    model: 'Qwen/Qwen3-VL-30B-A3B-Instruct',
-    api_key: '',
-    name: 'qwen3-vl-30b-modal',
-    max_tokens: 2048,
-  });
-  const [prompt, setPrompt] = useState<string>('segment all objects');
-  const [response, setResponse] = useState<SegmentResponse | null>(null);
-  const [loading, setLoading] = useState<boolean>(false);
-  const [error, setError] = useState<string | null>(null);
-  const [useInfer, setUseInfer] = useState<boolean>(false);
-  const [sam3Config, setSam3Config] = useState<SAM3Config>({
-    confidence_threshold: 0.4,
-  });
+
+  // Global State
+  const {
+    imageBase64, imageUrl, prompt,
+    llmConfig, sam3Config, useInfer,
+    response, loading, error,
+    setImage, setPrompt, setLlmConfig, setSam3Config,
+    setUseInfer, setResponse, setLoading, setError
+  } = useStore();
+
   const abortControllerRef = useRef<AbortController | null>(null);
 
   const handleImageSelect = (base64: string, file: File) => {
-    setImageBase64(base64);
-    setImageFile(file);
     const url = URL.createObjectURL(file);
-    setImageUrl(url);
-    setResponse(null);
-    setError(null);
-  };
-
-  const handleConfigChange = (config: LLMConfig) => {
-    setLlmConfig(config);
-  };
-
-  const handleSAM3ConfigChange = (config: SAM3Config) => {
-    setSam3Config(config);
+    setImage(base64, file, url);
   };
 
   const handleStop = () => {
@@ -103,7 +85,7 @@ function App() {
           prompt: prompt,
           image_url: `data:image/jpeg;base64,${imageBase64}`,
           llm_config: llmConfig,
-          confidence_threshold: sam3Config.confidence_threshold,
+          ...sam3Config // Pass all config including pyramidal_config, include_obb, etc.
         }, signal);
 
         // Check if request was cancelled
@@ -131,9 +113,11 @@ function App() {
           };
           setResponse(segmentResponse);
         } else {
+          const errMsg = countResponse.message || 'Counting failed';
+          setError(errMsg);
           setResponse({
             status: 'error',
-            message: countResponse.message || 'Counting failed',
+            message: errMsg,
           });
         }
       } else {
@@ -143,7 +127,7 @@ function App() {
           image_url: `data:image/jpeg;base64,${imageBase64}`,
           llm_config: llmConfig,
           debug: true,
-          confidence_threshold: sam3Config.confidence_threshold,
+          ...sam3Config // Pass full config
         }, signal);
 
         // Check if request was cancelled
@@ -258,7 +242,7 @@ function App() {
           {!useInfer && (
             <div className="panel-section">
               <LLMConfigForm
-                onConfigChange={handleConfigChange}
+                onConfigChange={setLlmConfig}
                 initialConfig={llmConfig}
               />
             </div>
@@ -266,7 +250,7 @@ function App() {
 
           <div className="panel-section">
             <SAM3ConfigForm
-              onConfigChange={handleSAM3ConfigChange}
+              onConfigChange={setSam3Config}
               initialConfig={sam3Config}
             />
           </div>
