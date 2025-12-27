@@ -68,102 +68,110 @@ export default function SAM3ConfigForm({ onConfigChange, initialConfig }: SAM3Co
       </div>
 
       <div className="form-group checkbox-group">
-        <label>
-          <input
-            type="checkbox"
-            checked={showAdvanced}
-            onChange={(e) => setShowAdvanced(e.target.checked)}
-          />
-          Show Advanced Settings
-        </label>
+        <input
+          type="checkbox"
+          id="show-advanced"
+          checked={showAdvanced}
+          onChange={(e) => setShowAdvanced(e.target.checked)}
+        />
+        <label htmlFor="show-advanced">Show Advanced Settings</label>
       </div>
 
       {showAdvanced && (
-        <div className="advanced-settings">
-          <h4>Pyramidal Inference (Batching)</h4>
-          <div className="form-row">
-            <div className="form-group half">
-              <label>Batch Size</label>
-              <input
-                type="number"
-                value={config.pyramidal_config?.batch_size}
-                onChange={(e) => handlePyramidalChange('batch_size', parseInt(e.target.value) || 16)}
-              />
+        <div className="advanced-settings-panel">
+          <div className="settings-group">
+            <h4>Pyramidal Inference (Batching)</h4>
+            <div className="form-row">
+              <div className="form-group">
+                <label htmlFor="batch_size">Batch Size</label>
+                <input
+                  id="batch_size"
+                  type="number"
+                  min="1"
+                  max="64"
+                  value={config.pyramidal_config?.batch_size}
+                  onChange={(e) => handlePyramidalChange('batch_size', parseInt(e.target.value))}
+                />
+              </div>
+              <div className="form-group">
+                <label htmlFor="scales">Scales (csv)</label>
+                <input
+                  id="scales"
+                  type="text"
+                  value={scalesStr}
+                  onChange={(e) => handleScalesChange(e.target.value)}
+                  placeholder="1.0, 0.5"
+                />
+              </div>
             </div>
-            <div className="form-group half">
-              <label>Scales (comma sep)</label>
-              <input
-                type="text"
-                value={scalesStr}
-                onChange={(e) => handleScalesChange(e.target.value)}
-                placeholder="1.0, 0.5"
-              />
+
+            <div className="form-row">
+              <div className="form-group">
+                <label htmlFor="tile_size">Tile Size</label>
+                <input
+                  id="tile_size"
+                  type="number"
+                  step="256"
+                  value={config.pyramidal_config?.tile_size}
+                  onChange={(e) => handlePyramidalChange('tile_size', parseInt(e.target.value))}
+                />
+              </div>
+              <div className="form-group">
+                <label htmlFor="overlap">Overlap</label>
+                <input
+                  id="overlap"
+                  type="number"
+                  step="0.05"
+                  min="0"
+                  max="0.5"
+                  value={config.pyramidal_config?.overlap_ratio}
+                  onChange={(e) => handlePyramidalChange('overlap_ratio', parseFloat(e.target.value))}
+                />
+              </div>
             </div>
           </div>
 
-          <div className="form-row">
-            <div className="form-group half">
-              <label>Tile Size (px)</label>
-              <input
-                type="number"
-                value={config.pyramidal_config?.tile_size}
-                onChange={(e) => handlePyramidalChange('tile_size', parseInt(e.target.value) || 512)}
-              />
+          <div className="settings-group">
+            <h4>Agent Options</h4>
+            <div className="form-row">
+              <div className="form-group">
+                <label htmlFor="max_retries">Max Retries</label>
+                <input
+                  id="max_retries"
+                  type="number"
+                  min="0"
+                  max="5"
+                  value={config.max_retries}
+                  onChange={(e) => handleChange('max_retries', parseInt(e.target.value))}
+                />
+              </div>
             </div>
-            <div className="form-group half">
-              <label>Overlap Ratio</label>
-              <input
-                type="number"
-                step="0.05"
-                min="0"
-                max="1"
-                value={config.pyramidal_config?.overlap_ratio}
-                onChange={(e) => handlePyramidalChange('overlap_ratio', parseFloat(e.target.value) || 0.15)}
-              />
-            </div>
-          </div>
-
-          <h4>Agent Options</h4>
-          <div className="form-group">
-            <label>Max Retries (Verification)</label>
-            <input
-              type="number"
-              min="0"
-              max="5"
-              value={config.max_retries}
-              onChange={(e) => handleChange('max_retries', parseInt(e.target.value))}
-            />
-          </div>
-
-          <div className="form-group checkbox-group">
-            <label>
-              <input
-                type="checkbox"
-                checked={config.include_obb}
-                onChange={(e) => handleChange('include_obb', e.target.checked)}
-              />
-              Include OBB (Oriented Bounding Boxes)
-            </label>
-          </div>
-
-          {config.include_obb && (
-            <div className="form-group checkbox-group indent">
-              <label>
+            <div className="checkbox-row">
+              <div className="form-group checkbox-group">
                 <input
                   type="checkbox"
+                  id="include_obb"
+                  checked={config.include_obb}
+                  onChange={(e) => handleChange('include_obb', e.target.checked)}
+                />
+                <label htmlFor="include_obb">Include OBB</label>
+              </div>
+              <div className="form-group checkbox-group">
+                <input
+                  type="checkbox"
+                  id="obb_as_polygon"
                   checked={config.obb_as_polygon}
                   onChange={(e) => handleChange('obb_as_polygon', e.target.checked)}
                 />
-                OBB as Polygon (Default: [cx, cy, w, h, angle])
-              </label>
+                <label htmlFor="obb_as_polygon">OBB as Polygon</label>
+              </div>
             </div>
-          )}
+          </div>
         </div>
       )}
 
       <style>{`
         .form-row { display: flex; gap: 10px; }
-        .half { flex: 1; }
         .checkbox-group label { display: flex; align-items: center; gap: 8px; cursor: pointer; }
         .advanced-settings { border-top: 1px solid #333; margin-top: 10px; padding-top: 10px; }
         .indent { margin-left: 20px; }

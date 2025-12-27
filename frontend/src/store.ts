@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { LLMConfig, SegmentResponse, SAM3Config, PyramidalConfig } from './utils/api';
+import { LLMConfig, SegmentResponse, SAM3Config } from './utils/api';
 
 interface AppState {
   // Input State

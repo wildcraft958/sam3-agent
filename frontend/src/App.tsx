@@ -180,21 +180,19 @@ function App() {
     return (
       <div className="app">
         <header className="app-header">
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <div>
-              <h1>SAM3 Agent Diagnostics</h1>
-              <p>Diagnostic tools and system configuration</p>
-            </div>
+          <div className="header-left">
+            <h1>SAM3 Agent <span className="gradient-text">Diagnostics</span></h1>
             <button
-              className="segment-button"
+              className="toggle-diagnostic active"
               onClick={() => setViewMode('main')}
-              style={{ marginTop: 0 }}
             >
-              Back to Main
+              Back to App
             </button>
           </div>
         </header>
-        <DiagnosticPage />
+        <div className="diagnostic-view">
+          <DiagnosticPage />
+        </div>
       </div>
     );
   }
@@ -202,115 +200,100 @@ function App() {
   return (
     <div className="app">
       <header className="app-header">
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <div>
-            <h1>SAM3 Agent Visualization</h1>
-            <p>Upload an image and visualize segmentation results with masks and bounding boxes</p>
-          </div>
+        <div className="header-left">
+          <h1>SAM3 Agent <span className="gradient-text">v2.0</span></h1>
           <button
-            className="segment-button"
+            className="toggle-diagnostic"
             onClick={() => setViewMode('diagnostic')}
-            style={{ marginTop: 0 }}
           >
-            Diagnostics
+            Show Diagnostics
           </button>
+        </div>
+        <div className="header-right">
+          <p>Advanced Segmentation Service</p>
         </div>
       </header>
 
       <div className="app-container">
         <div className="left-panel">
-          <div className="panel-section">
-            <h2>Image Upload</h2>
-            <ImageUpload
-              onImageSelect={handleImageSelect}
-              currentImage={imageUrl || undefined}
-            />
-          </div>
-
-          <div className="panel-section">
-            <h2>Prompt</h2>
-            <div className="form-group">
-              <textarea
-                value={prompt}
-                onChange={(e) => setPrompt(e.target.value)}
-                placeholder="Enter segmentation prompt (e.g., 'segment all objects')"
-                rows={3}
+          <div className="panel-section-group">
+            <div className="panel-section">
+              <h2><span className="icon">📁</span> Image</h2>
+              <ImageUpload
+                onImageSelect={handleImageSelect}
+                currentImage={imageUrl || undefined}
               />
             </div>
-          </div>
 
-          <div className="panel-section">
-            <div className="mode-toggle">
-              <label>
+            <div className="panel-section">
+              <h2><span className="icon">🤖</span> AI Model</h2>
+              <LLMConfigForm onConfigChange={setLlmConfig} initialConfig={llmConfig} />
+            </div>
+
+            <div className="panel-section">
+              <h2><span className="icon">⚙️</span> Config</h2>
+              <div className="form-group">
+                <label htmlFor="prompt">Recognition Prompt</label>
+                <textarea
+                  id="prompt"
+                  rows={2}
+                  value={prompt}
+                  onChange={(e) => setPrompt(e.target.value)}
+                  placeholder="e.g., all small white houses"
+                />
+              </div>
+
+              <SAM3ConfigForm onConfigChange={setSam3Config} initialConfig={sam3Config} />
+
+              <div className="mode-toggle checkbox-group">
                 <input
                   type="checkbox"
+                  id="use-pure-sam3"
                   checked={useInfer}
                   onChange={(e) => setUseInfer(e.target.checked)}
                 />
-                Use Pure SAM3 Counting (No LLM)
-              </label>
-              <p className="hint">Check to use SAM3 counting only (faster, no LLM costs)</p>
-            </div>
-          </div>
+                <label htmlFor="use-pure-sam3">Fast Count Mode (Pure SAM3)</label>
+              </div>
 
-          {!useInfer && (
-            <div className="panel-section">
-              <LLMConfigForm
-                onConfigChange={setLlmConfig}
-                initialConfig={llmConfig}
-              />
-            </div>
-          )}
-
-          <div className="panel-section">
-            <SAM3ConfigForm
-              onConfigChange={setSam3Config}
-              initialConfig={sam3Config}
-            />
-          </div>
-
-          <div className="panel-section">
-            <div className="button-group">
-              <button
-                className="segment-button"
-                onClick={handleSegment}
-                disabled={loading || !imageBase64}
-              >
-                {loading ? 'Processing...' : 'Run Segmentation'}
-              </button>
-              {loading && (
+              <div className="button-group">
                 <button
-                  className="stop-button"
-                  onClick={handleStop}
+                  className="segment-button"
+                  onClick={handleSegment}
+                  disabled={loading || !imageBase64}
                 >
-                  Stop
+                  {loading ? 'Processing...' : 'Run Segmentation'}
                 </button>
+                {loading && (
+                  <button className="stop-button" onClick={handleStop}>
+                    Stop
+                  </button>
+                )}
+              </div>
+
+              {(error || response?.status === 'error') && (
+                <div className="error-message">
+                  <strong>Error</strong>
+                  <div className="error-details">
+                    {error && <div className="error-text">{error}</div>}
+                    {response?.status === 'error' && response?.message && (
+                      <div className="error-text">{response.message}</div>
+                    )}
+                    {response?.traceback && (
+                      <details className="error-traceback">
+                        <summary>Technical Details</summary>
+                        <pre>{response.traceback}</pre>
+                      </details>
+                    )}
+                  </div>
+                </div>
               )}
             </div>
           </div>
-
-          {(error || response?.status === 'error') && (
-            <div className="error-message">
-              <strong>Error:</strong>
-              <div className="error-details">
-                {error && <div className="error-text">{error}</div>}
-                {response?.status === 'error' && response?.message && (
-                  <div className="error-text">{response.message}</div>
-                )}
-                {response?.traceback && (
-                  <details className="error-traceback">
-                    <summary>Technical Details</summary>
-                    <pre>{response.traceback}</pre>
-                  </details>
-                )}
-              </div>
-            </div>
-          )}
         </div>
 
         <div className="center-panel">
-          <div className="panel-section">
-            <h2>Visualization</h2>
+          <div className="panel-section visualization-panel">
+            <h2><span className="icon">👁️</span> Visualization</h2>
             <ImageVisualization
               imageUrl={imageUrl}
               regions={response?.regions}
@@ -321,10 +304,12 @@ function App() {
 
         <div className="right-panel">
           <div className="panel-section">
+            <h2><span className="icon">📊</span> Results</h2>
             <ResultsPanel response={response} loading={loading} loadingStage={loadingStage || undefined} />
           </div>
 
           <div className="panel-section">
+            <h2><span className="icon">📜</span> Internal Data</h2>
             <CommunicationLog response={response} />
           </div>
         </div>
