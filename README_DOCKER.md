@@ -21,7 +21,7 @@ sam3/
     main.py          # Entrypoint
   Dockerfile         # Container definition
   docker-compose.yml # Orchestration config
-  requirements.txt   # Python dependencies
+  pyproject.toml     # Python dependencies and project configuration
 ```
 
 ## Quick Start (Docker Compose)

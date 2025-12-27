@@ -77,6 +77,21 @@ train = [
     "scikit-image",
     "scikit-learn",
 ]
+webapp = [
+    "fastapi>=0.100.0",
+    "uvicorn>=0.20.0",
+    "pydantic>=2.0.0",
+    "httpx>=0.24.0",
+    "Pillow>=9.0.0",
+    "torch>=2.0.0",
+    "torchvision>=0.15.0",
+    "scikit-image>=0.19.0",
+    "scipy>=1.10.0",
+    "opencv-python-headless>=4.8.0",
+    "pycocotools>=2.0.0",
+    "transformers>=4.30.0",
+    "shapely>=2.0.0",
+]
 
 [project.urls]
 "Homepage" = "https://github.com/facebookresearch/sam3"
