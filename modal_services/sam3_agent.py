@@ -14,10 +14,10 @@
 #     "prompt": "segment all ships",
 #     "image_url": "https://example.com/image.jpg",   # or "image_b64": "..."
 #     "llm_config": {                                 # Required: complete LLM config
-#       "base_url": "https://api.openai.com/v1",      # Any OpenAI-compatible API
-#       "model": "gpt-4o",                            # Any model name
-#       "api_key": "sk-...",                          # API key (can be empty for some backends)
-#       "name": "openai-gpt4o",                       # Optional: for output files
+#       "base_url": "https://api.example.com/v1",    # Any OpenAI-compatible API
+#       "model": "Qwen/Qwen3-VL-30B-A3B-Instruct",   # Any model name
+#       "api_key": "",                                # API key (can be empty for some backends)
+#       "name": "qwen3-vl",                           # Optional: for output files
 #       "max_tokens": 4096                            # Optional: default 4096
 #     },
 #     "debug": true                                   # Optional: get visualization
@@ -34,7 +34,7 @@
 #   }
 #
 # Supports any OpenAI-compatible LLM provider:
-#   - OpenAI (GPT-4o, GPT-4, etc.)
+#   - Qwen3-VL (via vLLM)
 #   - Anthropic (Claude)
 #   - vLLM servers
 #   - Custom OpenAI-compatible APIs
@@ -463,7 +463,7 @@ class ChatCompletionRequest(BaseModel):
         extra="allow",  # Allow additional fields for provider compatibility
         json_schema_extra={
             "example": {
-                "model": "gpt-4o",
+                "model": "Qwen/Qwen3-VL-30B-A3B-Instruct",
                 "messages": [
                     {"role": "system", "content": "You are a helpful assistant."},
                     {"role": "user", "content": "What is the capital of France?"}
@@ -601,7 +601,7 @@ class ChatCompletionResponse(BaseModel):
             "id": "chatcmpl-abc123",
             "object": "chat.completion",
             "created": 1677652288,
-            "model": "gpt-4o",
+            "model": "Qwen/Qwen3-VL-30B-A3B-Instruct",
             "choices": [
                 {
                     "index": 0,
@@ -640,7 +640,7 @@ class ChatCompletionChunk(BaseModel):
             "id": "chatcmpl-abc123",
             "object": "chat.completion.chunk",
             "created": 1677652288,
-            "model": "gpt-4o",
+            "model": "Qwen/Qwen3-VL-30B-A3B-Instruct",
             "choices": [
                 {
                     "index": 0,
@@ -3724,11 +3724,16 @@ Set `debug=true` to receive a visualization image in the response.
             # Get image bytes
             image_bytes = get_image_bytes(request.image_url)
             
-             # Convert Pydantic models to dicts
-            llm_config_dict = request.llm_config.model_dump()
+            # Convert Pydantic models to dicts
+              # Convert Pydantic models to dicts
+            llm_config_dict = {
+                "base_url": "https://api.openai.com/v1",  # or your vLLM endpoint
+                "model": "gpt-4o",
+                "api_key": "",
+            }
             pyramidal_config_dict = request.pyramidal_config.model_dump() if request.pyramidal_config else None
             
-            print(f"📞 Calling sam3_segment with prompt: '{request.prompt}'")
+            print(f"📞 Calling sam3_segment with Qwen3-VL and prompt: '{request.prompt}'")
             result = SAM3Model().infer.remote(
                 image_bytes=image_bytes,
                 prompt=request.prompt,
@@ -3777,10 +3782,10 @@ def local_test():
 
     prompt = "find the red region"
     llm_config = {
-        "base_url": "https://api.openai.com/v1",
-        "model": "gpt-4o",
-        "api_key": os.environ.get("OPENAI_API_KEY", ""),
-        "name": "openai-gpt4o",
+        "base_url": "https://rockstar4119--qwen3-vl-vllm-server-30b-vllm-server.modal.run/v1",
+        "model": "Qwen/Qwen3-VL-30B-A3B-Instruct",
+        "api_key": "",
+        "name": "qwen3-vl",
     }
     model = SAM3Model()
     result = model.infer.remote(
