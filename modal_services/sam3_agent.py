@@ -3725,12 +3725,7 @@ Set `debug=true` to receive a visualization image in the response.
             image_bytes = get_image_bytes(request.image_url)
             
             # Convert Pydantic models to dicts
-              # Convert Pydantic models to dicts
-            llm_config_dict = {
-                "base_url": "https://api.openai.com/v1",  # or your vLLM endpoint
-                "model": "gpt-4o",
-                "api_key": "",
-            }
+            llm_config_dict = request.llm_config.model_dump()
             pyramidal_config_dict = request.pyramidal_config.model_dump() if request.pyramidal_config else None
             
             print(f"📞 Calling sam3_segment with Qwen3-VL and prompt: '{request.prompt}'")
